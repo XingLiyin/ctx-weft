@@ -40,7 +40,6 @@ async def _session_state_summary(store, view, session, head: int) -> SessionStat
             and root.status != "terminated"):
         task = await read_startup_task(store, session.id, task_id, through_position=head)
     return SessionStateSummary(
-        session_status=session.status,
         root_agent_id=root.id if root else session.root_agent_id or "",
         root_agent_status=root.status if root else None,
         root_task_id=task_id or "",

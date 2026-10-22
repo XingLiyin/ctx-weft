@@ -69,13 +69,13 @@ async def test_inject_user_reply_reply_visible_to_agent_recall(monkeypatch):
     recall_recent_by_agent (the actor's history path), which filters by scope.agent_id."""
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     from ctx_weft.core import CtxWeftRuntime
-    
+
 
     runtime = make_runtime(agent_provider=InlineAgentTemplateProvider())
     mem = InMemoryMemoryProvider()
     runtime.providers.register_memory(mem)
 
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     task = Task(id="t1", session_id="s1", status="SUSPENDED",
                 assigned_agent_id="ag_root", creator_agent_id="ag_root")
     async def _mark_human_resolved(tid, *, hitl_id):

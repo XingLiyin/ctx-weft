@@ -63,7 +63,7 @@ class _Retriable(Exception):
 def _tm(bus: _CapturingBus) -> tuple[TaskManager, Session, Task]:
     tm = TaskManager(session_id="s1", event_bus=bus)
     tm._max_concurrent = 0  # drain 空转：不真正派发
-    session = Session(id="s1", user_prompt="", status="RUNNING")
+    session = Session(id="s1", user_prompt="")
     tm.set_session(session)
     tm.set_runner(StubRunner(tm))
     t = Task(id="A", session_id="s1", status="ACTIVE")
@@ -106,7 +106,7 @@ async def test_non_retriable_crash_suspends_not_fails() -> None:
     assert interrupted[0].payload["error_message"] == "401 unauthorized"
     assert t.status == "INTERRUPTED"
     assert t.error == "401 unauthorized"
-    assert session.status == "RUNNING"   # 会话状态不再由 TM 改写（归 SessionRegistry）
+    assert not hasattr(session, "status")   # 会话状态不再由 TM 改写（归 SessionRegistry）
 
 
 async def test_retry_exhausted_suspends_not_fails() -> None:
@@ -187,7 +187,7 @@ async def test_crash_suspended_task_blocks_session_finish() -> None:
     # 与旧断言的 `>= 1` 同一口径——多调无害是 idle/done 分支本身的既有语义）。
     assert idle_calls, "挂起任务未清，应走 idle 收尾"
     assert done_calls == [], "仍有挂起任务时不得报「跑完了」"
-    assert session.status == "RUNNING"  # 会话状态归 SessionRegistry，TM 不写；idle 收尾也不改它
+    assert not hasattr(session, "status")  # 会话状态归 SessionRegistry，TM 不写；idle 收尾也不改它
 
 
 def test_restore_requeues_crash_suspended_with_fresh_retries() -> None:

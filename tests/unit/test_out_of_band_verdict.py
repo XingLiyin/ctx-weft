@@ -30,7 +30,7 @@ class _CapturingBus:
 def _tm() -> tuple[TaskManager, _CapturingBus]:
     bus = _CapturingBus()
     tm = TaskManager(session_id="s1", event_bus=bus)
-    tm.set_session(Session(id="s1", user_prompt="", status="RUNNING", root_agent_id="root"))
+    tm.set_session(Session(id="s1", user_prompt="",  root_agent_id="root"))
     # `_settle` 末尾恒调 `drain()`：给一个哑 runner 过掉「未注册」守卫，再把并发置 0
     # 让 drain 空转——本文件测的是仲裁与状态转移，不是派发。
     tm.set_runner(object())

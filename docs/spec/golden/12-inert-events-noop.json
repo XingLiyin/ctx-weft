@@ -27,7 +27,7 @@
       "type": "TokenBudgetExceeded", "timestamp": "2026-06-05T00:00:10Z", "payload": { "used": 201000, "limit": 200000 } }
   ],
   "expected": {
-    "sessionStatus": "RUNNING",
+
     "tasks": { "tsk_1": { "status": "ACTIVE" } }
   }
 }

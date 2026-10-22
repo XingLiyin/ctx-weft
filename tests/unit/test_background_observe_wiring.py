@@ -70,7 +70,7 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
     mem = InMemoryMemoryProvider()
     scope = MemoryAddress(session_id="s1", task_id=task.id, agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id=task.id, agent_id="ag1")
-    session = Session(id="s1", tenant_id="default", user_prompt="hello", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hello")
 
     agent = SimpleNamespace(
         id="ag1",
@@ -247,7 +247,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
     mem = InMemoryMemoryProvider()
     hitl, _hitl_reg = make_hitl(bus)
 
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     task = _make_root_task(status="ACTIVE")
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
@@ -302,7 +302,7 @@ async def test_act_soft_interrupt_child_task_schedules_recap(monkeypatch):
     mem = InMemoryMemoryProvider()
     hitl, _hitl_reg = make_hitl(bus)
 
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     child = _make_child_task(status="ACTIVE")
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t2", agent_id="ag1")
@@ -352,7 +352,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
     mem = InMemoryMemoryProvider()
     hitl, _hitl_reg = make_hitl(bus)
 
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     task = dataclasses.replace(_make_root_task(status="ACTIVE"))
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
@@ -399,7 +399,7 @@ async def test_act_plain_text_pause_child_task_fires(monkeypatch):
     mem = InMemoryMemoryProvider()
     hitl, _hitl_reg = make_hitl(bus)
 
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     child = dataclasses.replace(_make_child_task(status="ACTIVE"), unattended=False)
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t2", agent_id="ag1")
@@ -428,7 +428,7 @@ def _make_suspend_state_ctx(task: Task):
     mem = InMemoryMemoryProvider()
     scope = MemoryAddress(session_id="s1", task_id=task.id, agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id=task.id, agent_id="ag1")
-    session = Session(id="s1", tenant_id="default", user_prompt="hello", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hello")
     agent = SimpleNamespace(id="ag1")
 
     state = LoopState(

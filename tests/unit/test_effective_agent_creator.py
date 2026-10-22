@@ -17,7 +17,7 @@ ROOT = "root_agt"
 def _tm() -> TaskManager:
     tm = TaskManager(session_id="s1", max_concurrent=1)
     tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x",
-                           status="RUNNING", token_budget=0, root_agent_id=ROOT))
+                            token_budget=0, root_agent_id=ROOT))
     return tm
 
 

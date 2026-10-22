@@ -32,7 +32,7 @@ class _CapturingBus:
 
 
 def _session(root_agent_id: str) -> Session:
-    return Session(id="s1", user_prompt="", status="RUNNING", root_agent_id=root_agent_id)
+    return Session(id="s1", user_prompt="",  root_agent_id=root_agent_id)
 
 
 def _task(tid: str, parent: str | None = None) -> Task:
@@ -294,7 +294,7 @@ async def test_resume_parent_emits_before_dispatch_and_replay_lands_active() -> 
 
     bus = _CapturingBus()
     tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
-    session = Session(id="s1", user_prompt="", status="RUNNING", root_agent_id="agr")
+    session = Session(id="s1", user_prompt="",  root_agent_id="agr")
     tm.set_session(session)
 
     parent = Task(id="P", session_id="s1", status="SUSPENDED", assigned_agent_id="agr")

@@ -36,7 +36,7 @@ def _fields(*keys):
 _TASK_FIELDS = _fields("id", "status", "session_id", "assigned_agent_id", "creator_agent_id",
                        "parent_task_id", "dag_deps", "finalized")
 _TASK_FIELDS += (("settings", "use_subagent"), ("settings_raw", "use_subagent"))
-_SESSION_FIELDS = _fields("id", "status", "root_agent_id", "tenant_id", "failure_counter",
+_SESSION_FIELDS = _fields("id", "root_agent_id", "tenant_id", "failure_counter",
                           "threshold_tripped", "threshold_root_task_ids", "threshold_cancel_task_ids")
 _AGENT_FIELDS = _fields("id", "status", "status_reason", "current_task_id", "template_id",
                         "parent_agent_id", "spawn_depth")
@@ -46,8 +46,6 @@ _HITL_FIELDS = _fields("id", "hitl_id", "form", "session_id", "task_id", "agent_
 _PAYLOAD_FIELDS = {
     EventType.SESSION_CREATED: _fields("root_agent_id", "tenant_id"),
     EventType.FAILURE_THRESHOLD_HIT: _fields("root_task_ids", "cancel_task_ids"),
-    EventType.SESSION_STATUS_CHANGED: _fields("new_status"),
-    EventType.SESSION_FINISHED: _fields("final_status"),
     EventType.AGENT_INSTANTIATED: _fields("template_id", "llm_account", "llm_model"),
     EventType.TASK_CREATED: tuple(("task", *path) for path in _TASK_FIELDS),
     EventType.TASK_REVIEWING: (
@@ -66,7 +64,7 @@ _PAYLOAD_FIELDS = {
         EventType.HITL_CANCELLED)},
 }
 
-_BLOB_PATHS = _fields("run_id", "session_id", "task_id", "agent_id", "session_status",
+_BLOB_PATHS = _fields("run_id", "session_id", "task_id", "agent_id",
                       "task_status", "events_total", "tasks_total", "open_runs")
 _BLOB_PATHS += tuple(("sessions", "*", *path) for path in _SESSION_FIELDS)
 _BLOB_PATHS += tuple(("tasks", "*", *path) for path in _TASK_FIELDS)

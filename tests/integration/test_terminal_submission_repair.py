@@ -284,7 +284,7 @@ async def test_pause_batch_process_crash_preserves_entire_selection(tmp_path, cu
             else:
                 assert all(tm.get_task(t.id).status == "CANCELED" and tm.get_task(t.id).finalized for t in queued)
                 assert not {t.id for t in queued} & {e.task_id for e in tm._queue.peek_all()}
-                assert tm.session.status != "CANCELED"
+                assert not hasattr(tm.session, "status")
             assert all(t.status != "CANCELED" for t in tm.all_tasks() if t.id not in {q.id for q in queued})
             assert not any(r.event.type == "AgentTerminated" for r in await store.read_range(SID))
             await wait_until(lambda: not tm._dispatch_tasks and not tm._background_asyncio_tasks)

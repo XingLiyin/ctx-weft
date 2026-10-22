@@ -88,7 +88,7 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
     hitl_service, hitl = make_hitl(bus)
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING", token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="hi",  token_budget=0)
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",
         title="Greet", description="say hi politely",

@@ -131,7 +131,7 @@ def _tm_with_hooks():
     from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
     from ctx_weft.core.orchestrator.task.manager import TaskManager
 
-    session = Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING", token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="x",  token_budget=0)
     tm = TaskManager(session_id="s1", max_concurrent=1)
     tm.set_session(session)
 
@@ -173,7 +173,7 @@ async def test_session_not_finished_while_a_task_parked_on_hitl() -> None:
 
     assert idle_calls == [1], "仍有等人的任务时应走 idle 收尾"
     assert done_calls == [], "仍有等人的任务时不得报「跑完了」"
-    assert session.status == "RUNNING", "会话未终结，状态不应被改写"
+    assert not hasattr(session, "status"), "会话未终结，状态不应被改写"
 
 
 async def test_session_finishes_when_no_pending_hitl() -> None:
@@ -187,7 +187,7 @@ async def test_session_finishes_when_no_pending_hitl() -> None:
 
     assert done_calls == [1]
     assert idle_calls == []
-    assert session.status == "SUCCEEDED"
+    assert not hasattr(session, "status")
 
 
 async def test_recover_emits_paused_hitl_for_pending_session() -> None:
@@ -356,7 +356,7 @@ async def test_recover_does_not_redispatch_task_running_in_live_tm() -> None:
     # 活 owner：经 runtime 真实 wiring 登记，正在跑 X
     old_tm = TaskManager(session_id="ses_1", event_bus=runtime.event_bus, max_concurrent=1)
     old_tm.set_session(Session(id="ses_1", tenant_id="default", user_prompt="do it",
-                               status="RUNNING", root_agent_id="agt_root", token_budget=0))
+                                root_agent_id="agt_root", token_budget=0))
     old_tm.set_runner(StubRunner(old_tm, session_id="ses_1"))
     old_tm.register_task(Task(id="tsk_X", session_id="ses_1", status="ACTIVE",
                               assigned_agent_id="agt_root", creator_agent_id="agt_root",
@@ -428,7 +428,7 @@ async def test_cold_answer_reuses_live_owner_instead_of_rebuilding(monkeypatch) 
 
     monkeypatch.setattr(_reducers, "rebuild_view", _spy)
 
-    session = Session(id="ses_1", tenant_id="default", user_prompt="x", status="RUNNING",
+    session = Session(id="ses_1", tenant_id="default", user_prompt="x",
                       root_agent_id="agt", llm_provider="acct1", llm_model="m1", token_budget=0)
     # `recover_agent` 的主键是 agent_id，session_id 由 ALM 记录反查——这个测试从不
     # 经事件回放建 agent 记录（直接手搭 Session/TaskManager），故种一条最小记录，

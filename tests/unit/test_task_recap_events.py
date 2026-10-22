@@ -32,4 +32,4 @@ def test_task_recap_events_are_reducer_noops():
     ]
     view = reduce_events(events, run_id="ses1")
     # session 仍是 RUNNING（recap 事件不改会话/任务状态）
-    assert view.sessions["ses1"].status == "RUNNING"
+    assert not hasattr(view.sessions['ses1'], "status")

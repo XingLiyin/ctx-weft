@@ -54,5 +54,5 @@ def test_llm_changed_does_not_touch_task_or_session_state():
         _ev(EventType.AGENT_LLM_CHANGED, "agt_a",
             {"llm_account": "a", "llm_model": "m", "reason": "user_selected"}),
     ], "run_1")
-    assert view.session_status == "RUNNING"   # 未被这条事件改动
+    assert not hasattr(view, "session_status")   # 未被这条事件改动
     assert view.tasks == {}

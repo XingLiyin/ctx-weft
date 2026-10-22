@@ -69,7 +69,7 @@ async def test_root_task_carries_full_content_session_carries_summary():
         event_bus=SimpleNamespace(emit=AsyncMock()),
     )
     session = Session(
-        id="s1", user_prompt=content_to_text(_content()), status="RUNNING",
+        id="s1", user_prompt=content_to_text(_content()),
         tenant_id="default", root_agent_id="a1", created_at=now_utc(),
     )
     # event 侧载荷由调用方（入口）从原始 content 算好后传入（blob-store 解耦 Task 3）：
@@ -222,7 +222,7 @@ async def test_resume_session_without_jsonable_falls_back_to_the_text_prompt():
 
     await sm.resume_session(
         session_id="ses-resume", event_store=store, user_prompt="第二轮",
-        task_manager=sm._new_task_manager(Session(id="ses-resume", user_prompt="", status="RUNNING")),
+        task_manager=sm._new_task_manager(Session(id="ses-resume", user_prompt="")),
     )
 
     resumed = next(e for e in bus.events if e.type == "SessionResumed")

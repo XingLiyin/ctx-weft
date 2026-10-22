@@ -621,7 +621,7 @@ async def test_resume_on_a_live_owner_neither_rebuilds_nor_backfills():
     rt = await _runtime_with_events(_resolved_user_turn_never_injected(), prepare=False)
     live = rt._task_managers[SID]
     live.set_session(Session(id=SID, tenant_id="default", user_prompt="do it",
-                             status="RUNNING", root_agent_id=AID, token_budget=0))
+                              root_agent_id=AID, token_budget=0))
     live.set_runner(StubRunner(live, session_id=SID))
     live.register_task(Task(id=TID, session_id=SID, status="ACTIVE", assigned_agent_id=AID,
                             creator_agent_id=AID, settings=NormalTaskSettings()))

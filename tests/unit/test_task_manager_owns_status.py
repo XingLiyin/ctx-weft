@@ -287,7 +287,7 @@ class _OutcomeRunner:
 
 def _setup(bus: _CapturingBus, **task_kw) -> tuple[TaskManager, Task]:
     tm = TaskManager(session_id="s1", event_bus=bus)
-    tm.set_session(Session(id="s1", user_prompt="", status="RUNNING"))
+    tm.set_session(Session(id="s1", user_prompt=""))
     t = Task(id="A", session_id="s1", status="PENDING", **task_kw)
     tm.register_task(t)
     return tm, t

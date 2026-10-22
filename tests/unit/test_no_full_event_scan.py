@@ -189,7 +189,7 @@ async def test_batched_replay_equals_one_shot_replay() -> None:
     assert batched.tasks_total == one_shot.tasks_total
     assert sorted(batched.tasks) == sorted(one_shot.tasks)
     assert sorted(batched.agents) == sorted(one_shot.agents)
-    assert batched.session_status == one_shot.session_status
+    assert not hasattr(batched, "session_status")
     assert batched.task_status == one_shot.task_status
 
 

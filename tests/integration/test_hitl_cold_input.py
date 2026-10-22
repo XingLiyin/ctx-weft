@@ -91,7 +91,7 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
 
     # ── ControlCapabilityProvider: register the session ─────────────────────────
     provider = ControlCapabilityProvider()
-    session = Session(id=session_id, tenant_id="default", user_prompt="do it", status="RUNNING")
+    session = Session(id=session_id, tenant_id="default", user_prompt="do it")
     task = Task(id=task_id, session_id=session_id, status="ACTIVE", title="T1")
     tm = SimpleNamespace(get_task=lambda tid: task)
     provider.register_session(session_id, tm, session)

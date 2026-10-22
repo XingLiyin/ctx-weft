@@ -27,7 +27,7 @@
     }
   ],
   "expected": {
-    "sessionStatus": "RUNNING",
+
     "agents": {
       "agt_root": { "spawnDepth": 0, "parentAgentId": null },
       "agt_child": { "spawnDepth": 1, "parentAgentId": "agt_root" }

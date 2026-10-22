@@ -22,7 +22,7 @@
       "type": "StepCompleted", "timestamp": "2026-06-05T00:00:08Z", "payload": { "next_step": "observe" } }
   ],
   "expected": {
-    "sessionStatus": "RUNNING",
+
     "taskStatus": "UNKNOWN",
     "currentStep": "observe",
     "assembledPromptTokens": 1234,

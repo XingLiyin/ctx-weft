@@ -32,7 +32,7 @@
     }
   ],
   "expected": {
-    "sessionStatus": "RUNNING",
+
     "taskStatus": "PENDING",
     "tasks": {
       "tsk_1": { "status": "PENDING" }

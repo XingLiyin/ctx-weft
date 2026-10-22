@@ -119,7 +119,7 @@ async def run_until_suspend(*, titles: list[str]):
                 title="Suspending Task", user_prompt=None,
                 settings=NormalTaskSettings(spawn_titles=list(titles)))
     task.user_prompt_in_memory = True  # 跳过 ingest 分支（不是本测试关心的）
-    session = Session(id="s1", user_prompt="do it", status="RUNNING",
+    session = Session(id="s1", user_prompt="do it",
                       tenant_id="default", root_agent_id="ag2")
     agent = Agent(id="ag2", session_id="s1", template_id="tpl_test", tenant_id="default", loop_guard=LoopGuard(),
                  memory_config=MemoryConfig(), loop_config=LoopConfig())
@@ -164,7 +164,7 @@ async def run_until_park():
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider as MemProv
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    session = Session(id="s_park_2", user_prompt="park test", status="RUNNING",
+    session = Session(id="s_park_2", user_prompt="park test",
                       tenant_id="default", root_agent_id="agt_p2")
     task = Task(id="tsk_park_2", session_id="s_park_2", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_p2")
@@ -266,7 +266,7 @@ async def run_until_cancel():
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider as MemProv
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    session = Session(id="s_cancel_2", user_prompt="cancel test", status="RUNNING",
+    session = Session(id="s_cancel_2", user_prompt="cancel test",
                       tenant_id="default", root_agent_id="agt_c2")
     task = Task(id="tsk_cancel_2", session_id="s_cancel_2", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_c2")
@@ -333,7 +333,7 @@ async def run_until_crash(exc: BaseException):
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider as MemProv
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    session = Session(id="s_crash_2", user_prompt="crash test", status="RUNNING",
+    session = Session(id="s_crash_2", user_prompt="crash test",
                       tenant_id="default", root_agent_id="agt_x2")
     task = Task(id="tsk_crash_2", session_id="s_crash_2", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_x2")

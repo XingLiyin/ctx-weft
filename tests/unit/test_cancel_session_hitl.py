@@ -55,7 +55,7 @@ async def _wire_pending_session(
     已经是对的，只是此前没有测试固定过非 default 的取值。
     """
     session = Session(
-        id=session_id, user_prompt="hi", status="RUNNING",
+        id=session_id, user_prompt="hi",
         tenant_id=tenant_id, created_at=now_utc(),
     )
     tm = TaskManager(session_id=session_id, event_bus=rt._event_bus, max_concurrent=0)

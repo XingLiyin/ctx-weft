@@ -15,7 +15,7 @@ from typing import Any
 from ctx_weft.core.control.types import AgentView, RunStateView, SessionView, TaskView
 from ctx_weft.core.hitl.registry import HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, PendingHitl
 from ctx_weft.core.hitl.snapshot import HitlSnapshot
-from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES, WAITING, TaskStatus
+from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES, TaskStatus
 from ctx_weft.core.models.task import default_port_for
 from ctx_weft.core.utils.content import (
     content_from_jsonable,
@@ -69,15 +69,6 @@ TASK_STATUS_BY_EVENT: dict[EventType, TaskStatus] = {
     EventType.TASK_REQUEUED: "PENDING",
     # 见下方专属分支（与 TASK_REQUEUED 一样需要清 outputs，这里仅供直接查表的消费方用）。
     EventType.TASK_HUMAN_RESOLVED: "PENDING",
-}
-
-# L 档翻译表：存量日志里 `SessionStatusChanged.new_status` 可能带旧词表的值。
-# 旧模型按 form 分 PAUSED / PAUSED_HITL 两档，新模型合并成一个 WAITING
-# （docs/events-v2.md §2.1.3）——与 SESSION_PAUSED_HITL 分支同口径。
-# 未列出的值仍在当前值域内，原样通过。
-_LEGACY_SESSION_STATUS: dict[str, str] = {
-    "PAUSED": WAITING,
-    "PAUSED_HITL": WAITING,
 }
 
 # HITL 各终态事件。`HITL_FOLD_EVENT_TYPES`（见下方 v2 折叠段）与 `RECOVERY_EVENT_TYPES`
@@ -331,7 +322,6 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
         "agent_id": view.agent_id,
         "current_step": view.current_step,
         "task_status": view.task_status,
-        "session_status": view.session_status,
         "assembled_prompt_tokens": view.assembled_prompt_tokens,
         "transcript_turns": view.transcript_turns,
         "events_total": view.events_total,
@@ -357,7 +347,6 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 # RunSnapshot.state_blob——即写回事件库外的另一处持久层。窄（只影响
                 # 存量事件的重放快照），但真实，此处不修，仅记录在案。
                 "user_prompt": content_to_jsonable(s.user_prompt),
-                "status": s.status,
                 "goal": s.goal,
                 "root_agent_id": s.root_agent_id,
                 "llm_model": s.llm_model,
@@ -437,7 +426,6 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
         sessions[sid] = SessionView(
             id=s["id"],
             user_prompt=content_from_jsonable(s.get("user_prompt", "")),
-            status=s.get("status", "UNKNOWN"),
             goal=s.get("goal", ""),
             root_agent_id=s.get("root_agent_id", ""),
             llm_model=s.get("llm_model", ""),
@@ -513,7 +501,6 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
         agent_id=data.get("agent_id", ""),
         current_step=data.get("current_step"),
         task_status=data.get("task_status", "UNKNOWN"),
-        session_status=data.get("session_status", "UNKNOWN"),
         assembled_prompt_tokens=data.get("assembled_prompt_tokens", 0),
         transcript_turns=data.get("transcript_turns", 0),
         events_total=data.get("events_total", 0),
@@ -1052,11 +1039,9 @@ def _apply(view: RunStateView, ev: Event) -> None:
             token_budget=p.get("token_budget", 200_000),
             context_limit=p.get("context_limit", 180_000),
             reserved_output_tokens=p.get("reserved_output_tokens", 8192),
-            status="RUNNING",
             created_at=ev.timestamp,
         )
         view.sessions[ev.session_id] = sess
-        view.session_status = "RUNNING"
 
     elif t == EventType.FAILURE_THRESHOLD_HIT:
         # 只置闩，不动计数：这条事件本身不是一次新失败，它是「计数已经到阈值」的宣告。
@@ -1078,40 +1063,11 @@ def _apply(view: RunStateView, ev: Event) -> None:
             _up = p.get("user_prompt")
             if _up is not None:
                 sess.user_prompt = content_from_jsonable(_up)
-            sess.status = "RUNNING"
-        view.session_status = "RUNNING"
 
-    elif t == EventType.SESSION_STATUS_CHANGED:
-        # Legacy logs only: session lifecycle status is maintained by the host.
-        # 与兄弟分支
-        # SESSION_PAUSED_HITL 同口径——旧值域里的 PAUSED / PAUSED_HITL 在新词表
-        # 里不存在，必须**翻译进当前词表**再写，否则重放存量日志会往
-        # `session_status` 写一个类型里没有的值（models.py 的承诺）。
-        # 重构前 `recover()` 发的 `_emit_session_status(... or "PAUSED_HITL")`
-        # 走的正是这条，故存量日志里旧值的主要产地就在这儿。
-        # 其余值（RUNNING / INTERRUPTED / SUCCEEDED / FAILED / CANCELED）仍在
-        # 值域内，原样通过。
-        new_status = _LEGACY_SESSION_STATUS.get(
-            p.get("new_status", ""), p.get("new_status", ""))
-        if new_status:
-            view.session_status = new_status
-            sess = view.sessions.get(ev.session_id)
-            if sess is not None:
-                sess.status = new_status
-
-    elif t == EventType.SESSION_PAUSED_HITL:
-        # L 档：只读存量日志。旧模型按 form 分 PAUSED / PAUSED_HITL 两档，
-        # 新模型合并成一个 WAITING——「等的是审批面板还是一句话」是 delivery 的性质，
-        # 由 HitlOpened 承载，不进会话状态（docs/events-v2.md §2.1.3）。
-        # 故这里**刻意**把两档都折进 WAITING，不再读 form。
-        _set_session_status(view, ev.session_id, WAITING)
-
-    elif t == EventType.SESSION_FINISHED:
-        final_status = p.get("final_status", "SUCCEEDED")
-        view.session_status = final_status
-        sess = view.sessions.get(ev.session_id)
-        if sess is not None:
-            sess.status = final_status
+    elif t in (EventType.SESSION_STATUS_CHANGED, EventType.SESSION_PAUSED_HITL,
+               EventType.SESSION_FINISHED):
+        # Legacy envelopes remain readable, but core has no session lifecycle state.
+        pass
 
     elif t == EventType.RECOGNIZE_INTENT_TOOL_CALL:
         goal = p.get("session_goal", "")
@@ -1388,24 +1344,6 @@ def _apply(view: RunStateView, ev: Event) -> None:
             _apply(view, replace(ev, type=EventType.OBSERVE_REQUESTED,
                                  payload=p["observe_request"]))
 
-    # ── HITL 会话状态 ──────────────────────────────────────────────────────────
-    elif t in (
-        # L 档：这五个不再发射，保留只为读存量日志。HITL_RESOLVED（新模型）**不在其中**
-        # ——新流量里会话状态由 AGENT_* 折叠推出，不再由会话级事件承载。
-        EventType.HITL_APPROVED, EventType.HITL_MODIFIED, EventType.HITL_ANSWERED,
-        EventType.HITL_REJECTED, EventType.HITL_CANCELLED,
-    ):
-        if view.session_status == WAITING:
-            _set_session_status(view, ev.session_id, "RUNNING")
-
-
-def _set_session_status(view: RunStateView, session_id: str, status: str) -> None:
-    """把状态同时写进 run 级标量与 SessionView。两处必须同写——只写一处是
-    「投影和视图对不上」那类 bug 的来源。"""
-    view.session_status = status
-    sess = view.sessions.get(session_id)
-    if sess is not None:
-        sess.status = status
 
 
 # ══════════════════════════════════════════════════════════════════════════════

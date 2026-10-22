@@ -41,11 +41,9 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 ### Session
 | type | 变更 |
 |------|------|
-| `SessionCreated` | 建 `SessionView`（`user_prompt`（jsonable）/`template_id`/`root_agent_id`/`llm_model`/`llm_account`/`tenant_id`（缺省回落 `event.tenantId`）/`token_budget`/`context_limit`/`reserved_output_tokens`，`created_at=ts`，`status="RUNNING"`）；`sessionStatus="RUNNING"` |
-| `SessionResumed` | 该 session 的 `userPrompt`、`status="RUNNING"`；`sessionStatus="RUNNING"` |
-| `SessionFinished` **L 档** | `final_status ?? "SUCCEEDED"` 置 `sessionStatus` 与 session.status。已停发，分支保留只为读存量日志 |
-| `SessionStatusChanged` **L 档** | 只读存量。若有 `new_status`：`sessionStatus` 与该 session.status 置之。**新流量里不再发出**，但分支必须保留——存量日志靠它才能重建 |
-| `SessionPausedHitl` **L 档** | 只读存量。置 `"WAITING"`，**不读 `form`**：旧模型按 form 分 `PAUSED` / `PAUSED_HITL` 两档，新值域里两档合并成单一 `WAITING` |
+| `SessionCreated` | 建 `SessionView`，保留身份、配置、预算与创建时间；不包含会话状态 |
+| `SessionResumed` | 更新 `user_prompt`，清除本轮熔断闩锁与受影响任务清单 |
+| `SessionFinished` / `SessionStatusChanged` / `SessionPausedHitl` **L 档** | 历史信封仍可读取；core 不再建立或更新会话状态 |
 | `RecognizeIntentToolCall` | 若有 `session_goal`：置该 session.goal |
 | `FailureThresholdHit` | **无投影副作用**——它是聚合播报。计数由 `TaskFailed` / `TaskFinished` 折叠（见 Task 段） |
 
@@ -54,17 +52,11 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 > 前三条于 2026-09-03 停发、2026-09-05 **连枚举一并删除**（`docs/events-v2.md` §5.8
 > ——它们生于 09-02 死于 09-03，全程在 `master` 之后的分支内部，`master` 从来没有过
 > 这三个类型，存量流里也不会有），`SessionFinished` 停发但留在 L 档。
-> 现在写 `sessionStatus` 的只剩 `SessionCreated` / `SessionResumed` 写下的起点 `RUNNING`，
-> 外加两条 L 档 setter 用于重放存量日志。会话整体状况由 host 聚合各 agent 的
-> `AGENT_*` 状态推导。
->
-> 表中凡置 `sessionStatus` 的规则，都**同时**写 run 级标量 `sessionStatus` 与
-> `sessions[sessionId].status` 两处（实现里的 `_set_session_status`）。只写一处
-> 就是「投影和视图对不上」那类 bug。
->
-> `SessionStatus` 值域共 6 个：`RUNNING` / `WAITING` / `INTERRUPTED` /
-> `SUCCEEDED` / `FAILED` / `CANCELED`。回放存量日志时旧值 `PAUSED` / `PAUSED_HITL`
-> 一律折进 `WAITING`（`QUEUED` / `TIMEOUT` 从未被写出过）。
+> core 的 `Session`、`SessionView`、`SessionDetail` 均不包含 `status`；
+> `RunStateView` 与 `SessionStateSummary` 也不再包含 `session_status`。
+> 读取旧快照时忽略这些遗留键，新快照不再写入。会话展示状态由 host 根据
+> agent、task 和 pending HITL 推导；没有当前任务的空闲容器可以接收首条消息。
+> 仅有旧会话生命周期事件的历史归档，由 host 自行解释历史事件。
 >
 > **历史注（裁定 R3）**：`SessionWaiting` 当初刻意不带「有几个在等」的计数，那个数字
 > 停在 `TaskQueueBlocked{count}` 那一层——展示数据不该穿过状态判据。两个类型现均已删除；
@@ -74,8 +66,8 @@ reducer 把事件序列折叠成 `RunStateView`。三份实现必须逐条对齐
 > `next_transition` 状态机整体已删；`SessionRegistry`（原 `SessionManager`）现在
 > 只做「登记这个 session 里有哪些 agent」，不再 `handle_event` 推导/改写会话状态，
 > 也不再发 `SessionFinished`（已转入 L 档，reducer 的这条分支只为重放存量日志保留，
-> 不会再被新事件触发；同批的另三条已于 2026-09-05 连枚举删除）。`sessions[sessionId].status` 字段对该改造之后创建的 session 会永远停在
-> 初始值——host 若要判断会话整体状况，改聚合各 agent 的状态
+> 不会再被新事件触发；同批的另三条已于 2026-09-05 连枚举删除）。此前保留的
+> `sessions[sessionId].status` 会停在初始值，现已删除。host 判断会话整体状况时聚合各 agent 的状态
 > （`CtxWeftRuntime.list_agents`）。详见
 > `docs/upgrade/2026-09-03-agent-centric-interaction.md` 第 5 节。
 

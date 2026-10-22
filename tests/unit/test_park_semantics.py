@@ -65,7 +65,7 @@ def _env(*, unattended: bool, llm=None):
     """
     bus = _RecordingBus()
     hitl_service, registry = make_hitl(bus)
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",
         title="Greet", description="say hi",
@@ -91,7 +91,7 @@ def _spy_observe(monkeypatch) -> list[str]:
     """拦下 background observe：act 是在函数体内 import 的，patch 模块属性即可命中。"""
     import asyncio
 
-    
+
     launched: list[str] = []
 
     def _fake(state, ctx, *, boundary=""):

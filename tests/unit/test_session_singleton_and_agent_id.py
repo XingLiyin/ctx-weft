@@ -123,7 +123,7 @@ def _live_owner(rt, ran: list[str]) -> TaskManager:
         session_id="ses_1", tenant_id="default", template_id="tpl",
         parent_agent_id=None, spawn_depth=0, memory_config=None, loop_config=None,
     )
-    session = Session(id="ses_1", tenant_id="default", user_prompt="x", status="RUNNING",
+    session = Session(id="ses_1", tenant_id="default", user_prompt="x",
                       root_agent_id="agt", token_budget=0)
     tm = TaskManager(session_id="ses_1", event_bus=rt.event_bus, max_concurrent=1)
     tm.set_session(session)

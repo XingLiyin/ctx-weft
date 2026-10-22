@@ -86,10 +86,10 @@
     }
   ],
   "expected": {
-    "sessionStatus": "RUNNING",
+
     "sessions": {
       "s1": {
-        "status": "RUNNING",
+
         "userPrompt": "continue please"
       }
     },

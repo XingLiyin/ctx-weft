@@ -66,7 +66,7 @@ async def test_run_loop_catches_park_returns_awaiting_human() -> None:
     session = Session(
         id="s_park_1",
         user_prompt="park test",
-        status="RUNNING",
+
         tenant_id="default",
         root_agent_id="agt_p1",
     )

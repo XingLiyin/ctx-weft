@@ -36,7 +36,7 @@ def _runtime() -> CtxWeftRuntime:
 
 def _session(**kw) -> Session:
     return Session(
-        id="s1", user_prompt="do it", status="RUNNING", root_agent_id="agt_root",
+        id="s1", user_prompt="do it",  root_agent_id="agt_root",
         tenant_id="default", **kw,
     )
 

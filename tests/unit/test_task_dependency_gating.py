@@ -47,7 +47,7 @@ class _NoopRunner:
 def _tm(bus: _Bus | None = None, session: Session | None = None) -> TaskManager:
     tm = TaskManager(session_id="s1", max_concurrent=0,
                      event_bus=bus.bus if bus else None)
-    tm.set_session(session or Session(id="s1", user_prompt="", status="RUNNING"))
+    tm.set_session(session or Session(id="s1", user_prompt=""))
     tm.set_runner(_NoopRunner())
     return tm
 
@@ -150,7 +150,7 @@ async def test_failed_predecessor_disposes_dependent():
     assert ev.payload["blocked_by_task_id"] == "a"
     assert ev.payload["error_code"] == "BLOCKED_BY_FAILED_DEP"
     # 会话不被改写为 CANCELED（依赖取消 ≠ 用户叫停）
-    assert tm.session.status == "RUNNING"
+    assert not hasattr(tm.session, "status")
     # 队列无滞留
     assert all(e.task_id != "b" for e in tm._queue.peek_all())
 
@@ -255,4 +255,4 @@ async def test_blocked_cancel_still_wakes_parent():
     await tm.on_task_finished("a", status="FAILED")   # 触发 b 的处置 → b 终态
 
     assert parent.status == "PENDING"                 # 被唤醒、重排
-    assert tm.session.status != "CANCELED"
+    assert not hasattr(tm.session, "status")

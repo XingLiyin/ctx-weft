@@ -177,7 +177,7 @@ def _task_manager(bus):
     from ctx_weft.core.orchestrator.task.manager import TaskManager
 
     tm = TaskManager(session_id="s1", event_bus=bus)
-    tm._session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    tm._session = Session(id="s1", tenant_id="default", user_prompt="hi")
     return tm
 
 

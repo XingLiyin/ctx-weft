@@ -15,7 +15,7 @@ pytestmark = pytest.mark.asyncio
 def _tm() -> TaskManager:
     tm = TaskManager(session_id="s1", event_bus=InProcessEventBus(), max_concurrent=1)
     tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x",
-                           status="RUNNING", token_budget=0))
+                            token_budget=0))
     return tm
 
 
@@ -31,7 +31,7 @@ async def test_cancel_all_cancels_pending_and_session():
     assert tm._queue.has_pending() is False
     assert tm.get_task("a").status == "CANCELED"
     assert tm.get_task("b").status == "CANCELED"
-    assert tm._session.status == "CANCELED"
+    assert not hasattr(tm._session, "status")
 
 
 async def test_drain_is_a_noop_after_cancel_all():

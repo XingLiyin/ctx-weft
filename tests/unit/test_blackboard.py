@@ -151,7 +151,7 @@ async def test_list_subscriptions_none_returns_all() -> None:
 def _request_for(task_id: str, m: InMemoryMemoryProvider) -> tuple[ContextRequest, AssemblerDeps]:
     task = Task(id=task_id, session_id="s1", status="ACTIVE")
     agent = Agent(id="a", session_id="s1", template_id="t")
-    session = Session(id="s1", user_prompt="go", status="RUNNING")
+    session = Session(id="s1", user_prompt="go")
     req = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id=task_id, agent_id="a"),
         task=task, agent=agent, session=session, template=None, bound_capabilities=[],
@@ -233,7 +233,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
     # extra-based path still surfaces the sub-task list.
     task = Task(id="T", session_id="s1", status="ACTIVE",
                 title="Parent", description="do it", user_prompt="please")
-    session = Session(id="s1", user_prompt="go", status="RUNNING")
+    session = Session(id="s1", user_prompt="go")
     block = ContextBlock(
         id="b1", source="blackboard:K1", kind="blackboard",
         value=SimpleNamespace(content="Q1 sales: 100"),
@@ -270,7 +270,7 @@ async def test_composer_splits_subtask_and_predecessor_sections() -> None:
     # Neither "Your sub-task results" nor "Upstream task results" must appear, regardless of
     # what blackboard blocks are present. The judgment cue must still be there.
     task = Task(id="T", session_id="s1", status="ACTIVE", title="Parent")
-    session = Session(id="s1", user_prompt="go", status="RUNNING")
+    session = Session(id="s1", user_prompt="go")
     req = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
@@ -300,7 +300,7 @@ async def test_composer_no_related_results_when_empty() -> None:
     # Phase 3: "Your sub-task results" (old blackboard heading) never appears — it was removed.
     # The extra["subtasks"] section ("## Your sub-tasks") is also absent when there are none.
     task = Task(id="T", session_id="s1", status="ACTIVE", title="Parent")
-    session = Session(id="s1", user_prompt="go", status="RUNNING")
+    session = Session(id="s1", user_prompt="go")
     req = ContextRequest(
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )

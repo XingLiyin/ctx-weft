@@ -1,6 +1,5 @@
 """Session —— 会话容器。
 
-状态词表在 `status.py`；本模块只引 `SessionStatus` 做注解。
 Session 不持有 Task / Agent 的对象，只持 id（`root_agent_id`），故本模块不依赖
 同包的 `task.py` / `agent.py`。
 """
@@ -10,8 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
-
-from ctx_weft.core.models.status import SessionStatus
 
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
@@ -28,7 +25,6 @@ class Session:
     # 多模态：保 ref 形态（裁定 2026-08-27）。不拍扁——否则事件流重放不出
     # 「曾有一张图」；也不内联字节——见 content_to_event_jsonable（dual-blob-store §6）。
     user_prompt: "str | list[ContentPart]"
-    status: SessionStatus
     goal: str = ""
     tenant_id: str = "default"
     root_agent_id: str | None = None

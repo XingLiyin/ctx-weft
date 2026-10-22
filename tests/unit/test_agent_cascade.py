@@ -411,7 +411,7 @@ async def test_send_message_resolves_stale_pause_bubble_before_new_real_question
 
     tm = TaskManager(session_id="s1", event_bus=rt._event_bus)
     session = Session(
-        id="s1", user_prompt="hi", status="RUNNING", tenant_id="default",
+        id="s1", user_prompt="hi",  tenant_id="default",
         root_agent_id="root", created_at=None,
     )
     tm.set_session(session)

@@ -61,7 +61,6 @@ def _load_cases() -> list[tuple[str, dict[str, Any]]]:
 
 # 顶层标量断言字段：canonical camelCase → RunStateView 属性
 _TOP = {
-    "sessionStatus": "session_status",
     "taskStatus": "task_status",
     "currentStep": "current_step",
     "assembledPromptTokens": "assembled_prompt_tokens",
@@ -132,7 +131,7 @@ def test_golden_snapshot_plus_delta(name: str, case: dict[str, Any]) -> None:
 
     # snapshot+delta 必须与全量在所有断言字段上一致
     _check(rebuilt, case["expected"])
-    assert rebuilt.session_status == full.session_status
+    assert not hasattr(rebuilt, "session_status")
     assert {t: v.status for t, v in rebuilt.tasks.items()} == \
            {t: v.status for t, v in full.tasks.items()}
     assert set(rebuilt.agents) == set(full.agents)

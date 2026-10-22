@@ -52,7 +52,7 @@ def _running_tm(rt: CtxWeftRuntime, session: Session, task_id: str) -> TaskManag
 def _tm(bus: InProcessEventBus) -> TaskManager:
     tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
     tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x",
-                           status="SUCCEEDED", token_budget=0))
+                            token_budget=0))
     return tm
 
 
@@ -148,7 +148,7 @@ async def test_register_and_drain_refuses_a_second_tm() -> None:
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                   status="RUNNING", token_budget=0)
+                    token_budget=0)
 
     tm_old = TaskManager(session_id="s1", event_bus=rt._event_bus, max_concurrent=1)
     tm_old.set_runner(StubRunner(tm_old, _noop_runner))
@@ -173,7 +173,7 @@ async def test_evicted_tm_is_no_longer_current() -> None:
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                   status="RUNNING", token_budget=0)
+                    token_budget=0)
 
     tm_old = TaskManager(session_id="s1", event_bus=rt._event_bus, max_concurrent=1)
     tm_old.set_runner(StubRunner(tm_old, _noop_runner))
@@ -316,7 +316,7 @@ async def test_slow_prior_turn_bg_observe_does_not_clobber_next_turn() -> None:
     rt._event_bus.subscribe(EventType.SESSION_FINISHED, _capture)
 
     # ── 第 N 轮 "6"：任务完成，但其 background observe 慢 ──
-    sess = Session(id=sid, tenant_id="default", user_prompt="6", status="RUNNING", token_budget=0)
+    sess = Session(id=sid, tenant_id="default", user_prompt="6",  token_budget=0)
     tm = _running_tm(rt, sess, "t6")
     release = asyncio.Event()
 
@@ -367,12 +367,12 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
 
     rt._event_bus.subscribe(None, _cap)
 
-    sess6 = Session(id=sid, tenant_id="default", user_prompt="6", status="RUNNING", token_budget=0)
+    sess6 = Session(id=sid, tenant_id="default", user_prompt="6",  token_budget=0)
     tm6 = _running_tm(rt, sess6, "t6")
 
     # 旧 TM 被逐出、新 TM 接管，旧 TM 的任务此后才结束
     rt._evict_session_memory(sid)
-    sess7 = Session(id=sid, tenant_id="default", user_prompt="7", status="RUNNING", token_budget=0)
+    sess7 = Session(id=sid, tenant_id="default", user_prompt="7",  token_budget=0)
     tm7 = _running_tm(rt, sess7, "t7")
     rt._pausing.add(sid)
 
@@ -384,4 +384,4 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
     assert finished == [], "被顶替的旧 TM 不得发 SessionFinished"
     # is_done 分支的归属权守卫在 `self._session.status = self._final_status()` 之前
     # 就 return 掉了——旧轮的 Session 对象因此不被越权落定终态，仍停在 RUNNING。
-    assert sess6.status == "RUNNING", "被顶替的旧 TM 不得越权落定 session.status"
+    assert not hasattr(sess6, "status"), "被顶替的旧 TM 不得越权落定 session.status"

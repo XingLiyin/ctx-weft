@@ -86,7 +86,7 @@ async def _events_from_park() -> list:
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    session = Session(id="s_park_3", user_prompt="park test", status="RUNNING",
+    session = Session(id="s_park_3", user_prompt="park test",
                       tenant_id="default", root_agent_id="agt_p3")
     task = Task(id="tsk_park_3", session_id="s_park_3", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_p3")
@@ -177,7 +177,7 @@ async def _events_from_cancel() -> list:
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    session = Session(id="s_cancel_3", user_prompt="cancel test", status="RUNNING",
+    session = Session(id="s_cancel_3", user_prompt="cancel test",
                       tenant_id="default", root_agent_id="agt_c3")
     task = Task(id="tsk_cancel_3", session_id="s_cancel_3", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_c3")
@@ -238,7 +238,7 @@ async def _events_from_crash(exc: BaseException) -> tuple[list, BaseException]:
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
 
-    session = Session(id="s_crash_3", user_prompt="crash test", status="RUNNING",
+    session = Session(id="s_crash_3", user_prompt="crash test",
                       tenant_id="default", root_agent_id="agt_x3")
     task = Task(id="tsk_crash_3", session_id="s_crash_3", status="ACTIVE",
                tenant_id="default", assigned_agent_id="agt_x3")

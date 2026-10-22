@@ -700,9 +700,7 @@ class CtxWeftRuntime:
         # Cold owners are loaded without a queue. Recovery work starts only after
         # the caller has delivered its input; this is not an agent/task status.
         self._prepared_recoveries: dict[str, tuple[TaskManager, int, dict]] = {}
-        # 会话状态的唯一住所。从前 SessionRegistry 是每次调用 new 一个的临时对象
-        # （无状态、用完即弃），状态因此无处可放，被 TaskManager / runtime / reducer
-        # 各写一份。见 docs/events-v2.md §2.1.1。
+        # 会话成员登记表。生命周期事实属于 task / agent；会话展示状态由宿主聚合。
         self._session_registry = SessionRegistry(
             agent_lifecycle_manager=self._agent_lifecycle_manager,
             event_bus=self._event_bus,
@@ -1561,7 +1559,6 @@ class CtxWeftRuntime:
             session = Session(
                 id=sid,
                 user_prompt=content_to_text(user_prompt),
-                status="RUNNING",
                 tenant_id=tenant_id,
                 root_agent_id=agent.id,
                 llm_provider=llm_account or "",
@@ -2657,9 +2654,7 @@ class CtxWeftRuntime:
             if session_id not in self._prepared_recoveries:
                 tm.set_recovery_pending(False)
         if cold and not resumable:
-            session = tm.session
-            final_status = "FAILED" if session.failure_counter > 0 else "SUCCEEDED"
-            await tm.finalize_idle_session(final_status)
+            await tm.finalize_idle_session()
 
     async def _verify_task_prompts_in_memory(
         self, tasks: "list[Task]", session_id: str, tenant_id: str,
@@ -3405,7 +3400,7 @@ class CtxWeftRuntime:
                 view, position = await self._query_view(session_id)
                 session = view.sessions[session_id]
             detail = SessionDetail(
-                session.id, session.root_agent_id or "", session.status,
+                session.id, session.root_agent_id or "",
                 session.goal, session.token_budget, session.created_at,
             )
             return self._query_result(detail, "memory" if loaded else "events", loaded, position)

@@ -11,7 +11,7 @@
       "payload": { "final_status": "SUCCEEDED" } }
   ],
   "expected": {
-    "sessionStatus": "SUCCEEDED",
-    "sessions": { "s1": { "status": "SUCCEEDED" } }
+
+    "sessions": { "s1": {  } }
   }
 }

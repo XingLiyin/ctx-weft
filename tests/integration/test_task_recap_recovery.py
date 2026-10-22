@@ -147,7 +147,7 @@ async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
 
     # Pre-crash state: session projection is still RUNNING (no SESSION_FINISHED).
     view_before = await rebuild_view(runtime.event_store, sid)
-    assert view_before.sessions[sid].status == "RUNNING"
+    assert not hasattr(view_before.sessions[sid], "status")
     assert view_before.tasks[tid].outputs == {"result": "ok"}
 
     # Seed the placeholder finish pair in memory so _relaunch's close-synth path can
@@ -177,9 +177,9 @@ async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
     finalized: list[str] = []
     orig_finalize = TaskManager.finalize_idle_session
 
-    async def _spy_finalize(self, status, *, _orig=orig_finalize):
-        finalized.append(status)
-        return await _orig(self, status)
+    async def _spy_finalize(self, *, _orig=orig_finalize):
+        finalized.append(self.get_task(tid).status)
+        return await _orig(self)
 
     monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
 
@@ -197,7 +197,7 @@ async def test_stuck_finish_session_recovers_and_finalizes(monkeypatch) -> None:
     if tm is not None and tm._background_asyncio_tasks:
         await asyncio.gather(*list(tm._background_asyncio_tasks), return_exceptions=True)
 
-    assert finalized == ["SUCCEEDED"], (
+    assert finalized == ["FINISHED"], (
         f"expected finalize_idle_session to finalize SUCCEEDED exactly once, got {finalized!r}"
     )
 
@@ -259,7 +259,7 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed(monkeypatch) -
     assert view_before.tasks[tid].status == "FAILED"
     assert view_before.tasks[tid].error == "boom"
     assert view_before.sessions[sid].failure_counter > 0
-    assert view_before.sessions[sid].status == "RUNNING"
+    assert not hasattr(view_before.sessions[sid], "status")
 
     # Seed the placeholder finish pair in memory so _relaunch's close-synth path can
     # locate the finish_task tool_call (register_close_synth infers outcome="fail"
@@ -285,9 +285,9 @@ async def test_stuck_failed_session_recovers_and_finalizes_failed(monkeypatch) -
     finalized: list[str] = []
     orig_finalize = TaskManager.finalize_idle_session
 
-    async def _spy_finalize(self, status, *, _orig=orig_finalize):
-        finalized.append(status)
-        return await _orig(self, status)
+    async def _spy_finalize(self, *, _orig=orig_finalize):
+        finalized.append(self.get_task(tid).status)
+        return await _orig(self)
 
     monkeypatch.setattr(TaskManager, "finalize_idle_session", _spy_finalize)
 
@@ -404,7 +404,7 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
 
     view_before = await rebuild_view(runtime.event_store, sid)
     assert view_before.tasks[tid].status == "SUSPENDED"
-    assert view_before.sessions[sid].status == "RUNNING"
+    assert not hasattr(view_before.sessions[sid], "status")
 
     # Seed one un-folded raw LLM_RESPONSE so the interrupt-boundary recap's re-fold
     # guard sees active raw and takes the real fold path (rather than the "already
@@ -465,9 +465,9 @@ async def test_suspended_task_with_pending_interrupt_recap_recovers() -> None:
     # note above the polling loop — the verdict is written directly onto
     # ``tm.session.status`` now, not broadcast as an event).
     assert tm is not None, "expected a TaskManager to still be registered for the session"
-    assert tm.session is not None and tm.session.status in ("SUCCEEDED", "FAILED"), (
+    assert tm.is_done() and all(t.status in {"FINISHED", "FAILED", "CANCELED"} for t in tm.all_tasks()), (
         f"expected the session to reach a terminal status after recovery, got "
-        f"{tm.session.status if tm.session is not None else None!r}"
+        f"{[(t.id, t.status) for t in tm.all_tasks()]!r}"
     )
 
 

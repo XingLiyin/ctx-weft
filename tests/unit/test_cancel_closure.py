@@ -187,7 +187,7 @@ class _CapturingBus:
 def _tm(bus: _CapturingBus) -> tuple[TaskManager, Session]:
     tm = TaskManager(session_id="s1", event_bus=bus)
     tm._max_concurrent = 0
-    session = Session(id="s1", user_prompt="", status="RUNNING")
+    session = Session(id="s1", user_prompt="")
     tm.set_session(session)
     tm.set_runner(StubRunner(tm))
     return tm, session
@@ -328,7 +328,7 @@ def _runtime() -> CtxWeftRuntime:
 async def test_runtime_finalize_cancel_memory_root_own_scope_finish_pair() -> None:
     runtime = _runtime()
     memory = runtime.providers.get_memory()
-    session = Session(id="s1", user_prompt="do it", status="RUNNING", root_agent_id="agt_root",
+    session = Session(id="s1", user_prompt="do it",  root_agent_id="agt_root",
                       tenant_id="default")
     root = Task(id="root", session_id="s1", status="CANCELED", parent_task_id=None,
                creator_agent_id="agt_root", assigned_agent_id="agt_root", title="Root Task",
@@ -347,7 +347,7 @@ async def test_runtime_finalize_cancel_memory_root_own_scope_finish_pair() -> No
 async def test_runtime_finalize_cancel_memory_one_bad_task_does_not_block_others() -> None:
     runtime = _runtime()
     memory = runtime.providers.get_memory()
-    session = Session(id="s1", user_prompt="do it", status="RUNNING", root_agent_id="agt_root",
+    session = Session(id="s1", user_prompt="do it",  root_agent_id="agt_root",
                       tenant_id="default")
     good = _child("good", started_at=now_utc(), origin_tool_call_id="call-good")
     bad = _child("bad", started_at=now_utc(), origin_tool_call_id="call-bad")

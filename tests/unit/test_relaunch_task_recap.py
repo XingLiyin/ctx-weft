@@ -49,7 +49,7 @@ def _make_runtime_and_session():
     runtime.providers.register_memory(memory)
 
     session = Session(
-        id="ses_1", tenant_id="default", user_prompt="x", status="RUNNING",
+        id="ses_1", tenant_id="default", user_prompt="x",
         root_agent_id="agt_1", llm_provider="acct1", llm_model="m1", token_budget=0,
     )
     task = Task(

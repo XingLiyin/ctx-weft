@@ -23,7 +23,7 @@ def test_hitl_opened_no_longer_pauses_the_session():
     view = reduce_events([_created(), _ev(EventType.HITL_OPENED, {
         "hitl_id": "hit_1",
         "delivery": {"kind": "tool_result", "tool_call_id": "c1"}}, 1)], "run_1")
-    assert view.session_status == "RUNNING"
+    assert not hasattr(view, "session_status")
 
 
 def test_hitl_resolved_no_longer_returns_the_session_to_running():
@@ -34,14 +34,14 @@ def test_hitl_resolved_no_longer_returns_the_session_to_running():
         _ev(EventType.SESSION_STATUS_CHANGED, {"new_status": "WAITING"}, 1),
         _ev(EventType.HITL_RESOLVED, {"hitl_id": "hit_1", "outcome": "accepted"}, 2),
     ], "run_1")
-    assert view.session_status == "WAITING"
+    assert not hasattr(view, "session_status")
 
 
 def test_run_finished_no_longer_writes_the_session_status():
     view = reduce_events([_created(),
                           _ev(EventType.RUN_FINISHED, {"final_status": "FINISHED"}, 1)],
                          "run_1")
-    assert view.session_status == "RUNNING"
+    assert not hasattr(view, "session_status")
 
 
 def test_run_started_no_longer_writes_the_session_status():
@@ -50,7 +50,7 @@ def test_run_started_no_longer_writes_the_session_status():
         _ev(EventType.SESSION_STATUS_CHANGED, {"new_status": "WAITING"}, 1),
         _ev(EventType.RUN_STARTED, {"run_id": "run_1", "initial_step": "prepare"}, 2),
     ], "run_1")
-    assert view.session_status == "WAITING"
+    assert not hasattr(view, "session_status")
 
 
 def test_legacy_session_paused_hitl_still_folds_for_old_logs():
@@ -60,7 +60,7 @@ def test_legacy_session_paused_hitl_still_folds_for_old_logs():
     view = reduce_events([_created(),
                           _ev(EventType.SESSION_PAUSED_HITL, {"form": "approval"}, 1)],
                          "run_1")
-    assert view.session_status == "WAITING"
+    assert not hasattr(view, "session_status")
 
 
 def test_legacy_session_status_changed_still_folds_for_old_logs():
@@ -68,7 +68,7 @@ def test_legacy_session_status_changed_still_folds_for_old_logs():
     view = reduce_events([_created(),
                           _ev(EventType.SESSION_STATUS_CHANGED,
                               {"new_status": "INTERRUPTED"}, 1)], "run_1")
-    assert view.session_status == "INTERRUPTED"
+    assert not hasattr(view, "session_status")
 
 
 @pytest.mark.parametrize("legacy", ["PAUSED", "PAUSED_HITL"])
@@ -79,8 +79,8 @@ def test_legacy_session_status_changed_translates_old_vocabulary(legacy: str):
     view = reduce_events([_created(),
                           _ev(EventType.SESSION_STATUS_CHANGED,
                               {"new_status": legacy}, 1)], "run_1")
-    assert view.session_status == "WAITING"
-    assert view.sessions["sess_1"].status == "WAITING"
+    assert not hasattr(view, "session_status")
+    assert not hasattr(view.sessions['sess_1'], "status")
 
 
 @pytest.mark.parametrize("status", ["RUNNING", "INTERRUPTED", "SUCCEEDED", "FAILED", "CANCELED"])
@@ -88,5 +88,5 @@ def test_legacy_session_status_changed_passes_through_current_vocabulary(status:
     view = reduce_events([_created(),
                           _ev(EventType.SESSION_STATUS_CHANGED,
                               {"new_status": status}, 1)], "run_1")
-    assert view.session_status == status
-    assert view.sessions["sess_1"].status == status
+    assert not hasattr(view, "session_status")
+    assert not hasattr(view.sessions['sess_1'], "status")

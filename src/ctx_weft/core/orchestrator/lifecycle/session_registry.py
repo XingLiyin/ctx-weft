@@ -200,7 +200,6 @@ class SessionRegistry:
         session = Session(
             id=sid,
             user_prompt=user_prompt,
-            status="RUNNING",
             tenant_id=tenant_id,
             root_agent_id=agent_id,
             llm_provider=llm_account or "",
@@ -324,7 +323,6 @@ class SessionRegistry:
         session = Session(
             id=session_id,
             user_prompt=user_prompt,
-            status="RUNNING",
             tenant_id=tenant_id,
             root_agent_id=sess_proj.root_agent_id,
             llm_provider=llm_account or "",

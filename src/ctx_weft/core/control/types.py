@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from ctx_weft.core.models.task import PORT_MAIN
 
 if TYPE_CHECKING:
+    from ctx_weft.core.hitl.snapshot import HitlSnapshot
     from ctx_weft.protocols import ContentPart
 
 
@@ -25,7 +26,6 @@ class SessionView:
     # 的（见 `AgentView.template_id`）——一个 session 里同时跑着不同型号的 agent 是常态。
     # 该字段最后的读者是宿主拿它反推会话归属，已改为读宿主自己的列，见
     # `SessionRegistry.create_session` 发 SESSION_CREATED 那里的注释。
-    status: str = "RUNNING"
     goal: str = ""
     root_agent_id: str = ""
     llm_model: str = ""
@@ -132,7 +132,6 @@ class RunStateView:
 
     current_step: str | None = None
     task_status: str = "UNKNOWN"
-    session_status: str = "UNKNOWN"
 
     assembled_prompt_tokens: int = 0
     transcript_turns: int = 0

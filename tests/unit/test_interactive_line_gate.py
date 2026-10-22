@@ -56,7 +56,7 @@ class _ParkedRunner:
 
 def _tm() -> TaskManager:
     tm = TaskManager(session_id="s1")
-    tm.set_session(Session(id="s1", user_prompt="", status="RUNNING", root_agent_id="root"))
+    tm.set_session(Session(id="s1", user_prompt="",  root_agent_id="root"))
     return tm
 
 
@@ -286,7 +286,7 @@ def test_fully_autonomous_task_holds_no_port() -> None:
 
 def _tm_with_slots(n: int) -> TaskManager:
     tm = TaskManager(session_id="s1", max_concurrent=n)
-    tm.set_session(Session(id="s1", user_prompt="", status="RUNNING", root_agent_id="root"))
+    tm.set_session(Session(id="s1", user_prompt="",  root_agent_id="root"))
     return tm
 
 

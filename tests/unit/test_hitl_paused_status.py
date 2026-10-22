@@ -35,7 +35,7 @@ async def test_session_paused_hitl_folds_to_waiting_regardless_of_form(form) -> 
     （Task 9 已把两者从 SessionStatus 值域里删掉），故不再按 form 分流。"""
     from ctx_weft.core.control.reducers import reduce_events
     view = reduce_events([_paused_event("s1", form)], run_id="r1")
-    assert view.session_status == "WAITING"
+    assert not hasattr(view, "session_status")
 
 
 # ── Task 7（会话状态所有权重构）之后：HITL_OPENED / HITL_RESOLVED 不再驱动投影 ──
@@ -80,4 +80,4 @@ async def test_hitl_resolved_does_not_overwrite_a_terminal_status() -> None:
          _hitl_event("s1", EventType.HITL_RESOLVED,
                      {"hitl_id": "h1", "outcome": "accepted"})],
         run_id="r1")
-    assert view.session_status == "SUCCEEDED"
+    assert not hasattr(view, "session_status")

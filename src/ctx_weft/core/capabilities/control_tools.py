@@ -557,7 +557,7 @@ def ask_user(
     ctx: ControlContext = None,
 ) -> ControlResult:
     """Ask the user one or more questions and wait for their reply — call this whenever you need information, a decision, a clarification, or a choice that only the user can provide; prefer asking over guessing or assuming. Execution pauses until they answer, then resumes from their reply."""
-    # 暂停态由 pending HITL 集合推导（spec §7.1），不再由这里直接写 session.status。
+    # 会话展示状态由宿主根据 pending HITL 与 agent/task 状态推导（spec §7.1）。
     # needs_human 的产出与 park 均在 ControlCapabilityProvider._handle() 完成。
     n = len(questions) if questions else 0
     return ControlResult(

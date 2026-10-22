@@ -14,7 +14,7 @@ from ctx_weft.protocols.hitl import HITL_FORM_QUESTION, ToolResultDelivery
 
 
 def _register_session(provider: ControlCapabilityProvider) -> Session:
-    session = Session(id="s1", tenant_id="default", user_prompt="do it", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="do it")
     task = Task(id="tsk_1", session_id="s1", status="ACTIVE", title="T1")
     tm = SimpleNamespace(get_task=lambda tid: task)
     provider.register_session("s1", tm, session)
@@ -62,7 +62,6 @@ async def test_ask_user_no_longer_sets_session_status_itself():
     """会话暂停态由 pending 集合推导，不再由工具函数体直接改（spec §7.1）。"""
     provider = ControlCapabilityProvider()
     session = _register_session(provider)
-    before = session.status
     _ = [ev async for ev in provider.invoke(
         "control:ask_user", {"questions": []}, _ctx("call_1"))]
-    assert session.status == before
+    assert not hasattr(session, "status")

@@ -81,7 +81,7 @@ def _user_turn_req(
 async def test_inject_writes_user_prompt_and_requeues() -> None:
     rt, mem = _runtime_with_memory()
     tm, task = _tm_with_task()
-    session = Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="x")
 
     await rt._inject_user_reply(_wait_for_user_req(message="ship it"), session, tm)
 
@@ -94,7 +94,7 @@ async def test_inject_writes_user_prompt_and_requeues() -> None:
 async def test_inject_reject_writes_declined() -> None:
     rt, mem = _runtime_with_memory()
     tm, _ = _tm_with_task()
-    session = Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="x")
 
     await rt._inject_user_reply(_wait_for_user_req(outcome="rejected", message="not now"), session, tm)
 
@@ -105,7 +105,7 @@ async def test_inject_reject_writes_declined() -> None:
 async def test_inject_missing_task_is_noop() -> None:
     rt, mem = _runtime_with_memory()
     tm = TaskManager(session_id="s1")             # 无 t1
-    session = Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="x")
 
     await rt._inject_user_reply(_wait_for_user_req(), session, tm)   # 不抛
 

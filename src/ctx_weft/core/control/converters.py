@@ -23,7 +23,6 @@ def session_from_projection(proj: SessionView) -> Session:
     return Session(
         id=proj.id,
         user_prompt=proj.user_prompt,
-        status=proj.status,  # type: ignore[arg-type]
         goal=proj.goal,
         tenant_id=proj.tenant_id,
         root_agent_id=proj.root_agent_id or None,

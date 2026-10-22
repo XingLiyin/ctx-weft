@@ -17,7 +17,7 @@ from ctx_weft.core.orchestrator.task.manager import TaskManager
 
 def _tm() -> TaskManager:
     tm = TaskManager(session_id="s1")
-    tm.set_session(Session(id="s1", user_prompt="", status="RUNNING", root_agent_id="root"))
+    tm.set_session(Session(id="s1", user_prompt="",  root_agent_id="root"))
     return tm
 
 

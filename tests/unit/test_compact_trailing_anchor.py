@@ -129,7 +129,7 @@ async def test_inject_user_reply_does_not_await_pending_observe(monkeypatch):
     """
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
     from ctx_weft.core import CtxWeftRuntime
-    
+
     order: list[str] = []
 
     class _RecordingMem(InMemoryMemoryProvider):
@@ -155,7 +155,7 @@ async def test_inject_user_reply_does_not_await_pending_observe(monkeypatch):
     pending = asyncio.create_task(_slow_fold())
     registry.register("recap-run", "t1", "observe", pending)
 
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     task = Task(id="t1", session_id="s1", status="SUSPENDED",
                 assigned_agent_id="a1", creator_agent_id="a1")
     async def _mark_human_resolved(tid, *, hitl_id):

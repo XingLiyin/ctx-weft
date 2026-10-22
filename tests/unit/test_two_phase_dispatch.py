@@ -34,7 +34,7 @@ def _task(tid: str, parent: str | None = None) -> Task:
 
 
 def _session(root: str = "root") -> Session:
-    return Session(id="s1", user_prompt="", status="RUNNING", root_agent_id=root)
+    return Session(id="s1", user_prompt="",  root_agent_id=root)
 
 
 async def test_task_started_emitted_once_by_tm_with_agent_id() -> None:

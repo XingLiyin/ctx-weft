@@ -60,7 +60,7 @@ async def _fixture(*, parent: str | None = "t_parent"):
     mem = InMemoryMemoryProvider()
     hitl_service, hitl_registry = make_hitl(bus)
 
-    session = Session(id=_SID, tenant_id="default", user_prompt="hi", status="RUNNING",
+    session = Session(id=_SID, tenant_id="default", user_prompt="hi",
                       token_budget=0)
     task = Task(
         id="t_child", session_id=_SID, status="AWAITING_HUMAN",

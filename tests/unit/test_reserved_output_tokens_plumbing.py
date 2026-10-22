@@ -5,7 +5,7 @@ from ctx_weft.core.control.types import SessionView
 
 def test_defaults_are_8192():
     assert LoopGuard().reserved_output_tokens == 8192
-    s = Session(id="s", user_prompt="hi", status="RUNNING")
+    s = Session(id="s", user_prompt="hi")
     assert s.reserved_output_tokens == 8192
     assert SessionView(id="s").reserved_output_tokens == 8192
 

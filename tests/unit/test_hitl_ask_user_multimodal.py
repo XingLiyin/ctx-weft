@@ -59,7 +59,7 @@ class _PassthroughNormalizer:
 def _env():
     """真 provider + 真 gateway + 真 HITL 子系统。返回 (gateway, ctx, state, registry, service)。"""
     provider = ControlCapabilityProvider()
-    session = Session(id="s1", tenant_id="default", user_prompt="do it", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="do it")
     task = Task(id="tsk_1", session_id="s1", status="ACTIVE", title="T1")
     tm = SimpleNamespace(get_task=lambda tid: task)
     provider.register_session("s1", tm, session)

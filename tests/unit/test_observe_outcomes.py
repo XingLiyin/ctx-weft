@@ -361,7 +361,7 @@ def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
     )
     state = LoopState(
         run_id="r1",
-        session=Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING"),
+        session=Session(id="s1", tenant_id="default", user_prompt="hi"),
         task=task, agent=agent,
         scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1"),
         act_exit_reason=exit_reason,

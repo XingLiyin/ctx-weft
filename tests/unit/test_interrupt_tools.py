@@ -77,7 +77,7 @@ def _harness(llm, provider):
     gw = CapabilityGateway(
         capability_cache=cache, capability_providers=[provider], memory=mem, event_bus=bus,
     )
-    session = Session(id="s1", tenant_id="default", user_prompt="hi", status="RUNNING", token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="hi",  token_budget=0)
     task = Task(id="t1", session_id="s1", status="ACTIVE", title="T", settings=NormalTaskSettings())
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")

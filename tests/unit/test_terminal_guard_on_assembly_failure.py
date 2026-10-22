@@ -35,7 +35,7 @@ def tm_with_bus():
     bus = _CapturingBus()
     tm = TaskManager(session_id="s1", event_bus=bus)
     tm._max_concurrent = 0  # drain 空转：不真正派发
-    session = Session(id="s1", user_prompt="", status="RUNNING")
+    session = Session(id="s1", user_prompt="")
     tm.set_session(session)
     tm.set_runner(StubRunner(tm))
     t = Task(id="tsk_1", session_id="s1", status="ACTIVE")

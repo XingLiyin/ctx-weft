@@ -72,7 +72,7 @@ async def test_resume_session_preserves_context_limit() -> None:
         event_store=store,
         user_prompt="continue",
         tenant_id="default",
-        task_manager=sm._new_task_manager(Session(id=sid, user_prompt="", status="RUNNING")),
+        task_manager=sm._new_task_manager(Session(id=sid, user_prompt="")),
     )
 
     assert session.context_limit == NON_DEFAULT_CONTEXT_LIMIT, (

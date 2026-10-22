@@ -34,7 +34,6 @@ class InitializationReport:
 class SessionStateSummary:
     """Status facts at one committed cut; contains no runtime owners or HITL bodies."""
 
-    session_status: str
     root_agent_id: str
     root_agent_status: str | None
     root_task_id: str
@@ -66,7 +65,6 @@ class SessionInitializationResult:
 class SessionDetail:
     session_id: str
     root_agent_id: str
-    status: str
     goal: str
     token_budget: int
     created_at: datetime | None

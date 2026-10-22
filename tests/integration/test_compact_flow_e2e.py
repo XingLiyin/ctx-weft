@@ -265,7 +265,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     agent, template = await lm.instantiate(
         template_id="agent:tpl_mr", session_id=sid, tenant_id="default", ctx=pctx)
     resolved_model = lm.resolve_model(agent.id)
-    session = Session(id=sid, user_prompt="do a long task", status="RUNNING",
+    session = Session(id=sid, user_prompt="do a long task",
                       tenant_id="default", root_agent_id=agent.id, llm_provider="",
                       created_at=now_utc())
     session.context_limit = resolved_model.context_limit

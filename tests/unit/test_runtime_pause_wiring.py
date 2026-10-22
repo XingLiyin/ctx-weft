@@ -96,7 +96,7 @@ async def test_pause_session_leaves_non_root_agents_alive():
 
     tm = TaskManager(session_id="s1", event_bus=rt._event_bus)
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                   status="RUNNING", token_budget=0, root_agent_id=root_id)
+                    token_budget=0, root_agent_id=root_id)
     tm.set_session(sess)
     tm.set_runner(_StubRunner())
     for tid, agent in (("t_root", root_id), ("t_child", child_id)):

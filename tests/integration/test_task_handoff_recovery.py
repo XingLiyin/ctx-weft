@@ -44,7 +44,7 @@ class _NoopRunner:
 
 def _tm(bus) -> TaskManager:
     tm = TaskManager(session_id="s1", max_concurrent=0, event_bus=bus.bus)
-    tm.set_session(Session(id="s1", user_prompt="", status="RUNNING"))
+    tm.set_session(Session(id="s1", user_prompt=""))
     tm.set_runner(_NoopRunner())
     return tm
 
@@ -151,7 +151,7 @@ async def test_plan_break_cancels_all_successors():
     assert cleanup.status == "CANCELED"
     assert cleanup.error_code == "BLOCKED_BY_FAILED_DEP"
     assert cleanup.error and final.id in cleanup.error
-    assert tm.session.status != "CANCELED"            # 会话不被误标
+    assert not hasattr(tm.session, "status")            # 会话不被误标
     assert not any(e.task_id in (final.id, cleanup.id) for e in tm._queue.peek_all())
 
 

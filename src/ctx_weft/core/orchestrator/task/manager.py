@@ -2105,24 +2105,6 @@ class TaskManager:
             elif status == "FINISHED" and not (task and task.switch_requested):
                 self._session.failure_counter = 0  # 成功时重置
                 self._recent_failures.clear()  # 随 counter 同步清空
-            elif status == "CANCELED":
-                # 用户主动中断：标记 session 为 CANCELED，防止 is_done() 误判为 SUCCEEDED。
-                # pause 弃子（_pause_abandon）除外：连带取消不定会话去向，由 root park 决定。
-                # _threshold_tripped 除外：熔断已判会话 FAILED，在途任务迟到的协作取消收尾
-                # 绝不能把终态盖回 CANCELED（trip 序列已先手，见 _trip_failure_threshold）。
-                # spec: task-handoff——依赖阻塞取消除外：那是计划内部的失败传播，不是
-                # 用户叫停；子任务被阻塞取消后父任务照常唤醒、观察并决定补救/收尾，
-                # 会话终态交给正常收敛路径（同 _pause_abandon 的豁免形态）。
-                if (
-                    not self._pause_abandon
-                    and not (task is not None and task.error == CancelReason.PAUSE_ABANDON)
-                    and not self._threshold_tripped
-                    and not (task is not None and task.error_code == TaskErrorCode.BLOCKED_BY_FAILED_DEP)
-                ):
-                    self._session.status = "CANCELED"
-
-        # spec: task-handoff——永久阻塞善后的运行期入口：前序 FAILED/CANCELED 落定后，
-        # on_success 后继若已判明永不可满足 → 立即处置（级联到不动点）。
         await self.dispose_blocked_dependents()
 
         # Try to resume parent
@@ -2145,9 +2127,6 @@ class TaskManager:
             if self._blocked_or_interrupted():
                 await self._fire_session_idle()
             else:
-                if self._session is not None and self._session.status not in ("FAILED", "CANCELED"):
-                    # failure_counter > 0 表示本轮有任务失败（成功时会被重置为 0）
-                    self._session.status = self._final_status()
                 await self._fire_session_done()
 
     def _find_blocked_forever(self) -> "tuple[str, str] | None":
@@ -2335,11 +2314,7 @@ class TaskManager:
             except Exception:
                 logger.exception("TaskManager: threshold_finalizer callback failed")
 
-        # 8) 会话终态 + 收尾事件。终态直接写定为 FAILED（2026-09-04 Task 12 起不再
-        #    经由队列聚合信号/会话状态机——熔断的前提就是 failure_counter 已达阈值，
-        #    `_final_status()` 此刻本就恒为 FAILED，无需绕一圈再落定）。
-        if self._session is not None:
-            self._session.status = "FAILED"
+        # Task failure facts own the outcome; only release session resources here.
         await self._fire_session_done()
 
     async def cancel_all(self, *, reason: str = "") -> None:
@@ -2356,8 +2331,6 @@ class TaskManager:
                        if self._tasks[tid].status == "CANCELED" and job is not asyncio.current_task()]
         for job in settlements:
             await asyncio.shield(job)
-        if self._session is not None:
-            self._session.status = "CANCELED"
 
     def _signal_cancel(self, task_id: str) -> None:
         """对在途 task 发协作取消信号（best-effort：缺注入或异常都不阻断 trip 序列）。"""
@@ -2426,19 +2399,6 @@ class TaskManager:
                 await self._event_bus.emit(event)
         self._pending_emissions.pop(key, None)
         return event
-
-    def _final_status(self) -> str:
-        """全部终态时的会话结论。failure_counter > 0 表示本轮有任务失败。
-
-        2026-09-04（Task 12）起 `announce_queue_state` 及其队列聚合事件已停发（事件
-        类型于 2026-09-05 删除），本方法不再是谁的数据源——唯一读者是本文件
-        `_settle` 里的 ``self._session.status = self._final_status()``（终态收尾
-        直接写 session 状态，不再经由已退役的会话状态机）。**只返回终态值**：
-        空串或别的东西会把 `_session.status` 写成一个不存在的状态。
-        """
-        if self._session is not None and self._session.failure_counter > 0:
-            return "FAILED"
-        return "SUCCEEDED"
 
     def _blocked_or_interrupted(self) -> bool:
         """还有非终态停顿的任务在等人/等 /resume——会话不算走完。"""
@@ -2551,16 +2511,8 @@ class TaskManager:
         """True when queue is empty and nothing is running."""
         return not self._queue.has_pending() and not self._running_tasks
 
-    async def finalize_idle_session(self, status: str) -> None:
-        """恢复专用：会话所有 task 已终态但 session 因崩溃未落终态 —— 设终态并复用
-        _fire_session_done（先 gather 重跑的后台 recap，再发 SESSION_FINISHED + 回调）。
-
-        镜像 on_task_finished 的会话收尾：走同一条 `_fire_session_done` 链，终态由调用方
-        传入的 `status` 直接写定（2026-09-04 Task 12 起不再经由队列聚合信号/会话状态机）。幂等由 `_fire_session_done` 内的归属权判定 + `_on_session_done`
-        自身幂等承担。
-        """
-        if self._session is not None:
-            self._session.status = status
+    async def finalize_idle_session(self) -> None:
+        """Release an idle recovered session after all task facts have settled."""
         await self._fire_session_done()
 
     async def resume_task(self, task_id: str, *, hitl_id: str) -> None:

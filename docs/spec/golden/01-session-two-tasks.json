@@ -52,7 +52,7 @@
     }
   ],
   "expected": {
-    "sessionStatus": "RUNNING",
+
     "tasks": {
       "tsk_1": { "status": "FINISHED" },
       "tsk_2": { "status": "ACTIVE" }

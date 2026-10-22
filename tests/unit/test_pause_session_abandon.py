@@ -40,7 +40,7 @@ def _task(tid: str, status: str = "PENDING") -> Task:
 def _wire(rt) -> tuple[TaskManager, Session]:
     tm = TaskManager(session_id="s1")
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                   status="RUNNING", token_budget=0, root_agent_id="agr")
+                    token_budget=0, root_agent_id="agr")
     tm.set_session(sess)
     tm.set_runner(_StubRunner())
     rt._task_managers["s1"] = tm
@@ -69,7 +69,7 @@ async def test_pause_session_partitions_root_run_vs_rest():
     assert tm.get_task("t_q").status == "CANCELED"
     # 闩锁置位（等 root park 后 _on_idle 清除）、session 状态未被弃子污染
     assert "s1" in rt._pausing
-    assert sess.status == "RUNNING"
+    assert not hasattr(sess, "status")
 
 
 async def test_pause_session_inflight_root_run_claims_resume_point():
@@ -134,7 +134,7 @@ class _StubExecTM:
 
 def _exec_runner(rt, tm, *, root_agent_id="agr") -> _SessionTaskRunner:
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                   status="RUNNING", token_budget=0, root_agent_id=root_agent_id)
+                    token_budget=0, root_agent_id=root_agent_id)
     return _SessionTaskRunner(
         runtime=rt, session=sess,
         lm=None, memory=None,
@@ -193,7 +193,7 @@ async def test_pause_session_keeps_queued_root_task():
     rt = _rt()
     tm = TaskManager(session_id="s1", max_concurrent=1)
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                   status="RUNNING", token_budget=0, root_agent_id="agr")
+                    token_budget=0, root_agent_id="agr")
     tm.set_session(sess)
     tm.set_runner(_StubRunner())
     rt._task_managers["s1"] = tm

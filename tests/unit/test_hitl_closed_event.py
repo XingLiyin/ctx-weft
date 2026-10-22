@@ -49,7 +49,7 @@ def _req(hitl_id="hit_u", message="我的答复"):
 async def _harness(monkeypatch):
     """runtime + 一条按顺序记录「ingest / emit」的探针。"""
     from tests.integration.test_minimal_loop import InlineAgentTemplateProvider, make_runtime
-    
+
     rt = make_runtime(agent_provider=InlineAgentTemplateProvider())
     rt.providers.register_memory(InMemoryMemoryProvider())
 
@@ -73,7 +73,7 @@ async def _harness(monkeypatch):
 
     monkeypatch.setattr(rt._event_bus, "emit", _traced_emit)
 
-    session = Session(id="s1", tenant_id="acme", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", tenant_id="acme", user_prompt="hi")
     task = Task(id="t1", session_id="s1", status="SUSPENDED",
                 assigned_agent_id="ag_root", creator_agent_id="ag_root")
     return rt, session, task, trace, emitted

@@ -47,7 +47,7 @@ def _runtime() -> CtxWeftRuntime:
 
 
 def _build_state_and_ctx(runtime: CtxWeftRuntime, task: Task):
-    session = Session(id="s1", user_prompt="hi", status="RUNNING")
+    session = Session(id="s1", user_prompt="hi")
     agent = Agent(id="agt1", session_id="s1", template_id="tpl", loop_guard=LoopGuard())
     scope = MemoryAddress(session_id="s1", task_id=task.id, agent_id="agt1")
     state = LoopState(run_id=generate_id("run"), session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))

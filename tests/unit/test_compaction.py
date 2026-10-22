@@ -90,7 +90,7 @@ def _agent(cfg: LoopConfig, context_limit: int = 1000) -> Agent:
 
 def _state(active: Task, cfg: LoopConfig, context_limit: int = 1000,
            context_tokens: int | None = None) -> LoopState:
-    session = Session(id="s1", user_prompt="u", status="RUNNING")
+    session = Session(id="s1", user_prompt="u")
     agent = _agent(cfg, context_limit)
     # escalating_compact 的预算门用 loop_guard.context_tokens；缺省=context_limit（视作已满,
     # 门总是打开）——迁移自旧 count-based _compact_scope 的测试显式传本参数模拟"未达预算"。

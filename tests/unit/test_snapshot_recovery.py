@@ -100,7 +100,7 @@ async def test_rebuild_view_snapshot_plus_delta_matches_full_replay() -> None:
     rebuilt = await rebuild_view(store, "s1")
 
     # 快照 + 增量 == 全量回放：会话/任务投影逐项一致。
-    assert rebuilt.session_status == full.session_status
+    assert not hasattr(rebuilt, "session_status")
     assert set(rebuilt.tasks) == set(full.tasks) == {"tsk_1", "tsk_2"}
     assert {tid: t.status for tid, t in rebuilt.tasks.items()} == \
            {tid: t.status for tid, t in full.tasks.items()}

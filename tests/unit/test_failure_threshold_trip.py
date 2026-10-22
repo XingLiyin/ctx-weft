@@ -46,7 +46,7 @@ def _types(bus: _CapturingBus) -> list:
 def _tm(bus: _CapturingBus, threshold: int = 3) -> tuple[TaskManager, Session]:
     tm = TaskManager(session_id="s1", event_bus=bus)
     tm._max_concurrent = 0  # drain 空转：不真正派发
-    session = Session(id="s1", user_prompt="", status="RUNNING", failure_threshold=threshold)
+    session = Session(id="s1", user_prompt="",  failure_threshold=threshold)
     tm.set_session(session)
     tm.set_runner(StubRunner(tm))
     return tm, session
@@ -97,7 +97,7 @@ async def test_trip_event_sequence_on_third_failure() -> None:
     assert hit_idx < failed_idx
     assert EventType.SESSION_STATUS_CHANGED not in types
     assert "TaskQueueDrained" not in [str(t) for t in types]
-    assert session.status == "FAILED"
+    assert not hasattr(session, "status")
 
 
 async def test_queue_and_suspended_tasks_canceled_root_failed() -> None:
@@ -121,7 +121,7 @@ async def test_queue_and_suspended_tasks_canceled_root_failed() -> None:
     assert suspended.status == "CANCELED"
     assert root.status == "FAILED"
     assert root.error_code == "TASK_FAILED_BY_THRESHOLD"
-    assert session.status == "FAILED"
+    assert not hasattr(session, "status")
 
     canceled_ids = {e.task_id for e in bus.events if e.type == EventType.TASK_CANCELED}
     assert "susp1" in canceled_ids
@@ -147,7 +147,7 @@ async def test_idempotent_no_retrip_on_fourth_failure() -> None:
 
     assert _types(bus).count(EventType.FAILURE_THRESHOLD_HIT) == hit_count_before
     assert _types(bus).count(EventType.TASK_FAILED) == failed_count_before
-    assert session.status == "FAILED"
+    assert not hasattr(session, "status")
 
 
 async def test_flush_staged_dropped_after_trip() -> None:
@@ -182,12 +182,12 @@ async def test_late_canceled_does_not_override_failed_session_status() -> None:
     tm._running_tasks.add("inflight1")
 
     await _fail_n_times(tm, ["c1", "c2", "c3"])
-    assert session.status == "FAILED"
+    assert not hasattr(session, "status")
 
     # inflight1 的 run 退出路径迟到收尾：走 on_task_finished(status="CANCELED")
     await tm.on_task_finished("inflight1", status="CANCELED")
 
-    assert session.status == "FAILED"  # 不被盖成 CANCELED
+    assert not hasattr(session, "status")  # 不被盖成 CANCELED
 
 
 async def test_ack_tasks_and_failures_passed_to_finalizer() -> None:
@@ -358,7 +358,7 @@ async def test_root_already_terminal_skips_finalization() -> None:
 
     # root 的 error_code 不应被 trip 序列覆盖成 TASK_FAILED_BY_THRESHOLD
     assert root.error_code == "TASK_FAILED_BY_OBSERVER"
-    assert session.status == "FAILED"
+    assert not hasattr(session, "status")
     # trip 序列没有为 root 再发一条 TASK_FAILED（root 已终态、判死跳过）
     root_failed_events = [
         e for e in bus.events if e.type == EventType.TASK_FAILED and e.task_id == "root"
@@ -390,7 +390,7 @@ async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
     orig_fire_session_done = tm._fire_session_done
 
     async def _tracking_fire_session_done():
-        if session.status == "FAILED":
+        if tm._threshold_tripped and root.status == "FAILED":
             call_order.append("session_failed")
         await orig_fire_session_done()
 
@@ -399,4 +399,4 @@ async def test_cancel_pending_hitl_invoked_before_terminal_status() -> None:
     await _fail_n_times(tm, ["c1", "c2", "c3"])
 
     assert call_order == ["cancel_hitl", "session_failed"]
-    assert session.status == "FAILED"
+    assert not hasattr(session, "status")

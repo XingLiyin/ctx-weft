@@ -79,7 +79,7 @@ async def test_tool_call_id_threads_through_provider_extra() -> None:
     tm = _FakeTM()
     parent = _parent()
     tm.get_task = lambda tid: parent  # type: ignore[assignment]
-    session = Session(id="s1", tenant_id="default", user_prompt="x", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="x")
     provider = ControlCapabilityProvider()
     provider.register_session("s1", tm, session)
 

@@ -44,7 +44,7 @@ def _tm(*, requeue_max: int = 3, base: float = 0.01) -> TaskManager:
         autonomous_requeue_max=requeue_max,
         autonomous_requeue_backoff_base_sec=base,
     )
-    tm.set_session(Session(id="s1", user_prompt="", status="RUNNING", root_agent_id="root"))
+    tm.set_session(Session(id="s1", user_prompt="",  root_agent_id="root"))
     tm.set_runner(_IdleRunner())
     return tm
 

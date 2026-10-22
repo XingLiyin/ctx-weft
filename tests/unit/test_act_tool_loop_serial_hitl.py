@@ -39,7 +39,7 @@ class _ParkingGateway:
 
 
 def _state() -> LoopState:
-    session = Session(id="s1", user_prompt="x", status="RUNNING")
+    session = Session(id="s1", user_prompt="x")
     task = Task(id="t1", session_id="s1", status="ACTIVE")
     agent = Agent(id="ag1", session_id="s1", template_id="tpl")
     return LoopState(

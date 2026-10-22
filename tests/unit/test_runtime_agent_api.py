@@ -38,7 +38,7 @@ def _plant(rt, agent_id, parent, session_id="s1", status="idle"):
         reg._children.setdefault(parent, set()).add(agent_id)
     if session_id not in rt._task_managers:
         from ctx_weft.core.models.session import Session
-        session = Session(id=session_id, user_prompt="", status="RUNNING", root_agent_id=agent_id)
+        session = Session(id=session_id, user_prompt="",  root_agent_id=agent_id)
         owner = rt._session_registry._new_task_manager(session)
         rt._register_and_drain(session, owner, start_tasks=False)
 
@@ -77,7 +77,7 @@ def _plant_live_task(rt, agent_id, task_id, *, task_status, agent_status, sessio
 
     tm = TaskManager(session_id=session_id, event_bus=rt._event_bus)
     session = Session(
-        id=session_id, user_prompt="hi", status="RUNNING", tenant_id="default",
+        id=session_id, user_prompt="hi",  tenant_id="default",
         root_agent_id=agent_id, created_at=None,
     )
     tm.set_session(session)

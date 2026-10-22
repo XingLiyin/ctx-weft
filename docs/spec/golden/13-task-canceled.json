@@ -17,7 +17,7 @@
       "type": "TaskCanceled", "timestamp": "2026-06-05T00:00:05Z", "payload": {} }
   ],
   "expected": {
-    "sessionStatus": "RUNNING",
+
     "taskStatus": "CANCELED",
     "tasks": { "tsk_1": { "status": "CANCELED" } }
   }

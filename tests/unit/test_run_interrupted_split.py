@@ -57,7 +57,7 @@ class _NonRetriable(Exception):
 def _tm(bus: _CapturingBus) -> tuple[TaskManager, Session, Task]:
     tm = TaskManager(session_id="s1", event_bus=bus)
     tm._max_concurrent = 0  # drain 空转：重排后不真正重跑
-    session = Session(id="s1", user_prompt="", status="RUNNING")
+    session = Session(id="s1", user_prompt="")
     tm.set_session(session)
     tm.set_runner(StubRunner(tm))
     t = Task(id="A", session_id="s1", status="ACTIVE")

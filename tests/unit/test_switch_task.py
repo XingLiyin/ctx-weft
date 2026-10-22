@@ -96,7 +96,7 @@ def test_terminal_schema_is_local_and_requires_terminal_verdict():
 @pytest.mark.parametrize("verdict", ["success", "fail"])
 async def test_switched_review_settles_both_terminal_results_without_failure_threshold(verdict):
     tm, old, _, bus = setup_switch()
-    tm.set_session(Session(id="s1", tenant_id="default", status="RUNNING", user_prompt="old"))
+    tm.set_session(Session(id="s1", tenant_id="default",  user_prompt="old"))
     old.status = "REVIEWING"
     new = Task(id="new", session_id="s1", status="ACTIVE", assigned_agent_id="a1")
     tm._tasks[new.id] = new

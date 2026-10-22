@@ -203,7 +203,7 @@ async def test_ot14_delegate_completed_reentry_no_duplicate_children():
         get_task=lambda tid: parent_task,
     )
     staged: list = []
-    session = Session(id="s1", tenant_id="default", user_prompt="go", status="RUNNING")
+    session = Session(id="s1", tenant_id="default", user_prompt="go")
     parent_task = TaskModel(id="t1", session_id="s1", status="ACTIVE", title="P")
     control.register_session("s1", tm_stub, session)
 

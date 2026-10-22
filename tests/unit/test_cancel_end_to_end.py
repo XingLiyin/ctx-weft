@@ -155,7 +155,7 @@ def _wire(*, report_verdict: bool) -> tuple[TaskManager, Task, Session, _SpyBus]
     bus = _SpyBus(runtime._event_bus)
     runtime._event_bus = bus       # run 域事实（RunStarted/RunCanceled/RunFinished）也走这条
 
-    session = Session(id="s1", user_prompt="hi", status="RUNNING", root_agent_id="agt1")
+    session = Session(id="s1", user_prompt="hi",  root_agent_id="agt1")
     agent = Agent(id="agt1", session_id="s1", template_id="tpl", loop_guard=LoopGuard())
     task = Task(id="A", session_id="s1", status="PENDING")
 
@@ -191,7 +191,7 @@ async def test_cancel_seam_run_loop_to_task_manager() -> None:
     assert tm._queue.pop() is None
     # CANCELED 走的是 on_task_finished 自己的显式分支（"用户主动中断：标记 session 为
     # CANCELED"），不经 `_final_status()`——与 FINISHED/FAILED 走的收尾支同源但判据不同。
-    assert _session.status == "CANCELED"
+    assert task.status == "CANCELED"
     assert EventType.TASK_REQUEUED not in types
 
 
@@ -210,7 +210,7 @@ async def test_observer_fail_then_boundary_cancel_lands_on_canceled() -> None:
     assert session.failure_counter == 0             # 不计失败 → 不会触发熔断
     # 会话随之落 CANCELED（`on_task_finished` 的 CANCELED 分支）——旧路径这里是
     # `on_task_finished(FAILED)`、failure_counter +1、会话按 _final_status() 判 FAILED。
-    assert session.status == "CANCELED"
+    assert not hasattr(session, "status")
 
 
 # ── Task 3：`_run_loop` 分得清取消来源（总账 A3，仅剩这一条） ──────────────────
@@ -224,7 +224,7 @@ def _make_loop_fixture() -> tuple[CtxWeftRuntime, Session, Agent, Task, _SpyBus]
     bus = _SpyBus(runtime._event_bus)
     runtime._event_bus = bus
 
-    session = Session(id="s2", user_prompt="hi", status="RUNNING", root_agent_id="agt1")
+    session = Session(id="s2", user_prompt="hi",  root_agent_id="agt1")
     agent = Agent(id="agt1", session_id="s2", template_id="tpl", loop_guard=LoopGuard())
     task = Task(id="B", session_id="s2", status="ACTIVE")
     return runtime, session, agent, task, bus
@@ -332,7 +332,7 @@ async def _wire_multi_agent_session(
     （`per` 或 `task_manager` 非空）落在真实组件上，`agent_ids_of_session` 也确实能
     读到两个目标。"""
     session = Session(
-        id=session_id, user_prompt="hi", status="RUNNING",
+        id=session_id, user_prompt="hi",
         tenant_id="default", root_agent_id=root_id, created_at=now_utc(),
     )
     tm = TaskManager(session_id=session_id, event_bus=rt._event_bus, max_concurrent=0)
