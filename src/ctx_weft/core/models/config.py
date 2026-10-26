@@ -54,7 +54,9 @@ class RuntimeConfig:
     spill_preview_chars: int = 1000
     # spec: tool-result-recovery——收敛版尾部预览字符数（错误/结论高发区立即止血）。
     spill_tail_chars: int = 1000
-    # LLM 瞬时故障自愈预算（stream_llm_resilient 读取；默认=历史安全值）
+    # LLM 首包前恢复预算，由 gateway 统一管理，adapter 单次发送。
+    # attempts 含首次请求；duration 含首包前请求与退避，首个 chunk 后解除总时限。
+    # max_interval 约束本地退避（再加至多 10% 抖动）；Retry-After 可更长，但不超总预算。
     llm_self_heal_max_attempts: int = 8
     llm_self_heal_max_duration_sec: float = 300.0
     llm_self_heal_base_delay_sec: float = 2.0

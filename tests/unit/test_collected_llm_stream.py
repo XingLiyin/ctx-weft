@@ -88,7 +88,7 @@ def offline_adapter(provider, body=None):
 
             return httpx.AsyncClient(transport=httpx.MockTransport(respond))
 
-    return Offline(api_key="offline", max_http_retries=1)
+    return Offline(api_key="offline")
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
@@ -325,8 +325,9 @@ def test_legalization_keeps_signed_thinking_on_the_corresponding_assistant():
     assert _serialize_messages([assistant])[0]["content"][0]["signature"] == "signature"
 
 
-async def test_inline_http_retry_discards_hidden_content_from_the_failed_attempt(monkeypatch):
-    import ctx_weft.providers.llm.adapters.openai as openai_module
+async def test_gateway_retry_discards_hidden_content_from_the_failed_attempt(monkeypatch):
+    from ctx_weft.core.loop import llm_gateway
+    from ctx_weft.core.models.config import RuntimeConfig
 
     calls, attempts = [], []
 
@@ -345,10 +346,10 @@ async def test_inline_http_retry_discards_hidden_content_from_the_failed_attempt
 
             return httpx.AsyncClient(transport=httpx.MockTransport(respond))
 
-    async def no_sleep(delay):
+    async def no_sleep(delay, tok):
         pass
 
-    monkeypatch.setattr(openai_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(llm_gateway, "_sleep_cancellable", no_sleep)
     from ctx_weft.providers.llm.adapters._stream_parsing import AdapterStreamParser
 
     original = AdapterStreamParser.feed_text
@@ -358,8 +359,10 @@ async def test_inline_http_retry_discards_hidden_content_from_the_failed_attempt
         return original(self, text)
 
     monkeypatch.setattr(AdapterStreamParser, "feed_text", observe_attempt)
-    adapter = Offline(api_key="offline", max_http_retries=2)
-    stream = CollectedLLMStream(adapter.complete(LLMRequest(model="offline", system="", messages=[])))
+    adapter = Offline(api_key="offline")
+    ctx = SimpleNamespace(llm=adapter, config=RuntimeConfig(), cancel_token=None, event_bus=None)
+    stream = llm_gateway.stream_llm_resilient(
+        ctx, None, LLMRequest(model="offline", system="", messages=[]))
     try:
         async for _ in stream:
             stream.accept_current()

@@ -62,7 +62,7 @@ async def _drive(adapter):
 async def test_openai_midstream_failure_raises_retriable_without_internal_retry():
     line = "data: " + json.dumps({"choices": [{"delta": {"content": "hello"}, "finish_reason": None}]})
     client = _CountingClient([line], httpx.ReadTimeout("boom"))
-    a = OpenAIAdapter(api_key="k", max_http_retries=3)
+    a = OpenAIAdapter(api_key="k")
     a._client = client
     with pytest.raises(LLMCallError) as exc:
         await _drive(a)
@@ -77,7 +77,7 @@ async def test_anthropic_midstream_failure_raises_retriable_without_internal_ret
         "delta": {"type": "text_delta", "text": "hello"},
     })
     client = _CountingClient([line], httpx.ReadTimeout("boom"))
-    a = AnthropicAdapter(api_key="k", max_http_retries=3)
+    a = AnthropicAdapter(api_key="k")
     a._client = client
     with pytest.raises(LLMCallError) as exc:
         await _drive(a)
@@ -92,7 +92,7 @@ async def test_openai_midtoolcall_failure_raises_retriable_without_internal_retr
         {"index": 0, "id": "t1", "function": {"name": "read", "arguments": "{\"p\":"}}]},
         "finish_reason": None}]})
     client = _CountingClient([line], httpx.ReadTimeout("boom"))
-    a = OpenAIAdapter(api_key="k", max_http_retries=3)
+    a = OpenAIAdapter(api_key="k")
     a._client = client
     with pytest.raises(LLMCallError) as exc:
         await _drive(a)
@@ -108,7 +108,7 @@ async def test_anthropic_midtoolcall_failure_raises_retriable_without_internal_r
                                "delta": {"type": "input_json_delta", "partial_json": "{\"p\":"}}),
     ]
     client = _CountingClient(lines, httpx.ReadTimeout("boom"))
-    a = AnthropicAdapter(api_key="k", max_http_retries=3)
+    a = AnthropicAdapter(api_key="k")
     a._client = client
     with pytest.raises(LLMCallError) as exc:
         await _drive(a)

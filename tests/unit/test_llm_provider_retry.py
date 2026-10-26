@@ -1,3 +1,9 @@
+"""Direct provider calls (including settings probes) perform one HTTP attempt."""
+
+import httpx
+import pytest
+
+from ctx_weft.protocols import LLMCallError, LLMRequest
 from ctx_weft.providers.llm import ModelCapabilities, ModelLimits
 from ctx_weft.providers.llm.provider import LLMAccount, LLMProvider, ModelConfig
 
@@ -31,19 +37,29 @@ def _acct(style):
     )
 
 
-def test_provider_threads_retry_to_adapter():
-    p = LLMProvider(_MemStore(), max_http_retries=9)
-    p.register_account(_acct("anthropic"), persist=False)
-    assert p.get_client("a")._adapter._max_http_retries == 9
-
-
-def test_provider_threads_retry_to_openai_adapter():
-    p = LLMProvider(_MemStore(), max_http_retries=5)
-    p.register_account(_acct("openai"), persist=False)
-    assert p.get_client("a")._adapter._max_http_retries == 5
-
-
-def test_provider_default_retries():
+@pytest.mark.parametrize("protocol", ["anthropic", "openai"])
+@pytest.mark.parametrize("entry", ["complete", "ping", "verify"])
+async def test_provider_direct_request_has_no_hidden_retry(protocol, entry):
     p = LLMProvider(_MemStore())
-    p.register_account(_acct("anthropic"), persist=False)
-    assert p.get_client("a")._adapter._max_http_retries == 3
+    p.register_account(_acct(protocol), persist=False)
+    client = p.get_client("a")
+    adapter = client._adapter
+    await adapter._client.aclose()
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(503, text="unavailable")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        adapter._client = http
+        with pytest.raises(LLMCallError) as error:
+            if entry == "complete":
+                async for _ in client.complete(LLMRequest(model="m", system="", messages=[])):
+                    pass
+            elif entry == "ping":
+                await p.ping_model_for_account("a", "m")
+            else:
+                await p.verify_model_for_account("a", "m")
+    assert error.value.outage is True
+    assert len(calls) == 1

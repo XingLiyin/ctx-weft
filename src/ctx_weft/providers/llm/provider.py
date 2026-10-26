@@ -86,12 +86,11 @@ class _FixedModelClient:
 class LLMProvider:
     """Resolve configured models; reuse adapters for each account/protocol/image combination."""
 
-    def __init__(self, store: LLMAccountStoreProtocol, *, max_http_retries: int = 3) -> None:
+    def __init__(self, store: LLMAccountStoreProtocol) -> None:
         self._accounts: dict[str, LLMAccount] = {}
         self._adapters: dict[str, dict[tuple[str, bool], LLMClient]] = {}
         self._adapter_settings: dict[str, tuple[str, str, int]] = {}
         self._store = store
-        self._max_http_retries = max_http_retries
 
     def register_account(self, account: LLMAccount, *, persist: bool = True) -> None:
         if account.name in self._accounts:
@@ -244,7 +243,6 @@ class LLMProvider:
             api_key=account.api_key,
             base_url=account.base_url,
             timeout_sec=account.timeout_sec,
-            max_http_retries=self._max_http_retries,
         )
 
     async def fetch_models(self, protocol: str, api_key: str, base_url: str) -> list[str]:

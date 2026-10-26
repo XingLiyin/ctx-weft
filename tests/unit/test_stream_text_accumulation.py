@@ -44,7 +44,7 @@ class _ReplayAdapter(OpenAIAdapter):
         self.request_count = 0
         super().__init__(
             api_key="offline-topic-10", model="offline-topic-10",
-            base_url="https://topic-10.invalid", max_http_retries=1,
+            base_url="https://topic-10.invalid",
         )
 
     def _make_client(self):

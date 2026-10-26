@@ -6,30 +6,24 @@ Compatible with OpenAI chat completions API + any OpenAI-compatible endpoint.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 from ctx_weft.protocols import (
-    LLMCallError, LLMChunk, LLMMessage, LLMRequest, LLMTool, LLMUsage, RAW_ARGS_KEY, ToolCall,
+    LLMChunk, LLMMessage, LLMRequest, LLMTool, LLMUsage, RAW_ARGS_KEY, ToolCall,
     LLMClient,
 )
+from ctx_weft.providers.llm.adapters._errors import http_error, transport_error
 from ctx_weft.providers.llm.adapters._finalize import build_finalize_chunks, parse_tool_arguments
 from ctx_weft.providers.llm.adapters._modality import downgrade_for_text_only
 from ctx_weft.providers.llm.adapters._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.adapters._stream_parsing import begin_parsed_attempt
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
-logger = logging.getLogger(__name__)
-
 _OPENAI_API_URL = "https://api.openai.com"
-
-_NON_RETRIABLE_CODES = frozenset({400, 401, 403, 404})
-_RETRIABLE_CODES     = frozenset({429, 500, 502, 503, 504})
 
 # OpenAI 的 role="tool" 只接受纯文本，图片必须重定位到随后的 user 消息（Phase 3c Task B）。
 # 这条标记把「图去哪了」告诉模型，替代改前的**静默丢弃**。
@@ -55,7 +49,6 @@ class OpenAIAdapter(LLMClient):
         context_limit: int = 128_000,
         output_reserve: int = 4096,
         timeout_sec: int = 120,
-        max_http_retries: int = 3,
         tool_choice: str | None = None,
     ) -> None:
         self._api_key = api_key
@@ -64,7 +57,6 @@ class OpenAIAdapter(LLMClient):
         self._context_limit = context_limit
         self._output_reserve = output_reserve
         self._timeout = timeout_sec
-        self._max_http_retries = max_http_retries
         # None = 省略 tool_choice（vLLM 不开 --enable-auto-tool-choice 会拒绝带 "auto" 的请求）。
         # 显式给 "auto"/"none"/"required" 才发送。
         self._tool_choice = tool_choice
@@ -109,167 +101,113 @@ class OpenAIAdapter(LLMClient):
         url = self._chat_url()
 
         produced = False  # 是否已向消费者吐过 chunk（流已开始）
-        for attempt in range(self._max_http_retries):
-            state = begin_parsed_attempt()
-            last_tc_idx: int | None = None  # 供缺 index 的续传 delta 归到最后活跃桶
-            finish_reason: str | None = None
-            usage: LLMUsage | None = None
-            try:
-                # 流式 read 超时 = 闲置(自上一字节起)超时,而非整段时长上限:正常流(token/思考/
-                # 工具参数分片)持续来字节会不断重置计时器,故长工具调用/长思考不会误触发。仅当连接
-                # 静默(中途断网/死 socket,无字节无 RST)超过 timeout 才触发 ReadTimeout(TransportError)
-                # → produced=True 时抛 outage → INTERRUPTED;否则会永久挂起。
-                async with self._client.stream(
-                    "POST", url, headers=headers, json=payload,
-                    timeout=httpx.Timeout(self._timeout, read=self._timeout),
-                ) as resp:
-                    if resp.status_code != 200:
-                        body = await resp.aread()
-                        err_body = body.decode()
+        state = begin_parsed_attempt()
+        last_tc_idx: int | None = None  # 供缺 index 的续传 delta 归到最后活跃桶
+        finish_reason: str | None = None
+        usage: LLMUsage | None = None
+        try:
+            # 流式 read 超时 = 闲置(自上一字节起)超时,而非整段时长上限:正常流(token/思考/
+            # 工具参数分片)持续来字节会不断重置计时器,故长工具调用/长思考不会误触发。仅当连接
+            # 静默(中途断网/死 socket,无字节无 RST)超过 timeout 才触发 ReadTimeout(TransportError)
+            # → 抛 outage，由 gateway 决定首包前重试或流中断。
+            async with self._client.stream(
+                "POST", url, headers=headers, json=payload,
+                timeout=httpx.Timeout(self._timeout, read=self._timeout),
+            ) as resp:
+                if resp.status_code != 200:
+                    raise http_error("OpenAI", resp)
 
-                        if resp.status_code in _NON_RETRIABLE_CODES:
-                            raise LLMCallError(
-                                f"OpenAI API error {resp.status_code}: {err_body}",
-                                status_code=resp.status_code,
-                                retriable=False,
-                            )
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
 
-                        if resp.status_code in _RETRIABLE_CODES and attempt < self._max_http_retries - 1:
-                            try:
-                                delay = float(resp.headers.get("retry-after", 2 ** attempt))
-                            except (ValueError, TypeError):
-                                delay = float(2 ** attempt)
-                            delay = min(delay, 60.0)
-                            logger.warning(
-                                "OpenAI API %d (attempt %d/%d), retrying in %.1fs: %.200s",
-                                resp.status_code, attempt + 1, self._max_http_retries, delay, err_body,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-
-                        retry_after_hdr = resp.headers.get("retry-after")
-                        try:
-                            retry_after_val = float(retry_after_hdr) if retry_after_hdr else None
-                        except (ValueError, TypeError):
-                            retry_after_val = None
-                        is_retriable = resp.status_code in _RETRIABLE_CODES
-                        raise LLMCallError(
-                            f"OpenAI API error {resp.status_code}: {err_body}",
-                            status_code=resp.status_code,
-                            retriable=is_retriable,
-                            outage=is_retriable,
-                            retry_after_sec=retry_after_val,
+                    # usage 可能随 finish_reason 同包，也可能在其后的 choices=[] 尾包里——
+                    # 任何带 usage 的 event 都更新，并读到流尾再产出（不再 finish 即 return）。
+                    usage_data = event.get("usage") or {}
+                    if usage_data:
+                        prompt_details = usage_data.get("prompt_tokens_details") or {}
+                        completion_details = usage_data.get("completion_tokens_details") or {}
+                        # 缓存命中：标准 prompt_tokens_details.cached_tokens →
+                        # DeepSeek 方言 prompt_cache_hit_tokens → 0（方言封死在 adapter 内）
+                        cache_read = (prompt_details.get("cached_tokens")
+                                      or usage_data.get("prompt_cache_hit_tokens") or 0)
+                        usage = LLMUsage(
+                            prompt_tokens=usage_data.get("prompt_tokens", 0),
+                            completion_tokens=usage_data.get("completion_tokens", 0),
+                            total_tokens=usage_data.get("total_tokens", 0),
+                            cache_read_tokens=cache_read,
+                            cache_write_tokens=0,  # OpenAI 系不区分/不计费缓存写入
+                            # input_tokens 不传 → __post_init__ 派生 prompt − cached
+                            # （OpenAI 只报 cached 子集，无未缓存原始值可记）
+                            reasoning_tokens=completion_details.get("reasoning_tokens", 0) or 0,
                         )
 
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data = line[6:]
-                        if data == "[DONE]":
-                            break
-                        try:
-                            event = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
+                    choices = event.get("choices") or []
+                    if not choices:
+                        continue
 
-                        # usage 可能随 finish_reason 同包，也可能在其后的 choices=[] 尾包里——
-                        # 任何带 usage 的 event 都更新，并读到流尾再产出（不再 finish 即 return）。
-                        usage_data = event.get("usage") or {}
-                        if usage_data:
-                            prompt_details = usage_data.get("prompt_tokens_details") or {}
-                            completion_details = usage_data.get("completion_tokens_details") or {}
-                            # 缓存命中：标准 prompt_tokens_details.cached_tokens →
-                            # DeepSeek 方言 prompt_cache_hit_tokens → 0（方言封死在 adapter 内）
-                            cache_read = (prompt_details.get("cached_tokens")
-                                          or usage_data.get("prompt_cache_hit_tokens") or 0)
-                            usage = LLMUsage(
-                                prompt_tokens=usage_data.get("prompt_tokens", 0),
-                                completion_tokens=usage_data.get("completion_tokens", 0),
-                                total_tokens=usage_data.get("total_tokens", 0),
-                                cache_read_tokens=cache_read,
-                                cache_write_tokens=0,  # OpenAI 系不区分/不计费缓存写入
-                                # input_tokens 不传 → __post_init__ 派生 prompt − cached
-                                # （OpenAI 只报 cached 子集，无未缓存原始值可记）
-                                reasoning_tokens=completion_details.get("reasoning_tokens", 0) or 0,
-                            )
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
 
-                        choices = event.get("choices") or []
-                        if not choices:
-                            continue
+                    reasoning = delta.get("reasoning_content") or ""
+                    if reasoning:
+                        produced = True
+                        yield LLMChunk(kind="reasoning", text=reasoning)
 
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        if choice.get("finish_reason"):
-                            finish_reason = choice["finish_reason"]
-
-                        reasoning = delta.get("reasoning_content") or ""
-                        if reasoning:
+                    text = delta.get("content") or ""
+                    if text:
+                        tok = state.feed_text(text)
+                        if tok:
                             produced = True
-                            yield LLMChunk(kind="reasoning", text=reasoning)
+                            yield LLMChunk(kind="token", text=tok)
 
-                        text = delta.get("content") or ""
-                        if text:
-                            tok = state.feed_text(text)
-                            if tok:
-                                produced = True
-                                yield LLMChunk(kind="token", text=tok)
+                    tc_deltas = delta.get("tool_calls") or []
+                    for tc_delta in tc_deltas:
+                        idx = _resolve_tc_index(tc_delta, state.tool_buffers, last_tc_idx)
+                        last_tc_idx = idx
+                        fn = tc_delta.get("function") or {}
+                        name = fn.get("name")
+                        args = fn.get("arguments")
+                        if args:
+                            args = args if isinstance(args, str) else json.dumps(args)
+                        state.feed_tool(
+                            idx, call_id=tc_delta.get("id") or "",
+                            name=(name if isinstance(name, str) else str(name)) if name else "",
+                            arguments=args or "", append_name=True,
+                        )
+                    if tc_deltas:
+                        # 工具调用参数流式累积期间不产出 token：消费者的 async-for 会一直挂起，
+                        # act 流式循环顶部的暂停/取消检查点无从触发 → 发个无负载心跳让其有机会运行。
+                        # 同时标记 produced：本轮已在生成工具调用，若此后 transport 断流，走 retriable
+                        # 让 gateway 走中断入口，不自动重发本轮请求。
+                        produced = True
+                        yield LLMChunk(kind="tool_call_partial")
 
-                        tc_deltas = delta.get("tool_calls") or []
-                        for tc_delta in tc_deltas:
-                            idx = _resolve_tc_index(tc_delta, state.tool_buffers, last_tc_idx)
-                            last_tc_idx = idx
-                            fn = tc_delta.get("function") or {}
-                            name = fn.get("name")
-                            args = fn.get("arguments")
-                            if args:
-                                args = args if isinstance(args, str) else json.dumps(args)
-                            state.feed_tool(
-                                idx, call_id=tc_delta.get("id") or "",
-                                name=(name if isinstance(name, str) else str(name)) if name else "",
-                                arguments=args or "", append_name=True,
-                            )
-                        if tc_deltas:
-                            # 工具调用参数流式累积期间不产出 token：消费者的 async-for 会一直挂起，
-                            # act 流式循环顶部的暂停/取消检查点无从触发 → 发个无负载心跳让其有机会运行。
-                            # 同时标记 produced：本轮已在生成工具调用，若此后 transport 断流，走 retriable
-                            # 让任务层干净整跑，而非静默 inline 重发整个长工具调用（见 except 分支）。
-                            produced = True
-                            yield LLMChunk(kind="tool_call_partial")
+                # 流以任何方式结束（[DONE] / 自然结束）→ 统一收尾：截断判定、
+                # native 规整、文本/思考还原、usage、done（见 _finalize）。
+                for ch in build_finalize_chunks(
+                    content_text=state.content_text,
+                    native_tool_calls=_parse_buffers(state.tool_buffers),
+                    had_native_buffer=bool(state.tool_buffers),
+                    saw_terminal=finish_reason is not None,
+                    usage=usage,
+                    finish_reason=finish_reason,
+                    emitted_visible_len=state.gate.emitted_len,
+                ):
+                    yield ch
+                return
 
-                    # 流以任何方式结束（[DONE] / 自然结束）→ 统一收尾：截断判定、
-                    # native 规整、文本/思考还原、usage、done（见 _finalize）。
-                    for ch in build_finalize_chunks(
-                        content_text=state.content_text,
-                        native_tool_calls=_parse_buffers(state.tool_buffers),
-                        had_native_buffer=bool(state.tool_buffers),
-                        saw_terminal=finish_reason is not None,
-                        usage=usage,
-                        finish_reason=finish_reason,
-                        emitted_visible_len=state.gate.emitted_len,
-                    ):
-                        yield ch
-                    return
-
-            except httpx.TransportError as exc:
-                # 已吐过 chunk（流中断）→ 不在 adapter 内重试（会重复 token），
-                # 抛 retriable 让 TaskManager 整任务干净重跑。
-                if produced:
-                    logger.warning(
-                        "OpenAI stream interrupted mid-flight (tool_call_in_progress=%s): %s",
-                        bool(state.tool_buffers), exc,
-                    )
-                    raise LLMCallError(
-                        f"LLM stream interrupted mid-flight: {exc}", retriable=True, outage=True,
-                    ) from exc
-                if attempt < self._max_http_retries - 1:
-                    delay = float(2 ** attempt)
-                    logger.warning(
-                        "OpenAI transport error (attempt %d/%d), retrying in %.1fs: %s",
-                        attempt + 1, self._max_http_retries, delay, exc,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise LLMCallError(str(exc), retriable=False) from exc
+        except (httpx.TransportError, httpx.InvalidURL) as exc:
+            raise transport_error("OpenAI", exc, produced=produced) from exc
 
     async def list_models(self) -> list[str]:
         """List available model ids via GET {base}/v1/models. Raises on HTTP error."""

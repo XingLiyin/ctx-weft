@@ -46,8 +46,8 @@ class LLMCallError(RuntimeError):
 
     三类故障各走不同路径（retriable × outage 组合）：
 
-    retriable=False              永久错（401 认证 / 400 参数 / 404 模型 / transport 重试耗尽）
-                                 → 立即 FAILED，重试无意义。
+    retriable=False              认证 / 参数 / 模型 / 明确的 TLS 或 HTTP 配置错误
+                                 → 跳过请求恢复，交由运行时中断处置。
     retriable=True, outage=True  基础设施类瞬时故障（429 限流 / 5xx / 网络 / transport 断流）
                                  → 由自愈层（stream_llm_resilient）进程内退避等待 LLM 恢复；
                                  预算耗尽则 _run_loop 走 INTERRUPTED（可 /resume）。**不**经

@@ -11,14 +11,14 @@ from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
 pytestmark = pytest.mark.asyncio
 
 
-def _anthropic_adapter(handler, *, retries=1):
-    a = AnthropicAdapter(api_key="k", max_http_retries=retries)
+def _anthropic_adapter(handler):
+    a = AnthropicAdapter(api_key="k")
     a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return a
 
 
-def _openai_adapter(handler, *, retries=1):
-    a = OpenAIAdapter(api_key="k", max_http_retries=retries)
+def _openai_adapter(handler):
+    a = OpenAIAdapter(api_key="k")
     a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return a
 
@@ -120,7 +120,7 @@ async def test_401_is_not_outage_and_not_retriable():
 
 async def test_anthropic_mid_flight_transport_is_outage():
     """Transport error after first chunk is emitted → retriable outage (no inline retry)."""
-    a = AnthropicAdapter(api_key="k", max_http_retries=1)
+    a = AnthropicAdapter(api_key="k")
     a._client = _AnthropicMidFlightClient()
     got = []
     with pytest.raises(LLMCallError) as ei:
@@ -135,7 +135,7 @@ async def test_bad_retry_after_header_gives_none():
     def handler(request):
         return httpx.Response(503, headers={"retry-after": "soon"}, text="overloaded")
     with pytest.raises(LLMCallError) as ei:
-        await _drain(_anthropic_adapter(handler, retries=1))
+        await _drain(_anthropic_adapter(handler))
     assert ei.value.outage is True
     assert ei.value.retry_after_sec is None
 
@@ -157,7 +157,7 @@ async def test_openai_429_is_outage():
     def handler(request):
         return httpx.Response(429, text="rate limited")
     with pytest.raises(LLMCallError) as ei:
-        await _drain(_openai_adapter(handler, retries=1))
+        await _drain(_openai_adapter(handler))
     assert ei.value.outage is True
     assert ei.value.retriable is True
 
@@ -173,7 +173,7 @@ async def test_openai_401_is_not_outage_and_not_retriable():
 
 async def test_openai_mid_flight_transport_is_outage():
     """OpenAI transport error after first chunk is emitted → retriable outage."""
-    a = OpenAIAdapter(api_key="k", max_http_retries=1)
+    a = OpenAIAdapter(api_key="k")
     a._client = _OpenAIMidFlightClient()
     got = []
     with pytest.raises(LLMCallError) as ei:

@@ -52,7 +52,7 @@ from ctx_weft.core.utils.content import rehydrate_content, redact_content_for_ev
 from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.utils.estimate import dynamic_max_tokens, estimate_content_tokens, estimate_tool_calls_tokens
-from ctx_weft.core.loop.llm_stream import DelegatingLLMStream
+from ctx_weft.core.loop.llm_stream import DelegatingLLMStream, stream_until_cancel
 if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
 
@@ -522,9 +522,9 @@ def _compute_delay(
     max_interval: float,
     retry_after: "float | None",
 ) -> float:
-    """指数退避延迟（attempt 1-based）；优先采用 Retry-After；上限 max_interval。"""
+    """本地退避上限为 max_interval；服务端 Retry-After 不提前截短。"""
     if retry_after is not None and retry_after > 0:
-        return min(retry_after, max_interval)
+        return retry_after
     return min(base * (2 ** (attempt - 1)), max_interval)
 
 
@@ -539,6 +539,7 @@ async def _sleep_cancellable(delay: float, tok) -> None:
     finally:
         if not waiter.done():
             waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
     tok.raise_if_cancelled()
 
 
@@ -573,8 +574,9 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     - 仅当本次尝试**尚未 yield 任何 chunk** 时重试（避免重复 token / 污染累积）。
     - 已 yield 后断流（中途 outage）→ 直接 LLMOutageError（靠 /resume 重驱动）。
     - 非 outage 的 retriable（如 _finalize 截断）与永久错 → 原样抛出（保留既有语义）。
-    - 预算（max_attempts / max_duration）耗尽 → LLMOutageError。
-    - 退避期间尊重 cancel_token。
+    - max_attempts 包含首次调用；原生 adapter 每次只发送一个 HTTP 请求。
+    - max_duration 包括首包前的请求与退避；首个 chunk 后不再限制总时长。
+    - 请求和退避期间均尊重 cancel_token；退出前关闭在途流。
 
     「流式侧」4 种 LLM_* 事件（REQUEST_STARTED / PROMPT_SENT / TOKEN_STREAMED /
     REASONING_STREAMED）在此发射（task-4 收敛，spec 2026-09-03 §9.5），对所有调用方
@@ -632,7 +634,7 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
     apply_dynamic_max_tokens(ctx, request, loop_guard)
 
-    max_attempts = int(_cfg_val(ctx, "llm_self_heal_max_attempts", _DEFAULT_MAX_ATTEMPTS))
+    max_attempts = max(1, int(_cfg_val(ctx, "llm_self_heal_max_attempts", _DEFAULT_MAX_ATTEMPTS)))
     max_duration = _cfg_val(ctx, "llm_self_heal_max_duration_sec", _DEFAULT_MAX_DURATION_SEC)
     base = _cfg_val(ctx, "llm_self_heal_base_delay_sec", _DEFAULT_BASE_DELAY_SEC)
     max_interval = _cfg_val(ctx, "llm_self_heal_max_interval_sec", _DEFAULT_MAX_INTERVAL_SEC)
@@ -640,16 +642,35 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     deadline = monotonic() + max_duration
     tok = getattr(ctx, "cancel_token", None)
     attempt = 0
+    last_error = None
     while True:
+        if tok is not None:
+            tok.raise_if_cancelled()
+        if monotonic() >= deadline:
+            raise LLMOutageError(
+                f"LLM first-chunk recovery deadline exceeded after {attempt} attempt(s)",
+                status_code=getattr(last_error, "status_code", 0),
+            ) from last_error
+        attempt += 1
         yielded_anything = False
         source = owner.bind(stream_llm(
             ctx.llm, request,
             blob_store=getattr(ctx, "blob_store", None),
             provider_ctx=getattr(ctx, "provider_ctx", None),
         ))
+        chunks = stream_until_cancel(source, tok)
+        first_timeout = None
         try:
             try:
-                async for chunk in source:
+                while True:
+                    try:
+                        if yielded_anything:
+                            chunk = await anext(chunks)
+                        else:
+                            async with asyncio.timeout(max(0.0, deadline - monotonic())) as first_timeout:
+                                chunk = await anext(chunks)
+                    except StopAsyncIteration:
+                        break
                     if emit_stream_events:
                         if chunk.kind == "token":
                             await bus.emit(make_event(
@@ -662,17 +683,30 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
                     yielded_anything = True
                     yield chunk
             finally:
-                await source.aclose()
+                try:
+                    await chunks.aclose()
+                finally:
+                    await source.aclose()
             return  # success
+        except TimeoutError as e:
+            if first_timeout is None or not first_timeout.expired():
+                raise
+            raise LLMOutageError(
+                f"LLM first-chunk recovery deadline exceeded after {attempt} attempt(s)",
+                status_code=getattr(last_error, "status_code", 0),
+            ) from e
         except LLMCallError as e:
             if not getattr(e, "retriable", True) or not _is_outage(e):
                 raise  # 永久错 / 非 outage retriable → 原样抛出
             if yielded_anything:
-                raise LLMOutageError(f"LLM outage mid-stream: {e}") from e
+                raise LLMOutageError(
+                    f"LLM outage mid-stream: {e}", status_code=e.status_code,
+                ) from e
             if tok is not None:
                 tok.raise_if_cancelled()
-            attempt += 1
-            if attempt >= max_attempts or monotonic() >= deadline:
+            last_error = e
+            remaining = deadline - monotonic()
+            if attempt >= max_attempts or remaining <= 0:
                 raise LLMOutageError(
                     f"LLM self-heal exhausted after {attempt} attempt(s): {e}",
                     status_code=getattr(e, "status_code", 0),
@@ -684,5 +718,6 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
                 retry_after=getattr(e, "retry_after_sec", None),
             )
             delay += random.uniform(0, delay * 0.1)  # jitter
+            delay = min(delay, remaining)
             await _emit_retry(ctx, state, attempt, max_attempts, delay, e)
             await _sleep_cancellable(delay, tok)

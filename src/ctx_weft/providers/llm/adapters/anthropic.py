@@ -6,17 +6,16 @@ Supports streaming via Anthropic SSE protocol.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 from ctx_weft.protocols import (
-    LLMCallError, LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
+    LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
 )
+from ctx_weft.providers.llm.adapters._errors import http_error, transport_error
 from ctx_weft.providers.llm.adapters._finalize import build_finalize_chunks, parse_tool_arguments
 from ctx_weft.providers.llm.adapters._modality import downgrade_for_text_only
 from ctx_weft.providers.llm.adapters._schema import sanitize_boolean_schemas
@@ -24,13 +23,8 @@ from ctx_weft.providers.llm.adapters._stream_parsing import begin_parsed_attempt
 from ctx_weft.providers.llm.adapters.text_calls import unwrap_raw_arguments
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
-logger = logging.getLogger(__name__)
-
 _ANTHROPIC_API_URL = "https://api.anthropic.com"
 _ANTHROPIC_VERSION = "2023-06-01"
-
-_NON_RETRIABLE_CODES = frozenset({400, 401, 403, 404})
-_RETRIABLE_CODES     = frozenset({429, 500, 502, 503, 504})
 
 # I2: 空白/空 tool_result 的占位内容——查证 Anthropic 对 tool_result.content 为空字符串
 # / 空数组同样 400（与其对纯空/纯空白 text block 的拒绝同源），故不能像 assistant 分支
@@ -49,7 +43,6 @@ class AnthropicAdapter(LLMClient):
         context_limit: int = 200_000,
         output_reserve: int = 8192,
         timeout_sec: int = 120,
-        max_http_retries: int = 3,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -57,7 +50,6 @@ class AnthropicAdapter(LLMClient):
         self._context_limit = context_limit
         self._output_reserve = output_reserve
         self._timeout = timeout_sec
-        self._max_http_retries = max_http_retries
         self._client = self._make_client()
         self._tokenizers: dict[str, HeuristicTokenizer] = {}
 
@@ -103,188 +95,134 @@ class AnthropicAdapter(LLMClient):
         url = self._api_url("messages")
 
         produced = False  # 是否已向消费者吐过 chunk（流已开始）
-        for attempt in range(self._max_http_retries):
-            state = begin_parsed_attempt()
-            input_tokens: int | None = None
-            cache_read = 0
-            cache_write = 0
-            finish_reason: str | None = None
-            usage: LLMUsage | None = None
+        state = begin_parsed_attempt()
+        input_tokens: int | None = None
+        cache_read = 0
+        cache_write = 0
+        finish_reason: str | None = None
+        usage: LLMUsage | None = None
 
-            try:
-                # 流式 read 超时 = 闲置(自上一字节起)超时,而非整段时长上限:正常流(token/思考/
-                # 工具参数分片,以及 Anthropic 周期性 ping)持续来字节会不断重置计时器,故长工具调用/
-                # 长思考不会误触发。仅当连接静默(中途断网/死 socket,无字节无 RST)超过 timeout 才触发
-                # ReadTimeout(TransportError)→ produced=True 时抛 outage → INTERRUPTED;否则会永久挂起。
-                async with self._client.stream(
-                    "POST", url, headers=headers, json=payload,
-                    timeout=httpx.Timeout(self._timeout, read=self._timeout),
-                ) as resp:
-                    if resp.status_code != 200:
-                        body = await resp.aread()
-                        err_body = body.decode()
+        try:
+            # 流式 read 超时 = 闲置(自上一字节起)超时,而非整段时长上限:正常流(token/思考/
+            # 工具参数分片,以及 Anthropic 周期性 ping)持续来字节会不断重置计时器,故长工具调用/
+            # 长思考不会误触发。仅当连接静默(中途断网/死 socket,无字节无 RST)超过 timeout 才触发
+            # ReadTimeout → 抛 outage，由 gateway 决定首包前重试或流中断。
+            async with self._client.stream(
+                "POST", url, headers=headers, json=payload,
+                timeout=httpx.Timeout(self._timeout, read=self._timeout),
+            ) as resp:
+                if resp.status_code != 200:
+                    raise http_error("Anthropic", resp)
 
-                        if resp.status_code in _NON_RETRIABLE_CODES:
-                            raise LLMCallError(
-                                f"Anthropic API error {resp.status_code}: {err_body}",
-                                status_code=resp.status_code,
-                                retriable=False,
-                            )
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
 
-                        if resp.status_code in _RETRIABLE_CODES and attempt < self._max_http_retries - 1:
-                            try:
-                                delay = float(resp.headers.get("retry-after", 2 ** attempt))
-                            except (ValueError, TypeError):
-                                delay = float(2 ** attempt)
-                            delay = min(delay, 60.0)
-                            logger.warning(
-                                "Anthropic API %d (attempt %d/%d), retrying in %.1fs: %.200s",
-                                resp.status_code, attempt + 1, self._max_http_retries, delay, err_body,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
+                    event_type = event.get("type", "")
 
-                        retry_after_hdr = resp.headers.get("retry-after")
-                        try:
-                            retry_after_val = float(retry_after_hdr) if retry_after_hdr else None
-                        except (ValueError, TypeError):
-                            retry_after_val = None
-                        is_retriable = resp.status_code in _RETRIABLE_CODES
-                        raise LLMCallError(
-                            f"Anthropic API error {resp.status_code}: {err_body}",
-                            status_code=resp.status_code,
-                            retriable=is_retriable,
-                            outage=is_retriable,
-                            retry_after_sec=retry_after_val,
-                        )
+                    if event_type == "message_start":
+                        usage_data = (event.get("message") or {}).get("usage") or {}
+                        input_tokens = usage_data.get("input_tokens")
+                        cache_read = usage_data.get("cache_read_input_tokens") or 0
+                        cache_write = usage_data.get("cache_creation_input_tokens") or 0
 
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data = line[6:]
-                        if data == "[DONE]":
-                            break
-                        try:
-                            event = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
+                    elif event_type == "content_block_start":
+                        block = event.get("content_block") or {}
+                        idx = event.get("index", 0)
+                        block_type = block.get("type", "")
+                        if block_type == "tool_use":
+                            state.feed_tool(idx, call_id=block.get("id", ""), name=block.get("name", ""), reset=True)
+                        elif block_type == "thinking":
+                            state.start_thinking(idx)
 
-                        event_type = event.get("type", "")
+                    elif event_type == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        delta_type = delta.get("type", "")
+                        idx = event.get("index", 0)
 
-                        if event_type == "message_start":
-                            usage_data = (event.get("message") or {}).get("usage") or {}
+                        if delta_type == "text_delta":
+                            text = delta.get("text") or ""
+                            if text:
+                                tok = state.feed_text(text)
+                                if tok:
+                                    produced = True
+                                    yield LLMChunk(kind="token", text=tok)
+
+                        elif delta_type == "thinking_delta":
+                            thinking = delta.get("thinking") or ""
+                            if thinking:
+                                produced = True
+                                yield LLMChunk(kind="reasoning", text=thinking, reasoning_index=idx)
+
+                        elif delta_type == "signature_delta":
+                            state.signature(idx, delta.get("signature") or "")
+
+                        elif delta_type == "input_json_delta":
+                            partial = delta.get("partial_json") or ""
+                            if idx in state.tool_buffers:
+                                # merge_content：兼容增量与「字符级前缀重发」两种流式语义，
+                                # 避免重发被盲拼成畸形（同 content 的 N5 防御）。
+                                state.feed_tool(idx, arguments=partial)
+                                # 见 openai.py：工具调用参数流式期间发无负载心跳，让 act 流式
+                                # 循环顶部的暂停/取消检查点有机会运行；并标记 produced 使断流走
+                                # outage（流中断），不自动重发本轮请求。
+                                produced = True
+                                yield LLMChunk(kind="tool_call_partial")
+
+                    elif event_type == "content_block_stop":
+                        state.stop_block(event.get("index", 0))
+
+                    elif event_type == "message_delta":
+                        stop_reason = event.get("delta", {}).get("stop_reason")
+                        usage_data = event.get("usage") or {}
+                        output_tokens = usage_data.get("output_tokens", 0)
+                        # 部分代理在尾包重发输入侧字段——带了就覆盖（以尾包为准）
+                        if usage_data.get("input_tokens") is not None:
                             input_tokens = usage_data.get("input_tokens")
+                        if usage_data.get("cache_read_input_tokens") is not None:
                             cache_read = usage_data.get("cache_read_input_tokens") or 0
+                        if usage_data.get("cache_creation_input_tokens") is not None:
                             cache_write = usage_data.get("cache_creation_input_tokens") or 0
+                        # Anthropic 的 input_tokens 不含缓存部分 → 归一为「全部输入」口径，
+                        # 保证 core 的 context 阈值/预算拿到真实上下文规模（开缓存后不失真）
+                        uncached = input_tokens or 0
+                        prompt_total = uncached + cache_read + cache_write
+                        usage = LLMUsage(
+                            prompt_tokens=prompt_total,
+                            completion_tokens=output_tokens,
+                            total_tokens=prompt_total + output_tokens,
+                            cache_read_tokens=cache_read,
+                            cache_write_tokens=cache_write,
+                            input_tokens=uncached,
+                            # reasoning_tokens 恒 0：thinking 计入 output_tokens 无单列，
+                            # 不用流式 thinking 文本估算——估算值混进计费口径就是错账
+                        )
+                        finish_reason = stop_reason or "stop"
+                        break  # 终止事件 → 跳出循环做统一收尾
 
-                        elif event_type == "content_block_start":
-                            block = event.get("content_block") or {}
-                            idx = event.get("index", 0)
-                            block_type = block.get("type", "")
-                            if block_type == "tool_use":
-                                state.feed_tool(idx, call_id=block.get("id", ""), name=block.get("name", ""), reset=True)
-                            elif block_type == "thinking":
-                                state.start_thinking(idx)
+                # 流以任何方式结束（message_delta / 自然结束）→ 统一收尾：
+                # 截断判定、native 规整、文本/思考还原、usage、done（见 _finalize）。
+                for ch in build_finalize_chunks(
+                    content_text=state.content_text,
+                    native_tool_calls=_parse_tool_blocks(state.tool_buffers),
+                    had_native_buffer=bool(state.tool_buffers),
+                    saw_terminal=finish_reason is not None,
+                    usage=usage,
+                    finish_reason=finish_reason,
+                    emitted_visible_len=state.gate.emitted_len,
+                ):
+                    yield ch
+                return
 
-                        elif event_type == "content_block_delta":
-                            delta = event.get("delta") or {}
-                            delta_type = delta.get("type", "")
-                            idx = event.get("index", 0)
-
-                            if delta_type == "text_delta":
-                                text = delta.get("text") or ""
-                                if text:
-                                    tok = state.feed_text(text)
-                                    if tok:
-                                        produced = True
-                                        yield LLMChunk(kind="token", text=tok)
-
-                            elif delta_type == "thinking_delta":
-                                thinking = delta.get("thinking") or ""
-                                if thinking:
-                                    produced = True
-                                    yield LLMChunk(kind="reasoning", text=thinking, reasoning_index=idx)
-
-                            elif delta_type == "signature_delta":
-                                state.signature(idx, delta.get("signature") or "")
-
-                            elif delta_type == "input_json_delta":
-                                partial = delta.get("partial_json") or ""
-                                if idx in state.tool_buffers:
-                                    # merge_content：兼容增量与「字符级前缀重发」两种流式语义，
-                                    # 避免重发被盲拼成畸形（同 content 的 N5 防御）。
-                                    state.feed_tool(idx, arguments=partial)
-                                    # 见 openai.py：工具调用参数流式期间发无负载心跳，让 act 流式
-                                    # 循环顶部的暂停/取消检查点有机会运行；并标记 produced 使断流走
-                                    # retriable（任务层干净整跑），而非静默 inline 重发整个长工具调用。
-                                    produced = True
-                                    yield LLMChunk(kind="tool_call_partial")
-
-                        elif event_type == "content_block_stop":
-                            state.stop_block(event.get("index", 0))
-
-                        elif event_type == "message_delta":
-                            stop_reason = event.get("delta", {}).get("stop_reason")
-                            usage_data = event.get("usage") or {}
-                            output_tokens = usage_data.get("output_tokens", 0)
-                            # 部分代理在尾包重发输入侧字段——带了就覆盖（以尾包为准）
-                            if usage_data.get("input_tokens") is not None:
-                                input_tokens = usage_data.get("input_tokens")
-                            if usage_data.get("cache_read_input_tokens") is not None:
-                                cache_read = usage_data.get("cache_read_input_tokens") or 0
-                            if usage_data.get("cache_creation_input_tokens") is not None:
-                                cache_write = usage_data.get("cache_creation_input_tokens") or 0
-                            # Anthropic 的 input_tokens 不含缓存部分 → 归一为「全部输入」口径，
-                            # 保证 core 的 context 阈值/预算拿到真实上下文规模（开缓存后不失真）
-                            uncached = input_tokens or 0
-                            prompt_total = uncached + cache_read + cache_write
-                            usage = LLMUsage(
-                                prompt_tokens=prompt_total,
-                                completion_tokens=output_tokens,
-                                total_tokens=prompt_total + output_tokens,
-                                cache_read_tokens=cache_read,
-                                cache_write_tokens=cache_write,
-                                input_tokens=uncached,
-                                # reasoning_tokens 恒 0：thinking 计入 output_tokens 无单列，
-                                # 不用流式 thinking 文本估算——估算值混进计费口径就是错账
-                            )
-                            finish_reason = stop_reason or "stop"
-                            break  # 终止事件 → 跳出循环做统一收尾
-
-                    # 流以任何方式结束（message_delta / 自然结束）→ 统一收尾：
-                    # 截断判定、native 规整、文本/思考还原、usage、done（见 _finalize）。
-                    for ch in build_finalize_chunks(
-                        content_text=state.content_text,
-                        native_tool_calls=_parse_tool_blocks(state.tool_buffers),
-                        had_native_buffer=bool(state.tool_buffers),
-                        saw_terminal=finish_reason is not None,
-                        usage=usage,
-                        finish_reason=finish_reason,
-                        emitted_visible_len=state.gate.emitted_len,
-                    ):
-                        yield ch
-                    return
-
-            except httpx.TransportError as exc:
-                # 已吐过 chunk（流中断）→ 不在 adapter 内重试（会重复 token），
-                # 抛 retriable 让 TaskManager 整任务干净重跑。
-                if produced:
-                    logger.warning(
-                        "Anthropic stream interrupted mid-flight (tool_call_in_progress=%s): %s",
-                        bool(state.tool_buffers), exc,
-                    )
-                    raise LLMCallError(
-                        f"LLM stream interrupted mid-flight: {exc}", retriable=True, outage=True,
-                    ) from exc
-                if attempt < self._max_http_retries - 1:
-                    delay = float(2 ** attempt)
-                    logger.warning(
-                        "Anthropic transport error (attempt %d/%d), retrying in %.1fs: %s",
-                        attempt + 1, self._max_http_retries, delay, exc,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise LLMCallError(str(exc), retriable=False) from exc
+        except (httpx.TransportError, httpx.InvalidURL) as exc:
+            raise transport_error("Anthropic", exc, produced=produced) from exc
 
     async def list_models(self) -> list[str]:
         """List available model ids via GET {base}/v1/models. Raises on HTTP error."""

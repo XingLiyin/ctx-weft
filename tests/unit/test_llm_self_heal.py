@@ -133,7 +133,7 @@ async def test_exhaust_max_attempts_raises_outage():
 
 
 async def test_exhaust_max_duration_raises_outage(monkeypatch):
-    clock = iter([0.0, 1000.0, 1000.0, 1000.0])
+    clock = iter([0.0, 0.0, 0.0, 1000.0])
     monkeypatch.setattr(llm_gateway, "monotonic", lambda: next(clock))
     llm = _FakeLLM([{"kind": "fail_pre"}])
     with pytest.raises(LLMOutageError):
@@ -177,7 +177,7 @@ async def test_cancel_pierces_backoff():
     with pytest.raises(asyncio.CancelledError):
         await _drain(stream_llm_resilient(
             _ctx(llm, cancel_token=tok, bus=_Bus(), config=_cfg()), None, _req()))
-    assert llm.calls == 1   # cancelled before a second attempt
+    assert llm.calls == 0   # cancelled before issuing a request
 
 
 # ── Direct _sleep_cancellable tests (use the real function, bypassing the autouse stub) ──
