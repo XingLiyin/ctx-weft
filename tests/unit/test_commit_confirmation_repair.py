@@ -35,6 +35,10 @@ async def test_stopped_requeue_submission_consumes_retry_budget_once(receipt_los
     async def read(tid):
         return (await rebuild_view(store, "s1")).tasks.get(tid)
     tm.set_hooks(TaskManagerHooks(read_task_state=read))
+    notified = []
+    async def observe_requeue(event):
+        notified.append((task.status, task.retry_count))
+    bus.subscribe(EventType.TASK_REQUEUED, observe_requeue)
     original = store.append_batch
     async def append_batch(sid, bid, events):
         if any(e.type == EventType.TASK_REQUEUED for e in events):
@@ -46,9 +50,11 @@ async def test_stopped_requeue_submission_consumes_retry_budget_once(receipt_los
     with pytest.raises(PersistenceUnavailableError):
         await tm.apply_run_outcome(task.id, RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="continue"))
     assert task.retry_count == 0
+    assert task.status == "ACTIVE" and not notified
     store.append_batch = original
     await tm.reconcile_stopped_tasks()
     assert task.retry_count == 1 and task.status == "PENDING"
+    assert notified == [("PENDING", 1)]
     assert not tm.running_task_ids()
     assert [e.task_id for e in tm._queue.peek_all()] == [task.id]
     head = await store.committed_head("s1")

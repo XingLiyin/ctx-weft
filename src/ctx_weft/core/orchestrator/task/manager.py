@@ -59,6 +59,12 @@ _DEFAULT_AUTONOMOUS_REQUEUE_MAX          = 3
 _DEFAULT_AUTONOMOUS_REQUEUE_BACKOFF_BASE = 30.0
 
 
+@dataclass(frozen=True)
+class _PendingEmission:
+    event: Event
+    on_committed: Callable[[], None] | None = None
+
+
 class TaskManager:
     """Manages a per-session TaskQueue and drives task execution.
 
@@ -116,8 +122,8 @@ class TaskManager:
         self._lock = asyncio.Lock()
         self._session: Session | None = None  # 注入后供 failure_counter 维护使用
         self._event_bus: "EventBus | None" = event_bus
-        # Original event envelopes, retained only while submission/receipt is pending.
-        self._pending_emissions = {}
+        # Retain the original envelope and its state publication across retries.
+        self._pending_emissions: dict[tuple[EventType, str | None], _PendingEmission] = {}
         self._pending_batches = {}
         self._background_asyncio_tasks: set[asyncio.Task] = set()
         self._session_done_waiter: asyncio.Task | None = None
@@ -1139,6 +1145,13 @@ class TaskManager:
                     payload["reason"] = cancel_reason
                 await self._commit_task_cancellation(task, payload)
                 return task.status
+            # A notification failure can leave a committed decision waiting for
+            # delivery. Finish that original decision before recalculating a budget
+            # or treating the notification error as a new execution failure.
+            for key, pending in list(self._pending_emissions.items()):
+                if task is not None and key[1] == task_id and pending.on_committed is not None:
+                    await self._publish_emission(key, pending, committed=True)
+                    return task.status
             disp = self._decide_and_write(task_id, outcome, apply=False)
             if disp.status == "CANCELED" and cancel_reason:
                 canceled_at = now_utc()
@@ -1147,8 +1160,10 @@ class TaskManager:
                 task.finished_at = canceled_at
             if outcome.observe_id:
                 disp.payload["observe_id"] = outcome.observe_id
-            await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload, committed=True)
-            self._decide_and_write(task_id, outcome)
+            await self._emit(
+                EventType(disp.event_type), task_id=task_id, payload=disp.payload, committed=True,
+                on_committed=lambda: self._apply_disposition(task_id, outcome, disp),
+            )
             return disp.status
 
     async def resume_observe_decision(self, task_id, decision, *, observe_id, outcome,
@@ -1261,7 +1276,18 @@ class TaskManager:
         ))
         if outcome.observe_disposition and disp.event_type == "TaskFinished":
             disp.payload["outputs"] = outcome.outputs
-        if task is not None and apply:
+        if apply:
+            self._apply_disposition(task_id, outcome, disp)
+        return disp
+
+    def _apply_disposition(self, task_id: str, outcome: RunOutcome, disp: Disposition) -> None:
+        """Publish the committed decision before subscribers query current task state.
+
+        Apply the frozen retry count rather than recomputing its budget: notification
+        retries can publish the same committed decision more than once.
+        """
+        task = self._tasks.get(task_id)
+        if task is not None:
             task.status = disp.status
             if disp.event_type == "TaskRequeued":
                 # **处置表不 mutate**：新的 retry_count 只在 payload 里，必须在这里写回，
@@ -1274,7 +1300,6 @@ class TaskManager:
                 task.error = outcome.error or task.error
                 if outcome.error_code:
                     task.error_code = outcome.error_code
-        return disp
 
     async def recover_canceled_tasks(self) -> None:
         from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
@@ -1290,12 +1315,12 @@ class TaskManager:
 
     async def reconcile_stopped_tasks(self):
         """Finish original submissions and release stopped owners before requeueing."""
-        for (event_type, tid), event in list(self._pending_emissions.items()):
+        for key, pending in list(self._pending_emissions.items()):
+            event_type, tid = key
             if tid and not self._dispatch_is_live(tid):
-                await self._event_bus.emit_batch((event,))
+                await self._publish_emission(key, pending, committed=True)
                 if event_type == EventType.TASK_REQUEUED and tid in self._tasks:
-                    self._tasks[tid].retry_count = event.payload["retry_count"]
-                self._pending_emissions.pop((event_type, tid), None)
+                    self._tasks[tid].retry_count = pending.event.payload["retry_count"]
         confirm = getattr(self._runner, "confirm_finished", None)
         if confirm is not None:
             for task in list(self._tasks.values()):
@@ -1451,11 +1476,9 @@ class TaskManager:
         confirm = getattr(self._runner, "confirm_finished", None)
         if confirm is not None:
             await confirm(task_id)
-        for key, event in list(self._pending_emissions.items()):
+        for key, pending in list(self._pending_emissions.items()):
             if key[1] == task_id and key[0] in (EventType.TASK_FINISHED, EventType.TASK_FAILED):
-                if self._event_bus is not None:
-                    await self._event_bus.emit(event)
-                self._pending_emissions.pop(key, None)
+                await self._publish_emission(key, pending, committed=True)
 
     async def _commit_task_cancellation(self, task, payload):
         """Caller holds _lock. Reconcile an unknown receipt before any cancellation effects."""
@@ -2374,6 +2397,7 @@ class TaskManager:
         *,
         agent_id: str | None = None,
         committed: bool = False,
+        on_committed: Callable[[], None] | None = None,
     ) -> Event:
         """构造并发出一个 session/task 级别的事件（无 LoopState）。
 
@@ -2383,22 +2407,35 @@ class TaskManager:
         保持 None，不乱填。
         """
         key = (event_type, task_id)
-        event = self._pending_emissions.get(key)
-        if event is None:
+        pending = self._pending_emissions.get(key)
+        if pending is None:
             event = new_event(event_type, session_id=self._session_id,
                 tenant_id=self._session.tenant_id if self._session else "default",
                 origin=_ORIGIN, task_id=task_id,
                 agent_id=agent_id if agent_id is not None else (
                     self._agent_id_of(task_id) if task_id is not None else None),
                 payload=payload)
-            self._pending_emissions[key] = event
+            pending = _PendingEmission(event, on_committed)
+            self._pending_emissions[key] = pending
+        await self._publish_emission(key, pending, committed=committed)
+        return pending.event
+
+    async def _publish_emission(
+        self, key: tuple[EventType, str | None], pending: _PendingEmission, *, committed: bool,
+    ) -> None:
+        """Confirm storage, publish local state, then notify using the original event."""
         if self._event_bus is not None:
-            if committed:
-                await self._event_bus.emit_batch((event,))
+            if pending.on_committed is not None:
+                await self._event_bus.emit_batch(
+                    (pending.event,), on_committed=pending.on_committed,
+                )
+            elif committed:
+                await self._event_bus.emit_batch((pending.event,))
             else:
-                await self._event_bus.emit(event)
+                await self._event_bus.emit(pending.event)
+        elif pending.on_committed is not None:
+            pending.on_committed()
         self._pending_emissions.pop(key, None)
-        return event
 
     def _blocked_or_interrupted(self) -> bool:
         """还有非终态停顿的任务在等人/等 /resume——会话不算走完。"""
