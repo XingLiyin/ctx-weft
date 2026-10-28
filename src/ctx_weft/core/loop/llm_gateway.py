@@ -40,6 +40,7 @@ adapter 不应重复实现以上不变式——已在 core 层集中保证。
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import logging
 import random
@@ -550,11 +551,13 @@ async def _emit_retry(
     max_attempts: int,
     delay: float,
     error: BaseException,
+    request_id: str | None = None,
 ) -> None:
     bus = getattr(ctx, "event_bus", None)
     if bus is None or state is None:
         return
     await bus.emit(make_event(state, EventType.LLM_RETRY_TRIGGERED, payload={
+        "request_id": request_id,
         "attempt": attempt,
         "max_attempts": max_attempts,
         "next_delay_sec": delay,
@@ -571,11 +574,12 @@ def stream_llm_resilient(ctx, state, request) -> DelegatingLLMStream:
 async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LLMChunk"]:
     """退避自愈包装：把 retriable+outage 的 LLM 调用在进程内指数退避重试。
 
-    - 仅当本次尝试**尚未 yield 任何 chunk** 时重试（避免重复 token / 污染累积）。
-    - 已 yield 后断流（中途 outage）→ 直接 LLMOutageError（靠 /resume 重驱动）。
+    - 中途 outage 先关闭旧流、废弃结果并发 RESPONSE_DISCARDED，再从空状态重试。
+    - 所有重试共用 request_id；消费者按废弃事件清空临时输出，不能跨事件拼接。
     - 非 outage 的 retriable（如 _finalize 截断）与永久错 → 原样抛出（保留既有语义）。
     - max_attempts 包含首次调用；原生 adapter 每次只发送一个 HTTP 请求。
     - max_duration 包括首包前的请求与退避；首个 chunk 后不再限制总时长。
+    - 首次中途断流另开 midstream_recovery 窗口，后续故障不刷新，次数仍共用。
     - 请求和退避期间均尊重 cancel_token；退出前关闭在途流。
 
     「流式侧」4 种 LLM_* 事件（REQUEST_STARTED / PROMPT_SENT / TOKEN_STREAMED /
@@ -638,8 +642,13 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     max_duration = _cfg_val(ctx, "llm_self_heal_max_duration_sec", _DEFAULT_MAX_DURATION_SEC)
     base = _cfg_val(ctx, "llm_self_heal_base_delay_sec", _DEFAULT_BASE_DELAY_SEC)
     max_interval = _cfg_val(ctx, "llm_self_heal_max_interval_sec", _DEFAULT_MAX_INTERVAL_SEC)
+    midstream_duration = _cfg_val(ctx, "llm_midstream_recovery_max_duration_sec", 300.0)
 
     deadline = monotonic() + max_duration
+    midstream_deadline = None
+    # Adapters/legalization may mutate a request. Every retry receives the same
+    # original input, never a previous attempt's mutations or partial response.
+    original_request = copy.deepcopy(request)
     tok = getattr(ctx, "cancel_token", None)
     attempt = 0
     last_error = None
@@ -654,7 +663,7 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
         attempt += 1
         yielded_anything = False
         source = owner.bind(stream_llm(
-            ctx.llm, request,
+            ctx.llm, copy.deepcopy(original_request),
             blob_store=getattr(ctx, "blob_store", None),
             provider_ctx=getattr(ctx, "provider_ctx", None),
         ))
@@ -698,15 +707,32 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
         except LLMCallError as e:
             if not getattr(e, "retriable", True) or not _is_outage(e):
                 raise  # 永久错 / 非 outage retriable → 原样抛出
-            if yielded_anything:
-                raise LLMOutageError(
-                    f"LLM outage mid-stream: {e}", status_code=e.status_code,
-                ) from e
             if tok is not None:
                 tok.raise_if_cancelled()
             last_error = e
+            if yielded_anything and midstream_deadline is None:
+                midstream_deadline = monotonic() + midstream_duration
+                deadline = midstream_deadline
             remaining = deadline - monotonic()
-            if attempt >= max_attempts or remaining <= 0:
+            will_retry = attempt < max_attempts and remaining > 0
+            if yielded_anything:
+                usage = source.partial_result().usage
+                session = getattr(state, "session", None)
+                if session is not None and hasattr(session, "token_used"):
+                    session.token_used += usage.prompt_tokens + usage.completion_tokens
+                # The finally above has closed every underlying stream before
+                # we revoke its output. Detach even if no further retry is allowed.
+                owner.discard_result()
+                if emit_stream_events:
+                    await bus.emit(make_event(state, EventType.LLM_RESPONSE_DISCARDED, payload={
+                        "request_id": request_id, "reason": "llm_outage",
+                        "error": str(e), "error_code": getattr(e, "status_code", 0),
+                        "will_retry": will_retry, "usage": dataclasses.asdict(usage),
+                        "usage_known": usage.total_tokens > 0 or usage.prompt_tokens > 0
+                                       or usage.completion_tokens > 0,
+                        "llm_model": model, "llm_account": llm_account,
+                    }))
+            if not will_retry:
                 raise LLMOutageError(
                     f"LLM self-heal exhausted after {attempt} attempt(s): {e}",
                     status_code=getattr(e, "status_code", 0),
@@ -719,5 +745,5 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
             )
             delay += random.uniform(0, delay * 0.1)  # jitter
             delay = min(delay, remaining)
-            await _emit_retry(ctx, state, attempt, max_attempts, delay, e)
+            await _emit_retry(ctx, state, attempt, max_attempts, delay, e, request_id)
             await _sleep_cancellable(delay, tok)

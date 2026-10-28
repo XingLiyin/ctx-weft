@@ -547,7 +547,7 @@ TM 区分前两者靠的是 **task 状态**，那本来就是它自己的领域�
 |---|---|---|
 | `ContextTokensEstimated` | `estimated_tokens` `assembled_tokens` `has_baseline` | 装配前的估算 vs 装配后的实际 |
 
-### 3.6 LLM · 6
+### 3.6 LLM · 7
 
 `origin` 区分是哪个子循环在跑：`loop.act` / `loop.observe` / `loop.background_observe` /
 `loop.recognize_intent`。V2 之前这是靠**四套同形的独立类型**做的（`BackgroundObserve*`
@@ -560,7 +560,10 @@ TM 区分前两者靠的是 **task 状态**，那本来就是它自己的领域�
 | `LLMTokenStreamed` ⚡ | `request_id` `delta` | 正文 token delta |
 | `LLMReasoningStreamed` ⚡ | `request_id` `delta` | extended thinking delta |
 | `LLMResponseFinished` | `request_id` `content` `reasoning` `tool_calls:[{id,name,arguments}]` `usage` `llm_model` `llm_account` `finish_reason` `turn`/`round` | 本轮完整结果。`llm_model`/`llm_account` 是**实际用的**那个（host 计账按此，不受切换竞态影响） |
-| `LLMRetryTriggered` ⚡ | `attempt` `max_attempts` `next_delay_sec` `error_code` `error` | 退避重试。仅 outage 类可重试，且仅在本次尝试尚未吐出任何 chunk 时 |
+| `LLMResponseDiscarded` | `request_id` `reason` `error_code` `error` `will_retry` `usage` `usage_known` `llm_model` `llm_account` | 中途 outage 的生成作废；旧流已关闭。消费方清空此 request 的临时正文/思考，下一段从空状态开始。无正文和工具声明，不摄入 memory；已知 usage 是实际消耗，未知不推算 |
+| `LLMRetryTriggered` ⚡ | `request_id` `attempt` `max_attempts` `next_delay_sec` `error_code` `error` | outage 类故障退避重试。中途故障先发 `LLMResponseDiscarded`。所有重试共用 request_id，没有 attempt_id；`attempt` 仅为次数预算/进度 |
+
+流式恢复：`LLMRequestStarted`/`LLMPromptSent` 每次逻辑调用只发一次。重试严格串行，旧流关闭并解除结果引用后才发废弃事件，再退避并创建全新累积状态。失败正文、思考、工具参数和 provider_state 不传入下一次请求，不写入业务 memory、不执行工具。正常结果仍由调用方发一次 `LLMResponseFinished`。次数共用 `llm_self_heal_max_attempts`；首次中途断流另启 `llm_midstream_recovery_max_duration_sec` 窗口，后续不刷新，只限制下一次首包等待和退避，不中断正常持续输出。预算耗尽沿原有 LLM outage 路径进入 INTERRUPTED。会话用户输入/HITL 的提交不随生成废弃回滚。
 
 ⚡ = TRANSIENT，不持久化。
 

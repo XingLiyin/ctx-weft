@@ -78,7 +78,7 @@ class LLMCallError(RuntimeError):
 class LLMOutageError(LLMCallError):
     """瞬时 LLM 基础设施故障，应按可恢复中断（INTERRUPTED）处理，**不是** task 失败。
 
-    自愈层在"预算耗尽"或"已吐 chunk 后中途断流"时抛此异常；_run_loop 用
+    自愈层在首包前或中途断流的恢复预算耗尽时抛此异常；_run_loop 用
     ``except LLMOutageError`` 干净分流到 INTERRUPTED 路径。
     """
 

@@ -289,6 +289,10 @@ class DelegatingLLMStream:
         self._inner = ensure_collected_stream(source)
         return self._inner
 
+    def discard_result(self) -> None:
+        """Detach a closed failed stream, including during retry backoff/cancel."""
+        self._inner = None
+
     def __aiter__(self) -> DelegatingLLMStream:
         return self
 

@@ -157,6 +157,7 @@ class EventType(StrEnum):
     LLM_TOKEN_STREAMED = "LLMTokenStreamed"
     LLM_REASONING_STREAMED = "LLMReasoningStreamed"    # extended thinking delta
     LLM_RESPONSE_FINISHED = "LLMResponseFinished"
+    LLM_RESPONSE_DISCARDED = "LLMResponseDiscarded"
     LLM_RETRY_TRIGGERED = "LLMRetryTriggered"
     # ── Capability 域 ──
     CAPABILITY_INVOKED = "CapabilityInvoked"

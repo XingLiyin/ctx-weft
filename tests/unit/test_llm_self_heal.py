@@ -142,14 +142,16 @@ async def test_exhaust_max_duration_raises_outage(monkeypatch):
     assert llm.calls == 1   # deadline already passed after first failure
 
 
-async def test_midflight_outage_raises_without_retry():
+async def test_midflight_outage_retries_with_discard_boundary():
     llm = _FakeLLM([{"kind": "fail_mid"}, {"kind": "ok", "tokens": ["x"]}])
     got = []
-    with pytest.raises(LLMOutageError):
-        async for c in stream_llm_resilient(_ctx(llm, bus=_Bus(), config=_cfg()), None, _req()):
+    async with (stream := stream_llm_resilient(_ctx(llm, bus=_Bus(), config=_cfg()), None, _req())):
+        async for c in stream:
             got.append(c)
-    assert [c.text for c in got if c.kind == "token"] == ["partial"]
-    assert llm.calls == 1   # no in-stream retry after a chunk was yielded
+            stream.accept_current()
+    assert [c.text for c in got if c.kind == "token"] == ["partial", "x"]
+    assert stream.get_final_result().text == "x"
+    assert llm.calls == 2
 
 
 async def test_non_outage_retriable_passthrough():

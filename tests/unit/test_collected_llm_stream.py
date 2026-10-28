@@ -75,8 +75,21 @@ def body_for(provider):
     return b"".join(map(sse, events))
 
 
-def offline_adapter(provider, body=None):
+def offline_adapter(provider, body=None, fail_first=False):
     base = OpenAIAdapter if provider == "openai" else AnthropicAdapter
+
+    class BrokenBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if provider == "openai":
+                yield sse({"choices": [{"delta": {"reasoning_content": "discarded thought"}}]})
+                yield sse({"choices": [{"delta": {"content": "discarded text"}}]})
+            else:
+                yield sse({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}})
+                yield sse({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "discarded thought"}})
+                yield sse({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "discarded signature"}})
+                yield sse({"type": "content_block_stop", "index": 0})
+                yield sse({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "discarded text"}})
+            raise httpx.ReadError("offline disconnect")
 
     class Offline(base):
         requests = 0
@@ -84,6 +97,8 @@ def offline_adapter(provider, body=None):
         def _make_client(self):
             def respond(request):
                 self.requests += 1
+                if fail_first and self.requests == 1:
+                    return httpx.Response(200, stream=BrokenBody())
                 return httpx.Response(200, content=body if body is not None else body_for(provider))
 
             return httpx.AsyncClient(transport=httpx.MockTransport(respond))
@@ -93,8 +108,9 @@ def offline_adapter(provider, body=None):
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("entry", ["act", "observe", "compact", "recognize_intent"])
+@pytest.mark.parametrize("retry", [False, True])
 async def test_all_four_entries_reuse_one_collector_and_preserve_deltas(
-    provider, entry, monkeypatch
+    provider, entry, retry, monkeypatch
 ):
     owners = []
     original = CollectedLLMStream.__init__
@@ -104,8 +120,10 @@ async def test_all_four_entries_reuse_one_collector_and_preserve_deltas(
         owners.append(self)
 
     monkeypatch.setattr(CollectedLLMStream, "__init__", record_owner)
-    adapter = offline_adapter(provider)
+    adapter = offline_adapter(provider, fail_first=retry)
     state, ctx, task, *_ = _act_state_ctx(True, adapter)
+    from ctx_weft.core.models.config import RuntimeConfig
+    ctx.config = RuntimeConfig(llm_self_heal_base_delay_sec=0, llm_self_heal_max_interval_sec=0)
     events = []
 
     async def emit(event):
@@ -145,26 +163,28 @@ async def test_all_four_entries_reuse_one_collector_and_preserve_deltas(
                 ToolCapability(id="metadata", name="metadata", purposes=["recognize_intent"])
             ]
             await RecognizeIntentStep().execute(state, ctx)
-        assert adapter.requests == 1
-        assert len(owners) == 1
-        result = owners[0].get_final_result()
+        assert adapter.requests == 1 + retry
+        assert len(owners) == 1 + retry
+        result = owners[-1].get_final_result()
         assert result.text == "您好，答案是42。"
         assert result.reasoning == "先核对，再回答。"
-        assert owners[0].get_final_result() is result
-        assert owners[0].state.content_text == ""
-        assert owners[0].state._reasoning == []
-        assert owners[0].state.tool_buffers == {}
+        assert owners[-1].get_final_result() is result
+        assert all(owner.state.content_text == "" and not owner.state._reasoning
+                   and not owner.state.tool_buffers for owner in owners)
+        discarded = [e for e in events if e.type == EventType.LLM_RESPONSE_DISCARDED]
+        assert len(discarded) == int(retry)
         finished = [e for e in events if e.type == EventType.LLM_RESPONSE_FINISHED]
         assert len(finished) == 1
         assert finished[0].payload["content"] is result.text
         assert finished[0].payload["reasoning"] is result.reasoning
-        assert [e.payload["delta"] for e in events if e.type == EventType.LLM_TOKEN_STREAMED] == [
+        assert [e.payload["delta"] for e in events if e.type == EventType.LLM_TOKEN_STREAMED] == (["discarded text"] if retry else []) + [
             "您好，",
             "答案是42。",
         ]
         assert [
             e.payload["delta"] for e in events if e.type == EventType.LLM_REASONING_STREAMED
-        ] == ["先核对，", "再回答。"]
+        ] == (["discarded thought"] if retry else []) + ["先核对，", "再回答。"]
+        assert "discarded" not in str(result.provider_state)
         assert all("provider_state" not in e.payload for e in events)
     finally:
         await adapter._client.aclose()
