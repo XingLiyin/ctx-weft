@@ -26,7 +26,8 @@
 {% for section in sections %}
 {% set heading, action, noun, noun_plural = vocabulary[section.kind] -%}
 {{ heading }}{% if section.kind == 'tool' %}
-下面按 `name(param: type)` 的形式列出——可选参数标 `?`。完整的描述与参数 schema 随本次请求的工具定义一起下发。{% elif section.kind == 'agent' %}
+下面按 `name(param: type)` 的形式列出——可选参数标 `?`。完整的描述与参数 schema 随本次请求的工具定义一起下发。{% elif section.kind == 'skill' %}
+任务需要 skill 时，**必须**将下方列出的完整 skill 名称（含前缀）填入 `{{ delegate_task }}` 的 `skill_name` 参数，或 `{{ delegate_plan }}` 的 `tasks` 数组中对应任务项的 `skill_name` 字段。只在 `title` / `description` / `task_prompt` 中提到 skill 不会完成分配；不要在当前任务里内联执行它的逻辑。{% elif section.kind == 'agent' %}
 派发方式：{{ delegate_task }}(use_subagent=True, subagent_template='<name>'){% endif %}{{ capability_items(section.ungrouped, section.kind == 'tool') }}{% for group in section.groups %}
 
 #### {{ group.name }} {{ noun_plural }}{% if group.description %}

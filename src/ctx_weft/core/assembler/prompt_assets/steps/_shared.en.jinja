@@ -26,7 +26,8 @@ You can use the capabilities listed below to complete the current task.
 {% for section in sections %}
 {% set heading, action, noun, noun_plural = vocabulary[section.kind] -%}
 {{ heading }}{% if section.kind == 'tool' %}
-Listed as `name(param: type)` — optional params are marked `?`. Full descriptions and parameter schemas come with the tool definitions in this request.{% elif section.kind == 'agent' %}
+Listed as `name(param: type)` — optional params are marked `?`. Full descriptions and parameter schemas come with the tool definitions in this request.{% elif section.kind == 'skill' %}
+When a task needs a skill, you MUST assign it by setting `skill_name` in `{{ delegate_task }}`, or in the corresponding item of `{{ delegate_plan }}`'s `tasks` array. Use the exact skill name listed below, including its prefix. Mentioning a skill in `title` / `description` / `task_prompt` does not assign it; do not execute its logic inline in the current task.{% elif section.kind == 'agent' %}
 Delegate via: {{ delegate_task }}(use_subagent=True, subagent_template='<name>'){% endif %}{{ capability_items(section.ungrouped, section.kind == 'tool') }}{% for group in section.groups %}
 
 #### {{ group.name }} {{ noun_plural }}{% if group.description %}

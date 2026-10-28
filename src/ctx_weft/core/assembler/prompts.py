@@ -11,6 +11,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined, nodes
 from ctx_weft.core.capabilities.control_tools import (
     ASK_USER_NAME,
     SWITCH_TASK_NAME,
+    DELEGATE_PLAN_NAME,
     DELEGATE_TASK_NAME,
     FINISH_TASK_NAME,
     REPORT_OBSERVATION_NAME,
@@ -34,6 +35,7 @@ AUTO_PLACEHOLDERS: dict[str, str] = {
     "finish_task": FINISH_TASK_NAME,
     "switch_task": SWITCH_TASK_NAME,
     "delegate_task": DELEGATE_TASK_NAME,
+    "delegate_plan": DELEGATE_PLAN_NAME,
     "ask_user": ASK_USER_NAME,
     "report_observation": REPORT_OBSERVATION_NAME,
     "update_task_metadata": UPDATE_TASK_METADATA_NAME,
