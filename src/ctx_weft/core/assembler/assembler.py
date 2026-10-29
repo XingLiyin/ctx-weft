@@ -6,11 +6,12 @@ import asyncio
 import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Callable
+from copy import copy
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, runtime_checkable
 
-from ctx_weft.core.utils.estimate import estimate_tokens
+from ctx_weft.core.utils.estimate import effective_limit, estimate_tokens
 from ctx_weft.protocols import (
     AgentTemplate,
     LLMMessage,
@@ -166,14 +167,20 @@ class AssembledPrompt:
         token_count: int,
         metadata: dict[str, Any] | None = None,
         tools_fn: Callable[[], list[LLMTool]] | None = None,
+        token_budget: int = 0,
+        capability_errors: list[dict] | None = None,
     ) -> None:
         self.system = system
         self.messages = messages
         self._tools = tools
         self.token_count = token_count
+        # Input budget including tools; 0 means compilation was unbounded.
+        self.token_budget = token_budget
         self.metadata = metadata if metadata is not None else {}
         self.tools_fn = tools_fn
         self.inputs: PromptContext | None = None
+        self.tool_refs: list[dict] = []
+        self.capability_errors = capability_errors if capability_errors is not None else []
 
     @property
     def tools(self) -> list[LLMTool]:
@@ -242,8 +249,8 @@ class AssemblerDeps:
     provider_ctx: ProviderContext
     capability_cache: "CapabilityCache | None" = None
     task_manager: "TaskManager | None" = None
-    # provider_name → CapabilityProvider（持有 live 对象，fetch 时读取 .description；
-    # MCP 在 connect 后才有 description，故须 live 读取而非装配时快照）
+    # provider_name → CapabilityProvider. Compilation resolves saved IDs through
+    # list() and reads the current provider description/skill definition.
     capability_provider_index: dict[str, Any] = field(default_factory=dict)
     template_lookup: Any = None
 
@@ -274,30 +281,53 @@ class ContextAssembler:
         return context
 
     async def compile(self, inputs: PromptContext | dict, *, template=None,
-                      token_counter=estimate_tokens, reuse: bool = False) -> AssembledPrompt:
+                      token_counter=estimate_tokens, reuse: bool = False,
+                      trim: bool = True, tool_refs: list[dict] | None = None) -> AssembledPrompt:
         """Compile inputs; opt into reuse only for an unchanged runtime base.
 
+        Use trim=False to estimate complete inputs before compaction. Otherwise
+        enforce the context window minus reserved output, including tools.
+        A cached complete result can also serve a bounded request if it fits.
         Reassemble after changing inputs. Historical/request inputs containing
         continuations or a frozen tool override are always compiled independently.
         """
         from ctx_weft.core.assembler.builder import PromptBuilder
         from ctx_weft.core.assembler.context import PromptContext, record_from_json
+        from ctx_weft.core.assembler.sources.capability import (
+            capability_blocks,
+            resolve_capabilities,
+        )
         from ctx_weft.protocols.context import normalize_content_parts
 
         if isinstance(inputs, dict):
             inputs = PromptContext.from_payload(inputs)
+        selected_tools = inputs.tools if tool_refs is None else tool_refs
+        budget = effective_limit(inputs.context_limit, inputs.reserved_output_tokens) if trim else 0
         if inputs.scope.get("session_id") not in (None, self.deps.provider_ctx.session_id):
             raise ValueError("prompt inputs belong to a different session")
         record_context = (getattr(self.deps.provider_ctx, "tenant_id", "default"),
                           self.deps.provider_ctx.session_id)
         if reuse and (inputs.appended_messages or inputs.tools is not None):
             raise ValueError("only base prompt inputs can reuse compilation")
+        resolved, errors = await resolve_capabilities(inputs.capabilities + (selected_tools or []), self.deps)
+        capabilities = capability_blocks(inputs.capabilities, resolved, self.deps)
         cached = inputs._compiled_base
         if reuse and cached is not None:
             owner, memory, cached_template, counter, prompt = cached
+            # Budget 0 denotes an unbounded compilation. A bounded request
+            # must have positive room; relaxing a previous bound recompiles
+            # to restore any content it may have discarded.
+            same_budget = prompt.token_budget == budget and (not trim or budget > 0)
+            fits_budget = (
+                trim and budget > 0 and prompt.token_count <= budget
+                and (prompt.token_budget == 0 or budget < prompt.token_budget)
+            )
             if (owner == record_context and memory is self.deps.memory
-                    and cached_template is template and counter == token_counter):
-                return prompt
+                    and cached_template is template and counter == token_counter
+                    and prompt._capability_facts == capabilities
+                    and (same_budget or fits_budget)):
+                return await self._complete_request(prompt, inputs, selected_tools,
+                                                    resolved=resolved, errors=errors)
         requested_template = template
         if template is None and inputs.template_id:
             if self.deps.template_lookup is None:
@@ -333,30 +363,86 @@ class ContextAssembler:
                 inputs.token_counts[digest] = token_counter(text)
             return inputs.token_counts[digest]
 
+        base_keys = {(ref["provider"], ref["id"]) for ref in inputs.capabilities}
+        base_errors = [error for error in errors if (error["provider"], error["id"]) in base_keys]
+        skill_definition = await self._load_skill_definition(inputs, resolved, base_errors)
         prompt = PromptBuilder(count).compile(
-            inputs, tools=self._compile_tools(inputs), records=records, template=template)
-        if inputs.tools is not None:
-            prompt.tools = [LLMTool(**tool) for tool in inputs.tools]
-        for item in inputs.appended_messages:
-            content = records[item["memory_id"]].content if item.get("memory_id") else item["content"]
-            prompt.messages.append(LLMMessage(
-                role=item["role"], content=content, tool_calls=item["tool_calls"],
-                tool_call_id=item["tool_call_id"]))
+            inputs, tools=self._compile_tools(inputs, inputs.capabilities, resolved),
+            records=records, template=template, trim=trim,
+            capabilities=capabilities,
+            skill_definition=skill_definition)
+        prompt._capability_facts = capabilities
+        prompt.tool_refs = self._tool_refs(inputs, inputs.capabilities, resolved)
+        prompt.capability_errors = base_errors
         prompt.inputs = inputs
         if reuse:
             inputs._compiled_base = (record_context, self.deps.memory, requested_template,
                                      token_counter, prompt)
-        return prompt
+        return await self._complete_request(prompt, inputs, selected_tools, resolved=resolved, errors=errors)
 
     @staticmethod
-    def _compile_tools(context: PromptContext) -> list[LLMTool]:
-        """Compile tools from the same fixed definitions used for prompt prose."""
+    def _tool_refs(context, refs, resolved):
         if context.purpose == "compact":
             return []
+        return [dict(ref) for ref in refs
+                if (cap := resolved.get((ref["provider"], ref["id"]))) is not None
+                and cap.kind == "tool" and context.purpose in cap.purposes]
+
+    @classmethod
+    def _compile_tools(cls, context: PromptContext, refs, resolved) -> list[LLMTool]:
         from ctx_weft.core.assembler.sources.capability import build_llm_tools
 
-        return build_llm_tools([item["definition"] for item in context.capabilities], context.purpose,
+        return build_llm_tools([resolved[(ref["provider"], ref["id"])]
+                                for ref in cls._tool_refs(context, refs, resolved)], context.purpose,
                                terminal_only=context.terminal_only)
+
+    async def _load_skill_definition(self, inputs, resolved, errors):
+        from ctx_weft.core.assembler.context import json_value
+        from ctx_weft.protocols.capability import qualify
+
+        if inputs.purpose != "act" or not inputs.skill_name:
+            return {}
+        for ref in inputs.capabilities:
+            cap = resolved.get((ref["provider"], ref["id"]))
+            if cap is None or cap.kind != "skill" or qualify(cap.id) != inputs.skill_name:
+                continue
+            provider = self.deps.capability_provider_index[ref["provider"]]
+            try:
+                definition = await provider.load_definition(cap.name, self.deps.provider_ctx)
+                if definition is not None:
+                    return json_value(definition)
+                error = "Skill definition was not returned by provider.load_definition()"
+            except Exception as exc:
+                error = f"provider.load_definition() failed: {exc}"
+            logger.warning("capability unavailable: provider=%s capability_id=%s: %s",
+                           ref["provider"], ref["id"], error)
+            errors.append({**ref, "error": error})
+            break
+        return {}
+
+    async def _complete_request(self, base, inputs, tool_refs, *, resolved=None, errors=None):
+        from ctx_weft.core.assembler.sources.capability import resolve_capabilities
+
+        if tool_refs is None and not inputs.appended_messages:
+            return base
+        prompt = copy(base)
+        prompt.capability_errors = list(base.capability_errors)
+        if tool_refs is not None:
+            if resolved is None:
+                resolved, errors = await resolve_capabilities(tool_refs, self.deps)
+            prompt.tools = self._compile_tools(inputs, tool_refs, resolved)
+            # Keep the attempted selection, including unavailable references.
+            prompt.tool_refs = [dict(ref) for ref in tool_refs]
+            for error in errors or []:
+                if error not in prompt.capability_errors:
+                    prompt.capability_errors.append(error)
+        prompt.messages = list(base.messages)
+        for item in inputs.appended_messages:
+            content = inputs._records[item["memory_id"]].content if item.get("memory_id") else item["content"]
+            prompt.messages.append(LLMMessage(
+                role=item["role"], content=content, tool_calls=item["tool_calls"],
+                tool_call_id=item["tool_call_id"]))
+        return prompt
 
     async def _collect(self, source: ContextSource, request: ContextRequest) -> list[ContextBlock]:
         blocks: list[ContextBlock] = []

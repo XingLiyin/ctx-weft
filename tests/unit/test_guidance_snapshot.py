@@ -70,7 +70,7 @@ async def test_prepare_collects_through_assembler_and_consumes_hint_after_reasse
 
     async def assemble(request):
         snapshots.append(await _snapshot(request, manager))
-        return NS(token_count=1)
+        return NS(system="", messages=[], tools=[], token_count=1)
 
     ctx = NS(
         task_manager=manager,

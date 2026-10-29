@@ -582,28 +582,24 @@ async def _emit_retry(
     }))
 
 
-def prompt_event_inputs(prompt, messages, tools):
+def prompt_event_inputs(prompt, messages, tool_refs=None):
     """Use the assembled data directly, adding this request's continuation."""
     inputs = getattr(prompt, "inputs", None)
     if inputs is None:
         return None
-    return inputs.for_request(messages[len(prompt.messages):], tools).to_payload()
+    return inputs.for_request(messages[len(prompt.messages):],
+                              prompt.tool_refs if tool_refs is None else tool_refs).to_payload()
 
 
-def resolve_request_tools(prompt, ctx, state):
-    """Runtime pins affect request tools, never the compiled prefix budget."""
-    inputs = getattr(prompt, "inputs", None)
+def select_request_tool_refs(inputs, ctx, state):
+    """Select live tool references without compiling provider definitions."""
     cache = getattr(ctx, "capability_cache", None)
-    if inputs is None or cache is None or inputs.purpose == "compact":
-        return prompt.tools
-    from ctx_weft.core.assembler.sources.capability import build_llm_tools
+    if cache is None or inputs.purpose not in {"act", "observe"}:
+        return None
+    from ctx_weft.core.assembler.sources.capability import capability_ref
 
-    try:
-        return build_llm_tools(cache.available(state.agent.id, state.task.id), inputs.purpose,
-                               terminal_only=inputs.terminal_only)
-    except Exception:
-        logger.warning("live tool resolution failed; using compiled tools", exc_info=True)
-        return prompt.tools
+    return [capability_ref(cap) for cap in cache.available(state.agent.id, state.task.id)
+            if cap.kind == "tool" and inputs.purpose in cap.purposes]
 
 
 async def build_llm_request(ctx, state, inputs: PromptContext, *,
@@ -616,15 +612,16 @@ async def build_llm_request(ctx, state, inputs: PromptContext, *,
     """
     from ctx_weft.protocols import LLMRequest
 
+    tool_refs = select_request_tool_refs(inputs, ctx, state)
     prompt = await ctx.assembler.compile(
         inputs, template=state.extra.get("template"),
-        token_counter=ctx.llm.tokenizer.count, reuse=True)
-    tools = (resolve_request_tools(prompt, ctx, state)
-             if inputs.purpose in {"act", "observe"} else prompt.tools)
+        token_counter=ctx.llm.tokenizer.count, reuse=True, trim=True, tool_refs=tool_refs)
     request = LLMRequest(
         model=resolve_llm_identity(state)[0], system=prompt.system,
-        messages=[*prompt.messages, *appended_messages], tools=tools,
-        metadata={"turn": turn})
+        messages=[*prompt.messages, *appended_messages], tools=prompt.tools,
+        metadata={"turn": turn},
+        tool_refs=tool_refs if tool_refs is not None else getattr(prompt, "tool_refs", []),
+        capability_errors=list(getattr(prompt, "capability_errors", [])))
     request.prompt_token_estimate = request_prompt_estimate(
         ctx.llm.tokenizer, request, getattr(state.agent, "loop_guard", None), baseline_msg_count)
     return request
@@ -739,17 +736,13 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
             "request_id": request_id, "turn": turn,
             "tool_names": [t.name for t in request.tools],
         }
-        event_inputs = (inputs.for_request(appended_messages, request.tools).to_payload()
+        event_inputs = (inputs.for_request(appended_messages, request.tool_refs or []).to_payload()
                         if inputs is not None else request.prompt_inputs)
         if event_inputs is not None:
             event_inputs = await externalize_prompt_images(
                 event_inputs, event_blob_store=getattr(ctx, "event_blob_store", None),
                 ctx=ctx.provider_ctx)
-            prompt_payload.update({
-                **event_inputs,
-                # Freeze the actual per-request live/pinned tool surface.
-                "tools": [dataclasses.asdict(tool) for tool in request.tools],
-            })
+            prompt_payload.update(event_inputs)
         else:
             # Custom callers without an assembler still use the legacy event.
             prompt_payload.update(system=request.system, messages=[
@@ -772,7 +765,8 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
     # Adapters/legalization may mutate a request. Every retry receives the same
     # original input, never a previous attempt's mutations or partial response.
     # Assembled inputs belong to the event; adapters/retries need no copy of them.
-    original_request = copy.deepcopy(dataclasses.replace(request, prompt_inputs=None))
+    original_request = copy.deepcopy(dataclasses.replace(
+        request, prompt_inputs=None, tool_refs=None, capability_errors=[]))
     tok = getattr(ctx, "cancel_token", None)
     attempt = 0
     last_error = None

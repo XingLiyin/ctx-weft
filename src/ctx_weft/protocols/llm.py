@@ -242,6 +242,9 @@ class LLMRequest:
     # Pre-serialized inputs for direct/custom callers. Core steps pass the live
     # PromptContext separately to the gateway, which serializes it at event emission.
     prompt_inputs: dict[str, Any] | None = None
+    # Runtime compilation bookkeeping; neither field is sent to the adapter.
+    tool_refs: list[dict[str, str]] | None = field(default=None, repr=False)
+    capability_errors: list[dict[str, str]] = field(default_factory=list, repr=False)
 
 
 @dataclass

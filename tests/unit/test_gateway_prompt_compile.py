@@ -20,13 +20,13 @@ from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from tests.unit.test_prompt_input_snapshot import ADDRESS, CTX, assembled
+from tests.unit.test_prompt_input_snapshot import ADDRESS, CTX, assembled, prompt_providers
 
 
 async def setup(purpose="act"):
     memory = InMemoryMemoryProvider()
     prompt, request, _ = await assembled(memory, purpose)
-    assembler = ContextAssembler([], AssemblerDeps(memory, [], CTX))
+    assembler = ContextAssembler([], AssemblerDeps(memory, [], CTX, capability_provider_index=prompt_providers()))
     request.agent.loop_guard = NS(context_tokens=0, context_limit=100_000)
     request.session.id, request.session.tenant_id = "s", "default"
     state = LoopState(
@@ -43,11 +43,12 @@ async def setup(purpose="act"):
     return prompt.inputs, state, ctx, events
 
 
-async def test_budget_compile_and_multiple_rounds_share_one_base():
+async def test_untrimmed_estimate_is_reused_when_it_fits_the_sending_budget():
     inputs, state, ctx, _ = await setup()
     with patch.object(PromptBuilder, "compile", autospec=True, side_effect=PromptBuilder.compile) as render:
         budget = await ctx.assembler.compile(
-            inputs, template=state.extra["template"], token_counter=ctx.llm.tokenizer.count, reuse=True)
+            inputs, template=state.extra["template"], token_counter=ctx.llm.tokenizer.count,
+            reuse=True, trim=False)
         first = await build_llm_request(ctx, state, inputs)
         assistant = LLMMessage(
             role="assistant", content="checking", reasoning_content="live reasoning",
@@ -57,7 +58,11 @@ async def test_budget_compile_and_multiple_rounds_share_one_base():
         state.agent.loop_guard.context_tokens = 1234
         second = await build_llm_request(
             ctx, state, inputs, appended_messages=suffix, baseline_msg_count=len(first.messages), turn=2)
+        # The complete estimate already fits; sending and later rounds need
+        # no additional compilation.
         assert render.call_count == 1
+        assert inputs._compiled_base[-1] is budget
+        assert budget.token_budget == 0
     assert second.messages[-2] is assistant
     assert second.messages[-2].provider_state == {"signature": "live signature"}
     assert first.messages == budget.messages
@@ -77,6 +82,7 @@ async def test_dynamic_tools_do_not_change_the_cached_base():
     ctx.capability_cache.put("a", [initial])
     first = await build_llm_request(ctx, state, inputs)
     ctx.capability_cache.pin("a", "t", [pinned])
+    ctx.assembler.deps.capability_provider_index["test"].capabilities.append(pinned)
     second = await build_llm_request(ctx, state, inputs)
     assert len(second.tools) == len(first.tools) + 1
     assert second.system == first.system and second.messages == first.messages

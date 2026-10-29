@@ -1,11 +1,10 @@
 """PrepareStep（资源装配）：能力解析/绑定 + token 估算 + compact 触发 + prompt 装配。
 
-token 估算对齐 miniAgents Reasoner._fetch_base：
-  - 有真实基线（loop_guard.context_tokens > 0）→ 增量估算：基线 + 新增消息估算
-  - 无基线 → 用装配后的 prompt.token_count（全量估算）
+compact 估算使用不带窗口预算的完整编译结果；有真实 usage 基线时，
+取完整估算与「基线 + 新增消息估算」的较大值，避免低估。
 
 compact 触发（纯预算，spec 2026-07-01 §3.6）：
-  - token_estimate / context_limit >= compact_token_ratio
+  - token_estimate / effective_limit >= compact_token_ratio
   命中后调 escalating_compact 升级式压缩，再完整重装配一次 prompt（Q4=c 校正）。
 
 本步还是**上下文恢复**的落点：ActStep 越过 `context_limit_stop_ratio` 时不再直接退出吃一次
@@ -66,11 +65,7 @@ def _staged_memory(state, ctx) -> list:
 
 
 def _estimate_assembled_tokens(prompt, count: Callable[[str], int] | None = None) -> int:
-    """无真实基线（首轮/一次性）时对整份装配 prompt 的估算：system + 每条消息（含 tool_calls
-    参数/图片/framing）+ tools schema。
-
-    比 composer 的 ``prompt.token_count``（纯文本、且不含 tools）更全，与 gateway 首次估算同口径——
-    tools schema 是每个 act prompt 的固定占用，composer 完全没数，此处补上。
+    """完整 prompt 的 compact 估算：system + 消息（含 tool_calls/图片）+ tools。
 
     count：文本费率经 count 回调走 tokenizer（通常是 ``ctx.llm.tokenizer.count``，已校准）；
     None 回退未校准启发式（纯单测/无 llm 场景）。
@@ -130,12 +125,13 @@ class PrepareStep(Step):
             )
             inputs = await ctx.assembler.assemble(request)
             prompt = await ctx.assembler.compile(
-                inputs, template=template, token_counter=request.token_counter, reuse=True)
+                inputs, template=template, token_counter=request.token_counter,
+                reuse=True, trim=False)
             return inputs, prompt
 
         inputs, prompt = await _assemble()
-        if token_estimate == 0:
-            token_estimate = _estimate_assembled_tokens(prompt, ctx.llm.tokenizer.count)
+        token_estimate = max(
+            token_estimate, _estimate_assembled_tokens(prompt, ctx.llm.tokenizer.count))
 
         # ── 5. compact 触发：命中则跑升级式 compact，再在压缩后 memory 上重装配一次（Q4=c 校正）──
         if await self._should_compact(state, ctx, token_estimate):

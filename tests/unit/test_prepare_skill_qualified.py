@@ -1,10 +1,11 @@
-"""CapabilitySource resolves a qualified selected skill and loads Level 2 by bare name."""
+"""Compilation resolves a qualified selected skill and loads Level 2 by bare name."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ctx_weft.core.assembler.builder import PromptBuilder
+from ctx_weft.core.assembler import ContextAssembler
+from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols.capability import (
@@ -14,7 +15,7 @@ from ctx_weft.protocols.capability import (
     SkillDefinition,
 )
 from ctx_weft.protocols.context import ProviderContext
-from tests.assembler_testkit import context_from_blocks
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
 class _SkillProvider(SkillCapabilityProvider):
@@ -24,7 +25,7 @@ class _SkillProvider(SkillCapabilityProvider):
         self.loaded_with = None
 
     async def list(self, ctx):
-        return []
+        return [SkillCapability(id="local_skill:pdf", name="pdf", description="d")]
 
     async def describe(self, ctx):
         return CapabilityProviderInfo(name=self.name)
@@ -75,18 +76,18 @@ async def test_loads_by_bare_name_from_qualified_skill_name() -> None:
         extra={},
         token_counter=len,
     )
-    deps = SimpleNamespace(
+    deps = AssemblerDeps(
+        memory=InMemoryMemoryProvider(), knowledge_providers=[],
         capability_cache=cache,
         capability_provider_index={"local_skill": provider},
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default"),
     )
 
-    blocks = [block async for block in CapabilitySource().fetch(request, deps)]
-    directive = next(block for block in blocks if block.kind == "directive")
-
-    assert directive.value.instructions == "BODY"
+    assembler = ContextAssembler([CapabilitySource()], deps)
+    inputs = await assembler.assemble(request)
+    assert provider.loaded_with is None
+    assert inputs.capabilities == [{"provider": "local_skill", "id": "local_skill:pdf"}]
+    prompt = await assembler.compile(inputs, template=request.template)
     assert provider.loaded_with == "pdf"
-
-    prompt = PromptBuilder(len).compile(context_from_blocks(request, tuple(blocks)), template=request.template)
     assert "BODY" in prompt.messages[0].content
     assert "skill_executor__exec_script" in prompt.messages[0].content

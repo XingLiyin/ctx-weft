@@ -241,12 +241,12 @@ def _shift_headings(markdown: str, base_level: int = 2) -> str:
     return "\n".join(output)
 
 
-def _capability_facts(context, purpose: str) -> list[dict[str, Any]]:
+def _capability_facts(context, purpose: str, capabilities=None) -> list[dict[str, Any]]:
     from ctx_weft.protocols.capability import qualify
 
     current_skill = context.skill_name
     blocks = [
-        block for block in context.capabilities
+        block for block in (context._capability_blocks if capabilities is None else capabilities)
         if purpose in block["definition"].get("purposes", ())
     ]
     sections = []
@@ -283,7 +283,8 @@ def _capability_facts(context, purpose: str) -> list[dict[str, Any]]:
     return sections
 
 
-def _prompt_facts(context, records=None, template=None) -> dict[str, Any]:
+def _prompt_facts(context, records=None, template=None, *, capabilities=None,
+                  skill_definition=None) -> dict[str, Any]:
     from ctx_weft.core.utils.task_ref import task_label_parts, task_ref_parts
     from ctx_weft.protocols.context import normalize_content_parts
 
@@ -321,14 +322,14 @@ def _prompt_facts(context, records=None, template=None) -> dict[str, Any]:
         background = content_to_text(records[item["memory_id"]].content if "memory_id" in item
                                      else normalize_content_parts(item["content"]))
     directive = None
-    if context.skill_definitions:
-        definition = context.skill_definitions[0]["definition"]
+    definition = skill_definition if skill_definition is not None else context._skill_definition
+    if definition:
         directive = dict(
             skill_name=definition.get("skill_name", ""),
             body=_shift_headings(definition.get("instructions", "")),
         )
 
-    capability_sections = _capability_facts(context, context.purpose)
+    capability_sections = _capability_facts(context, context.purpose, capabilities)
     guidance = None
     resume_snapshot = None
     if context.guidance:
@@ -444,16 +445,19 @@ class PromptBuilder:
     _last_refs: tuple[str, ...] = field(default=(), init=False)
     _last_trace: list[dict] = field(default_factory=list, init=False)
 
-    def compile(self, context, *, tools: list[LLMTool] | None = None, records=None, template=None):
-        """Compile one PromptContext through its executable purpose template."""
+    def compile(self, context, *, tools: list[LLMTool] | None = None, records=None,
+                template=None, trim: bool = True, capabilities=None, skill_definition=None):
+        """Compile one PromptContext, optionally enforcing its input budget."""
         from ctx_weft.core.assembler.prompts import render_purpose
         from ctx_weft.core.utils.estimate import effective_limit, tools_signature
 
+        token_limit = effective_limit(context.context_limit, context.reserved_output_tokens) if trim else None
         self._operations.clear()
         self._serial = 0
         self._tool_groups.clear()
         self.tools(tools or [])
-        facts = _prompt_facts(context, records, template)
+        facts = _prompt_facts(context, records, template, capabilities=capabilities,
+                              skill_definition=skill_definition)
         purpose = facts.pop("template_name")
         self.message_transform = None
         if purpose != "act":
@@ -467,7 +471,7 @@ class PromptBuilder:
             **facts,
         )
         assembled = self.build(
-            effective_limit(context.context_limit, context.reserved_output_tokens),
+            token_limit,
             context_limit=context.context_limit,
             reserved_output_tokens=context.reserved_output_tokens,
         )
@@ -599,17 +603,17 @@ class PromptBuilder:
 
     def build(
         self,
-        token_limit: int,
+        token_limit: int | None,
         *,
         context_limit: int | None = None,
         reserved_output_tokens: int = 0,
     ):
-        """Trim declared operations and materialize an AssembledPrompt."""
+        """Materialize operations, trimming only when a token limit is provided."""
         from ctx_weft.core.assembler.assembler import AssembledPrompt
 
         operations = list(self._operations)
         tools_tokens = estimate_tools_tokens(self._tools, self.token_counter)
-        content_limit = max(0, token_limit - tools_tokens)
+        content_limit = None if token_limit is None else max(0, token_limit - tools_tokens)
 
         def group_key(op: PromptOperation) -> str:
             return op.group or f"operation:{op.sequence}"
@@ -656,14 +660,16 @@ class PromptBuilder:
             tokens = sum(member.token_count for member in members)
             candidates.append((required, -priority, timestamp, -tokens, key))
 
-        for required, _negative_priority, _timestamp, _negative_tokens, key in sorted(candidates):
-            if total <= content_limit:
-                break
-            if required:
-                continue
-            discard_group(key)
+        if content_limit is not None:
+            for required, _negative_priority, _timestamp, _negative_tokens, key in sorted(candidates):
+                if total <= content_limit:
+                    break
+                if required:
+                    continue
+                discard_group(key)
 
-        if total > content_limit:
+        if content_limit is not None and total > content_limit:
+            assert token_limit is not None
             floor = [
                 op for op in operations
                 if group_key(op) in kept_groups and (op.required or op.priority == 0)
@@ -795,6 +801,7 @@ class PromptBuilder:
             messages=messages,
             tools=deepcopy(self._tools),
             token_count=final_count,
+            token_budget=token_limit if token_limit is not None else 0,
             metadata={"tools_reserved_tokens": tools_tokens},
         )
 

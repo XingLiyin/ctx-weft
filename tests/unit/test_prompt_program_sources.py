@@ -13,7 +13,7 @@ from ctx_weft.core.assembler.builder import PromptBuilder
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols import ToolCapability
-from tests.assembler_testkit import context_from_blocks
+from tests.assembler_testkit import listed_providers, context_from_blocks
 
 
 def test_prompt_assets_have_only_purpose_and_runtime_surfaces() -> None:
@@ -171,6 +171,7 @@ async def test_tools_and_capability_prose_share_the_collected_snapshot() -> None
         sources=[CapabilitySource()],
         deps=AssemblerDeps(
             memory=object(),
+            capability_provider_index=listed_providers(request.bound_capabilities),
             knowledge_providers=[],
             provider_ctx=SimpleNamespace(session_id="session-1", task_id="task-1"),
         ),
@@ -221,6 +222,7 @@ async def test_tools_follow_capabilities_pinned_after_assembly() -> None:
         sources=[CapabilitySource()],
         deps=AssemblerDeps(
             memory=object(),
+            capability_provider_index=listed_providers(request.bound_capabilities),
             knowledge_providers=[],
             provider_ctx=SimpleNamespace(session_id="session-1", task_id="task-1"),
             capability_cache=cache,
@@ -233,7 +235,7 @@ async def test_tools_follow_capabilities_pinned_after_assembly() -> None:
 
     cache.pin("agent-1", "task-1", [pinned])
 
-    from ctx_weft.core.loop.llm_gateway import resolve_request_tools
+    from ctx_weft.core.loop.llm_gateway import select_request_tool_refs
 
     assert [tool.name for tool in prompt.tools] == ["local__search"]
-    assert [tool.name for tool in resolve_request_tools(prompt, SimpleNamespace(capability_cache=cache), request)] == ["local__search", "local__inspect"]
+    assert [ref["id"] for ref in select_request_tool_refs(prompt.inputs, SimpleNamespace(capability_cache=cache), request)] == ["local:search", "local:inspect"]
