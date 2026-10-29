@@ -23,6 +23,7 @@ from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 pytestmark = pytest.mark.asyncio
 
@@ -59,10 +60,10 @@ class _FakeAssembler:
     """summarize_for_compact 需要 ctx.assembler.assemble；返回空 prompt（内容由 _FakeLLM 摘要）。"""
 
     async def compile(self, inputs, **kwargs):
-        return inputs
+        return await compiled_test_inputs(inputs, **kwargs)
 
     async def assemble(self, request) -> AssembledPrompt:
-        return AssembledPrompt(system="", messages=[], tools=[], token_count=0)
+        return scripted_inputs(AssembledPrompt(system="", messages=[], tools=[], token_count=0), purpose=request.purpose)
 
 
 class _FakeLLM:

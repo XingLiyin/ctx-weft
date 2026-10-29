@@ -29,7 +29,7 @@ from ctx_weft.core.loop.driver import (
     make_event,
 )
 from ctx_weft.core.loop.llm_gateway import (
-    request_prompt_estimate,
+    build_llm_request,
     resolve_llm_identity,
     stream_llm_resilient,
 )
@@ -48,10 +48,11 @@ from ctx_weft.core.utils.verdict import (
     VERDICT_SUCCESS,
     normalize_verdict,
 )
-from ctx_weft.protocols import LLMMessage, LLMRequest, MemoryScope, load_records
+from ctx_weft.protocols import LLMMessage, MemoryScope, load_records
 from ctx_weft.protocols.events import EventType
 
 if TYPE_CHECKING:
+    from ctx_weft.core.assembler.context import PromptContext
     from ctx_weft.core.capabilities.control_tools import ControlResult
 
 logger = logging.getLogger(__name__)
@@ -247,22 +248,16 @@ class ObserveStep(Step):
             extra=extra, intent=ReviewIntent(judge_task=judge_task, terminal_only=boundary == "task_switch"),
         )
         inputs = await ctx.assembler.assemble(request)
-        prompt = await ctx.assembler.compile(
-            inputs, template=request.template, token_counter=request.token_counter)
-        if record_ids is not None and getattr(prompt, "inputs", None) is not None:
-            # Reuse the compiler's immutable read for the later observe fold.
+        submitted, last_text = await self._run_react(
+            state, ctx, inputs=inputs, max_rounds=state.agent.loop_config.max_turns_per_observe,
+            terminal_tool_name=REPORT_OBSERVATION_NAME,
+            validate_submission=lambda result: self._submission_error(result, judge_task=judge_task, terminal_only=boundary == "task_switch"),
+        )
+        if record_ids is not None and all(record_id in inputs._records for record_id in record_ids):
+            # The gateway's compiler loaded these immutable records for prompting.
             records = [inputs._records[record_id] for record_id in record_ids]
             records.sort(key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
             state.extra["observe_record_cache"] = ((state.extra.get("observe_id"), tuple(record_ids)), records)
-        from ctx_weft.core.loop.llm_gateway import resolve_request_tools
-
-        submitted, last_text = await self._run_react(
-            state, ctx, system=prompt.system, messages=list(prompt.messages),
-            tools=resolve_request_tools(prompt, ctx, state), max_rounds=state.agent.loop_config.max_turns_per_observe,
-            terminal_tool_name=REPORT_OBSERVATION_NAME,
-            validate_submission=lambda result: self._submission_error(result, judge_task=judge_task, terminal_only=boundary == "task_switch"),
-            prompt=prompt,
-        )
         return self._interpret_submission(state, submitted, last_text,
                                           judge_task=judge_task, background=background, terminal_only=boundary == "task_switch")
 
@@ -271,13 +266,10 @@ class ObserveStep(Step):
         state: "Any",
         ctx: "Any",
         *,
-        system: str,
-        messages: "list[LLMMessage]",
-        tools: "Any",
+        inputs: "PromptContext",
         max_rounds: int,
         terminal_tool_name: str,
         validate_submission: Callable[[Any], str | None] | None = None,
-        prompt: Any = None,
     ) -> "tuple[ControlResult | None, str]":
         """Run observation rounds until a valid terminal submission or the round limit.
 
@@ -290,7 +282,7 @@ class ObserveStep(Step):
         """
         agent = state.agent
         model, llm_account = resolve_llm_identity(state)
-        current_messages = list(messages)
+        appended_messages: list[LLMMessage] = []
         last_text = ""
         # 动态 max_tokens 的增量基线：上一轮实际发送条数（本轮 usage 对应的真实 prompt 基线）。
         baseline_msg_count: int | None = None
@@ -301,23 +293,16 @@ class ObserveStep(Step):
             # state.sequence_counter 两处读到同一个值，天然一致，不需要新增参数或跨函数传值。
             req_id = f"req_{agent.id}_{state.sequence_counter}"
 
-            sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
-            llm_request = LLMRequest(
-                model=model,
-                system=system,
-                messages=list(current_messages),
-                tools=tools,
-            )
-            from ctx_weft.core.loop.llm_gateway import prompt_event_inputs
-
-            llm_request.prompt_inputs = prompt_event_inputs(prompt, current_messages, tools)
-            llm_request.prompt_token_estimate = request_prompt_estimate(
-                ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
+            llm_request = await build_llm_request(
+                ctx, state, inputs, appended_messages=appended_messages,
+                baseline_msg_count=baseline_msg_count, turn=round_num)
+            sent_msg_count = len(llm_request.messages)
+            tools = llm_request.tools
             # turn：gateway 从 metadata["turn"] 取（spec §9.4 统一口径：LLM_* 事件一律用 turn，
             # 不用 round）；round_num 仍是本函数内部的轮次计数局部变量，只是不再直接进 payload。
-            llm_request.metadata["turn"] = round_num
 
-            stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
+            stream = ensure_collected_stream(stream_llm_resilient(
+                ctx, state, llm_request, inputs=inputs, appended_messages=appended_messages))
             async with aclosing(stream):
                 async for _ in stream:
                     stream.accept_current()
@@ -330,7 +315,7 @@ class ObserveStep(Step):
 
             # 摄入前铸造内部调用标识（spec: conversation-integrity，与 act._run_llm_turn 同口径）：
             # observer 回合不入 task 层 memory（工具是 SILENT/控制面），锚仅取唯一性、不持久；
-            # live 消息面（current_messages 的 tool_call↔result 配对）与事件 payload 用同一份值。
+            # live 消息面（appended_messages 的 tool_call↔result 配对）与事件 payload 用同一份值。
             if tool_calls:
                 tool_calls = [
                     m.call for m in mint_turn_call_ids(
@@ -369,17 +354,17 @@ class ObserveStep(Step):
                 # 还有剩余轮次时催促其改用工具提交后重试；耗尽轮次才返回 (None, last_text)。
                 if round_num + 1 >= max_rounds:
                     break
-                current_messages.append(LLMMessage(
+                appended_messages.append(LLMMessage(
                     role="assistant", content=accumulated_text or runtime_prompt('no_reply'),
                     provider_state=result.provider_state,
                 ))
-                current_messages.append(LLMMessage(
+                appended_messages.append(LLMMessage(
                     role="user",
                     content=runtime_prompt("react_nudge", terminal_tool=terminal_tool_name),
                 ))
                 continue
 
-            current_messages.append(LLMMessage(
+            appended_messages.append(LLMMessage(
                 role="assistant",
                 content=accumulated_text,
                 tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
@@ -413,7 +398,7 @@ class ObserveStep(Step):
                         "run_observe_react: no CapabilityGateway for tool '%s'", tc.name
                     )
                     content = runtime_prompt('gateway_missing', tool=tc.name)
-                current_messages.append(LLMMessage(
+                appended_messages.append(LLMMessage(
                     role="tool",
                     content=content,
                     tool_call_id=tc.id,

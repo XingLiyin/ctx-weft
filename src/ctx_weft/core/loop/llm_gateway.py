@@ -1,7 +1,7 @@
 """LLM 请求发送的统一关口：集中所有「发送前合法化」方法 + 流式转发。
 
-四个 step（act / observe / compact / recognize_intent）各自构造 ``LLMRequest`` 后
-都经 :func:`stream_llm` 发送，使「发送前合法化」成为**唯一**关口：装配层（composer）
+四个 step 通过 :func:`build_llm_request` 编译或复用 PromptContext，并构造本轮请求。
+请求经 :func:`stream_llm` 发送，使「发送前合法化」成为**唯一**关口：装配层（composer）
 只负责构造逻辑消息结构，不做合法化；连续同角色 / 孤立 tool result 一律在这里、发送前
 统一处理。
 
@@ -44,17 +44,23 @@ import copy
 import dataclasses
 import logging
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
-from ctx_weft.core.utils.content import rehydrate_content, redact_content_for_event
-from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
-from ctx_weft.core.utils.estimate import dynamic_max_tokens, estimate_content_tokens, estimate_tool_calls_tokens
 from ctx_weft.core.loop.llm_stream import DelegatingLLMStream, stream_until_cancel
+from ctx_weft.core.utils.content import redact_content_for_event, rehydrate_content
+from ctx_weft.core.utils.estimate import (
+    dynamic_max_tokens,
+    estimate_content_tokens,
+    estimate_tool_calls_tokens,
+)
+from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
+from ctx_weft.protocols.events import EventType
+
 if TYPE_CHECKING:
+    from ctx_weft.core.assembler.context import PromptContext
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
 
 logger = logging.getLogger(__name__)
@@ -337,7 +343,7 @@ def _estimate_request_tokens(request: "LLMRequest", count) -> int:
 
 
 def request_prompt_estimate(tokenizer, request: "LLMRequest", loop_guard, baseline_msg_count: "int | None") -> int:
-    """算 caller 侧的 used（本请求真实 prompt token 的最佳估算），供各 step 挂到 request。
+    """算本请求真实 prompt token 的最佳估算，由 gateway 挂到 request。
 
     - **增量**（``baseline_msg_count`` 非 None 且有真实基线 ``context_tokens>0``）：
       真实基线 + 仅 ``messages[baseline_msg_count:]``（本轮新增尾段，如工具结果）的估算。
@@ -590,14 +596,38 @@ def resolve_request_tools(prompt, ctx, state):
         return prompt.tools
 
 
+async def build_llm_request(ctx, state, inputs: PromptContext, *,
+                            appended_messages: Sequence[LLMMessage] = (),
+                            baseline_msg_count: int | None = None, turn: int = 0) -> LLMRequest:
+    """Compile/reuse the fixed base and build this round's actual request.
+
+    Continuations remain live LLMMessage objects, including provider reasoning
+    state. Only the streaming gateway serializes their event representation.
+    """
+    from ctx_weft.protocols import LLMRequest
+
+    prompt = await ctx.assembler.compile(
+        inputs, template=state.extra.get("template"),
+        token_counter=ctx.llm.tokenizer.count, reuse=True)
+    tools = (resolve_request_tools(prompt, ctx, state)
+             if inputs.purpose in {"act", "observe"} else prompt.tools)
+    request = LLMRequest(
+        model=resolve_llm_identity(state)[0], system=prompt.system,
+        messages=[*prompt.messages, *appended_messages], tools=tools,
+        metadata={"turn": turn})
+    request.prompt_token_estimate = request_prompt_estimate(
+        ctx.llm.tokenizer, request, getattr(state.agent, "loop_guard", None), baseline_msg_count)
+    return request
+
+
 async def externalize_prompt_images(inputs, *, event_blob_store, ctx):
     """Never introduce inline image bytes into a prompt event.
 
     Memory references stay references. Only unpersisted input content can still
     contain inline images; send those through the existing event blob boundary.
     """
-    from ctx_weft.protocols.context import normalize_content_parts
     from ctx_weft.core.utils.content import content_to_event_jsonable
+    from ctx_weft.protocols.context import normalize_content_parts
 
     async def content(value):
         if not isinstance(value, list):
@@ -630,12 +660,17 @@ async def externalize_prompt_images(inputs, *, event_blob_store, ctx):
 
 
 
-def stream_llm_resilient(ctx, state, request) -> DelegatingLLMStream:
+def stream_llm_resilient(ctx, state, request, *, inputs: PromptContext | None = None,
+                         appended_messages: Sequence[LLMMessage] = ()) -> DelegatingLLMStream:
     """Expose the current attempt's shared result without another collector."""
-    return DelegatingLLMStream(lambda owner: _stream_llm_resilient(owner, ctx, state, request))
+    appended_messages = tuple(appended_messages)
+    return DelegatingLLMStream(
+        lambda owner: _stream_llm_resilient(owner, ctx, state, request,
+                                          inputs=inputs, appended_messages=appended_messages))
 
 
-async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LLMChunk"]:
+async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
+                               appended_messages=()) -> AsyncIterator["LLMChunk"]:
     """退避自愈包装：把 retriable+outage 的 LLM 调用在进程内指数退避重试。
 
     - 中途 outage 先关闭旧流、废弃结果并发 RESPONSE_DISCARDED，再从空状态重试。
@@ -695,12 +730,14 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
             "request_id": request_id, "turn": turn,
             "tool_names": [t.name for t in request.tools],
         }
-        if request.prompt_inputs is not None:
-            inputs = await externalize_prompt_images(
-                request.prompt_inputs, event_blob_store=getattr(ctx, "event_blob_store", None),
+        event_inputs = (inputs.for_request(appended_messages, request.tools).to_payload()
+                        if inputs is not None else request.prompt_inputs)
+        if event_inputs is not None:
+            event_inputs = await externalize_prompt_images(
+                event_inputs, event_blob_store=getattr(ctx, "event_blob_store", None),
                 ctx=ctx.provider_ctx)
             prompt_payload.update({
-                **inputs,
+                **event_inputs,
                 # Freeze the actual per-request live/pinned tool surface.
                 "tools": [dataclasses.asdict(tool) for tool in request.tools],
             })

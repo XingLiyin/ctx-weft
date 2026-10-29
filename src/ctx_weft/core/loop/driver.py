@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
+from ctx_weft.core.assembler import ContextAssembler, PromptContext
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
@@ -220,7 +220,7 @@ class LoopState:
     sequence_counter: int = 0  # 每发一个事件 +1
 
     # 由 PrepareStep 写入
-    assembled_prompt: AssembledPrompt | None = None
+    prompt_inputs: PromptContext | None = None
     # 由 ActStep 写入
     transcript: list[TurnRecord] = field(default_factory=list)
     act_exit_reason: str = ""

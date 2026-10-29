@@ -15,23 +15,32 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextAssembler, ContextRequest
+from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextAssembler
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.assembler.sources.task_spec import TaskSpecSource
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import (
-    DIGEST_SECTIONS, REQUIRED_DIGEST_SECTIONS, ParsedDigest, parse_structured_digest,
+    DIGEST_SECTIONS,
+    REQUIRED_DIGEST_SECTIONS,
+    parse_structured_digest,
     summarize_for_compact,
 )
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.utils.ids import generate_id
-from ctx_weft.protocols import LLMChunk, LLMMessage, MemoryAddress, MemoryScope, ProviderContext, load_records
-from ctx_weft.providers.capability_results import ResultsCapabilityProvider
+from ctx_weft.protocols import (
+    LLMChunk,
+    MemoryAddress,
+    MemoryScope,
+    ProviderContext,
+    load_records,
+)
+from ctx_weft.providers.capability_results import (
+    READ_TOOL_QUALIFIED_NAME,
+    ResultsCapabilityProvider,
+)
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.results import InMemoryToolResultStore
-from ctx_weft.providers.capability_results import READ_TOOL_QUALIFIED_NAME
-
 
 CONSTRAINT_MARK = "[CONSTRAINT_TOKEN_X7]"
 TODO_MARK = "[TODO_TOKEN_Y9]"
@@ -153,7 +162,7 @@ def _assert_cue_contract(cue: str) -> None:
 async def test_request_layer_task_cue_carries_contract(monkeypatch):
     llm = _CaptureLLM(_SCRIPTED_DIGEST)
 
-    async def _stream(ctx, state, request):
+    async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
     monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
@@ -166,7 +175,7 @@ async def test_request_layer_task_cue_carries_contract(monkeypatch):
 async def test_request_layer_agent_cue_carries_contract(monkeypatch):
     llm = _CaptureLLM(_SCRIPTED_DIGEST)
 
-    async def _stream(ctx, state, request):
+    async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
     monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
@@ -180,7 +189,6 @@ async def test_request_layer_agent_cue_carries_contract(monkeypatch):
 
 def _ingest_task_material(mem, scope, pctx, *, converged_tool_line: str | None = None):
     """预排输入材料：约束/待办/失败原因 + （可选）收敛版大输出工具结果。"""
-    import dataclasses as dc
     from ctx_weft.core.utils.clock import now_utc
     from ctx_weft.protocols import MemoryEvent, MemoryKind
 
@@ -219,7 +227,7 @@ async def test_pipeline_materials_reach_compact_request(monkeypatch):
     """管道层：约束/待办/失败原因/大输出收敛版确实进入压缩请求的输入历史。"""
     llm = _CaptureLLM(_SCRIPTED_DIGEST)
 
-    async def _stream(ctx, state, request):
+    async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
     monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
@@ -239,7 +247,7 @@ async def test_pipeline_digest_lands_verbatim_with_markers(monkeypatch):
     """管道层：结构化 digest 落库逐字不丢节；Done/Remaining 归属不变。"""
     llm = _CaptureLLM(_SCRIPTED_DIGEST)
 
-    async def _stream(ctx, state, request):
+    async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
     monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
@@ -263,7 +271,7 @@ async def test_pipeline_degraded_prose_still_completes(monkeypatch):
     prose = f"did stuff, {TODO_MARK} remains"
     llm = _CaptureLLM(prose)
 
-    async def _stream(ctx, state, request):
+    async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
     monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
@@ -286,7 +294,7 @@ async def test_pipeline_degraded_prose_still_completes(monkeypatch):
 async def test_evidence_reference_readback_roundtrip(monkeypatch):
     llm = _CaptureLLM(_SCRIPTED_DIGEST)
 
-    async def _stream(ctx, state, request):
+    async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
     monkeypatch.setattr(cm, "stream_llm_resilient", _stream)

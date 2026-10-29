@@ -53,7 +53,31 @@ def context_from_blocks(request, blocks):
 
 async def compiled_test_inputs(inputs, **kwargs):
     """Compiler half for tests whose assembler already returns a scripted prompt."""
-    return inputs
+    return getattr(inputs, "_scripted_prompt", inputs)
+
+
+def scripted_inputs(prompt=None, *, system="", messages=(), tools=(), purpose="act"):
+    """Keep step tests scripted while exercising the PromptContext boundary."""
+    from ctx_weft.core.assembler.assembler import AssembledPrompt
+    from ctx_weft.protocols import LLMTool
+
+    if isinstance(prompt, PromptContext):
+        return prompt
+    if prompt is None:
+        prompt = AssembledPrompt(system, list(messages), list(tools), 0)
+    if not hasattr(prompt, "messages"):
+        prompt.messages = []
+    prompt.tools = [tool if isinstance(tool, LLMTool) else LLMTool(
+        name=tool.name, description=getattr(tool, "description", ""),
+        input_schema=getattr(tool, "input_schema", {})) for tool in getattr(prompt, "tools", [])]
+    context = PromptContext(purpose=purpose)
+    from ctx_weft.core.assembler.context import json_value
+    context.references = [dict(position=i, id=f"test-{i}", source="test", kind="reference",
+                               metadata={}, content=json_value(m.content), value_metadata={},
+                               timestamp=None) for i, m in enumerate(prompt.messages)]
+    context._scripted_prompt = prompt
+    prompt.inputs = context
+    return context
 
 
 async def recalled_blocks(request, deps):

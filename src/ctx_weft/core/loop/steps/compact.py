@@ -27,13 +27,13 @@ from typing import Any
 
 from ctx_weft.core.assembler import CompactIntent, ContextRequest
 from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
-    request_prompt_estimate,
+    build_llm_request,
     resolve_llm_identity,
     stream_llm_resilient,
 )
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 
 # 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.utils.content` /
 # `protocols`，不回指 `core.loop`。若日后 media 模块级引入了 `core.loop` 的东西，
@@ -42,7 +42,13 @@ from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.estimate import effective_limit
-from ctx_weft.protocols import LLMRequest, MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, load_records
+from ctx_weft.protocols import (
+    MemoryAddress,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
+    load_records,
+)
 from ctx_weft.protocols.events import EventOrigin, EventType
 
 logger = logging.getLogger(__name__)
@@ -198,29 +204,15 @@ async def summarize_for_compact(
         intent=CompactIntent(scope="agent" if scope == "agent" else "task"),
     )
     inputs = await ctx.assembler.assemble(request)
-    compact_prompt = await ctx.assembler.compile(
-        inputs, template=request.template, token_counter=request.token_counter)
-
+    llm_request = await build_llm_request(ctx, state, inputs)
     model, llm_account = resolve_llm_identity(state)
-    llm_request = LLMRequest(
-        model=model,
-        system=compact_prompt.system,
-        messages=compact_prompt.messages,
-        tools=[],
-    )
-    from ctx_weft.core.loop.llm_gateway import prompt_event_inputs
-
-    llm_request.prompt_inputs = prompt_event_inputs(compact_prompt, compact_prompt.messages, [])
-    # 一次性调用（无循环内基线）→ baseline=None，走 max(整份估算, context_tokens)。
-    llm_request.prompt_token_estimate = request_prompt_estimate(
-        ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), None)
 
     bus = getattr(ctx, "event_bus", None)
     # 同 gateway 那 4 个流式事件一个门禁：bus 存在 且 origin==LOOP_COMPACT（见上方 docstring）。
     should_emit_finished = bus is not None and getattr(state, "origin", None) == EventOrigin.LOOP_COMPACT
     req_id = f"req_{agent.id}_{state.sequence_counter}" if should_emit_finished else None
 
-    stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
+    stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request, inputs=inputs))
     async with aclosing(stream):
         async for _ in stream:
             stream.accept_current()

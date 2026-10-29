@@ -8,26 +8,34 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.control.tokens import CancelToken, PauseToken
-from ctx_weft.providers.events import InProcessEventBus
+from ctx_weft.core.assembler.assembler import AssembledPrompt
+from ctx_weft.core.capabilities.cache import CapabilityCache
+from ctx_weft.core.control.tokens import PauseToken
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.act import CANCELLED_MARK, INTERRUPTED_MARK, ActStep
-from ctx_weft.core.capabilities.cache import CapabilityCache
-from tests.hitl_env import make_hitl
-from ctx_weft.core.assembler.assembler import AssembledPrompt
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
-    LLMMessage, MemoryEventType, MemoryAddress, ProviderContext, ToolCall,
+    LLMMessage,
+    MemoryAddress,
+    MemoryEventType,
+    ProviderContext,
+    ToolCall,
 )
 from ctx_weft.protocols.capability import (
-    CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
+    CapabilityEvent,
+    CapabilityProviderInfo,
+    ToolCapability,
+    ToolCapabilityProvider,
 )
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
+from tests.hitl_env import make_hitl
 
 pytestmark = pytest.mark.asyncio
 
@@ -84,11 +92,11 @@ def _harness(llm, provider):
     prompt = AssembledPrompt(system="", messages=[LLMMessage(role="user", content="hi")],
                              tools=[], token_count=1)
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope,
-                      assembled_prompt=prompt,
+                      prompt_inputs=scripted_inputs(prompt),
                       resolved_model=SimpleNamespace(model="mock", account=""))
     pause = PauseToken()
     ctx = LoopContext(
-        assembler=None, llm=llm, memory=mem, event_bus=bus,
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=llm, memory=mem, event_bus=bus,
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1"),
         hitl=hitl, capability_gateway=gw, pause_token=pause,
     )

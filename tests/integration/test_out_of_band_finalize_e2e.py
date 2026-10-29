@@ -19,9 +19,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.observe import _out_of_band_finalize
-from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
@@ -31,6 +31,7 @@ from ctx_weft.protocols.hitl import HitlAsk, UserTurnDelivery
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compiled_test_inputs
 from tests.hitl_env import make_hitl
 
 pytestmark = pytest.mark.asyncio
@@ -72,12 +73,12 @@ async def _fixture(*, parent: str | None = "t_parent"):
     scope = MemoryAddress(session_id=_SID, task_id=task.id, agent_id="ag_child")
     state = LoopState(
         run_id="r_bg", session=session, task=task, agent=agent, scope=scope,
-        assembled_prompt=None, resolved_model=SimpleNamespace(model="mock", account=""),
+        prompt_inputs=None, resolved_model=SimpleNamespace(model="mock", account=""),
     )
     state.extra["final_body"] = "甲的资料是这样的"
     state.extra["final_summary"] = "查了三处来源"
     ctx = LoopContext(
-        assembler=None, llm=MockLLMAdapter(responses=[]), memory=mem, event_bus=bus,
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=MockLLMAdapter(responses=[]), memory=mem, event_bus=bus,
         provider_ctx=ProviderContext(session_id=_SID, tenant_id="default",
                                      task_id=task.id, agent_id="ag_child"),
         hitl=hitl_service,

@@ -77,6 +77,8 @@ class PromptContext:
         # Not a dataclass field: even a generic asdict() cannot persist bodies.
         self._records: dict[str, MemoryRecord] = {}
         self._record_context: tuple[str, str] | None = None
+        # Explicitly opt-in, per-input runtime cache. Never part of event data.
+        self._compiled_base = None
 
     @classmethod
     def from_request(cls, request):

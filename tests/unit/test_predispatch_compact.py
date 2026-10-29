@@ -14,6 +14,7 @@ from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
 from ctx_weft.protocols import MemoryAddress
 from ctx_weft.protocols import MemoryEventType as T  # noqa: F401
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 _BASE_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -94,10 +95,10 @@ class _FakeMemory:
 
 class _FakeAssembler:
     async def compile(self, inputs, **kwargs):
-        return inputs
+        return await compiled_test_inputs(inputs, **kwargs)
 
     async def assemble(self, request):
-        return SimpleNamespace(system="SYS", messages=[], tools=[])
+        return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[]), purpose=request.purpose)
 
 
 class _FakeLLM:

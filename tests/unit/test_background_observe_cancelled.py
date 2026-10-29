@@ -39,7 +39,7 @@ async def test_cancellation_reraises_and_run_finished_reports_canceled_first(
         compact_keep_last=2, max_turns_per_observe=3, short_segment_token_threshold=0)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    async def _cancelled(c, s, req):
+    async def _cancelled(c, s, req, **kwargs):
         raise asyncio.CancelledError()
         yield  # pragma: no cover - makes this an async generator
 

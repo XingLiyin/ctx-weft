@@ -24,6 +24,7 @@ from ctx_weft.protocols import (
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 from tests.step_helpers import patch_observe_start
 
 pytestmark = pytest.mark.asyncio
@@ -104,10 +105,10 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
 
     class _FakeAssembler:
         async def compile(self, inputs, **kwargs):
-            return inputs
+            return await compiled_test_inputs(inputs, **kwargs)
 
         async def assemble(self, request: Any) -> Any:
-            return SimpleNamespace(system="SYS", messages=[], tools=[])
+            return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[]), purpose=request.purpose)
 
     class _FakeLLM:
         context_limit = 100_000
@@ -260,12 +261,12 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
         system="", messages=[LLMMessage(role="user", content="hi")], tools=[], token_count=1,
     )
     state = LoopState(
-        run_id="r1", session=session, task=task, agent=agent, scope=scope, assembled_prompt=prompt,
+        run_id="r1", session=session, task=task, agent=agent, scope=scope, prompt_inputs=scripted_inputs(prompt),
         resolved_model=SimpleNamespace(model="mock", account=""),
     )
     llm = MockLLMAdapter(responses=[MockResponse(text="partial")])
     ctx = LoopContext(
-        assembler=None, llm=llm, memory=mem, event_bus=bus,
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=llm, memory=mem, event_bus=bus,
         provider_ctx=pctx, hitl=hitl,
     )
 
@@ -315,12 +316,12 @@ async def test_act_soft_interrupt_child_task_schedules_recap(monkeypatch):
         system="", messages=[LLMMessage(role="user", content="hi")], tools=[], token_count=1,
     )
     state = LoopState(
-        run_id="r1", session=session, task=child, agent=agent, scope=scope, assembled_prompt=prompt,
+        run_id="r1", session=session, task=child, agent=agent, scope=scope, prompt_inputs=scripted_inputs(prompt),
         resolved_model=SimpleNamespace(model="mock", account=""),
     )
     llm = MockLLMAdapter(responses=[MockResponse(text="partial")])
     ctx = LoopContext(
-        assembler=None, llm=llm, memory=mem, event_bus=bus,
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=llm, memory=mem, event_bus=bus,
         provider_ctx=pctx, hitl=hitl,
     )
 
@@ -366,7 +367,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
         resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
-        assembler=None, llm=None, memory=mem, event_bus=bus,
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=None, memory=mem, event_bus=bus,
         provider_ctx=pctx, hitl=hitl,
     )
 
@@ -413,7 +414,7 @@ async def test_act_plain_text_pause_child_task_fires(monkeypatch):
         resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
-        assembler=None, llm=None, memory=mem, event_bus=bus,
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=None, memory=mem, event_bus=bus,
         provider_ctx=pctx, hitl=hitl,
     )
 
@@ -448,7 +449,7 @@ def _make_suspend_state_ctx(task: Task):
             self.emitted.append(event)
 
     ctx = LoopContext(
-        assembler=None, llm=None, memory=mem, event_bus=_FakeEventBus(),
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=None, memory=mem, event_bus=_FakeEventBus(),
         provider_ctx=pctx,
     )
     return state, ctx

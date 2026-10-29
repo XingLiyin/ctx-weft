@@ -17,6 +17,7 @@ from ctx_weft.protocols import EventType, MemoryEventType
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
 from ctx_weft.providers.llm.adapters.text_calls import ContentGate
+from tests.assembler_testkit import scripted_inputs
 from tests.integration.test_interactive_task import _act_state_ctx
 
 
@@ -108,8 +109,8 @@ async def test_shared_collector_preserves_visible_body_through_memory(case, piec
         if case == "text-tool":
             # Exercise the actual turn accumulator and persistence function, but
             # do not dispatch a tool: tool execution is outside topic 10.
-            prompt = state.assembled_prompt
-            turn = await _run_llm_turn(state, ctx, prompt, list(prompt.messages), 1)
+            prompt = state.prompt_inputs
+            turn = await _run_llm_turn(state, ctx, scripted_inputs(prompt), [], 1)
             assert turn.text == expected_body
             assert [(tc.name, tc.arguments) for tc in turn.tool_calls] == [
                 ("lookup", {"id": "doc-1"}),

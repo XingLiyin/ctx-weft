@@ -20,6 +20,7 @@ from ctx_weft.core.loop.steps.act import _run_llm_turn
 from ctx_weft.protocols import LLMUsage, MemoryAddress
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 _MOVED_TYPES = {
     EventType.LLM_REQUEST_STARTED,
@@ -117,10 +118,10 @@ def _make_ctx(event_bus):
 
     class _FakeAssembler:
         async def compile(self, inputs, **kwargs):
-            return inputs
+            return await compiled_test_inputs(inputs, **kwargs)
 
         async def assemble(self, req):
-            return SimpleNamespace(system="SYS", messages=[], tools=[])
+            return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[]), purpose=req.purpose)
 
     class _FakeGateway:
         async def invoke(self, *, tool_name, arguments, state, ctx, tool_call_id=None):
@@ -144,7 +145,7 @@ async def test_request_started_prompt_sent_response_finished_share_request_id():
     ctx = _make_ctx(bus)
     prompt = SimpleNamespace(system="SYS", tools=[])
 
-    await _run_llm_turn(state, ctx, prompt, [], 1)
+    await _run_llm_turn(state, ctx, scripted_inputs(prompt), [], 1)
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
     prompt_sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT]
@@ -177,10 +178,10 @@ async def test_request_started_prompt_sent_response_finished_share_request_id():
 
 class _FakeCompactAssembler:
     async def compile(self, inputs, **kwargs):
-        return inputs
+        return await compiled_test_inputs(inputs, **kwargs)
 
     async def assemble(self, req):
-        return SimpleNamespace(system="SYS-COMPACT", messages=[], tools=[])
+        return scripted_inputs(SimpleNamespace(system="SYS-COMPACT", messages=[], tools=[]), purpose=req.purpose)
 
 
 def _make_compact_state(*, origin: str = EventOrigin.LOOP_COMPACT):
@@ -433,10 +434,7 @@ async def test_observe_path_events_share_origin_and_request_id():
     state.origin = EventOrigin.LOOP_OBSERVE
     ctx = _make_ctx(bus)
 
-    await ObserveStep()._run_react(
-        state, ctx, system="SYS", messages=[], tools=[],
-        max_rounds=1, terminal_tool_name="report_observation",
-    )
+    await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[], tools=[], purpose="observe"), max_rounds=1, terminal_tool_name="report_observation")
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
     prompt_sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT]
@@ -466,10 +464,7 @@ async def test_background_observe_path_events_share_origin_and_request_id():
     state.origin = EventOrigin.LOOP_BACKGROUND_OBSERVE
     ctx = _make_ctx(bus)
 
-    await ObserveStep()._run_react(
-        state, ctx, system="SYS", messages=[], tools=[],
-        max_rounds=1, terminal_tool_name="report_observation",
-    )
+    await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[], tools=[], purpose="observe"), max_rounds=1, terminal_tool_name="report_observation")
 
     five = [e for e in bus.events if e.type in (
         EventType.LLM_REQUEST_STARTED, EventType.LLM_PROMPT_SENT,
@@ -541,10 +536,10 @@ def _make_recognize_intent_ctx(event_bus, *, llm=None, config=None):
 
     class _FakeRIAssembler:
         async def compile(self, inputs, **kwargs):
-            return inputs
+            return await compiled_test_inputs(inputs, **kwargs)
 
         async def assemble(self, req):
-            return SimpleNamespace(system="SYS-RI", messages=[], tools=[])
+            return scripted_inputs(SimpleNamespace(system="SYS-RI", messages=[], tools=[]), purpose=req.purpose)
 
     class _FakeRIGateway:
         async def invoke(self, *, tool_name, arguments, state, ctx):
@@ -895,10 +890,7 @@ async def test_observe_multi_round_request_id_and_turn_increment():
     state.origin = EventOrigin.LOOP_OBSERVE
     ctx = _make_ctx(bus)
 
-    await ObserveStep()._run_react(
-        state, ctx, system="SYS", messages=[], tools=[],
-        max_rounds=3, terminal_tool_name="report_observation",
-    )
+    await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[], tools=[], purpose="observe"), max_rounds=3, terminal_tool_name="report_observation")
 
     finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
     assert len(finished) == 3, "3 轮都无 tool_call，应跑满 max_rounds"

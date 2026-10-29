@@ -1,4 +1,5 @@
 """A failed generation is revoked before retry; consumers see only fresh state."""
+
 import asyncio
 from types import SimpleNamespace
 
@@ -7,8 +8,17 @@ import pytest
 from ctx_weft.core.control.tokens import CancelToken
 from ctx_weft.core.loop import llm_gateway
 from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
-from ctx_weft.protocols import LLMCallError, LLMChunk, LLMMessage, LLMOutageError, LLMRequest, LLMUsage, ToolCall
+from ctx_weft.protocols import (
+    LLMCallError,
+    LLMChunk,
+    LLMMessage,
+    LLMOutageError,
+    LLMRequest,
+    LLMUsage,
+    ToolCall,
+)
 from ctx_weft.protocols.events import EventType
+from tests.assembler_testkit import scripted_inputs
 
 
 class Bus:
@@ -227,9 +237,9 @@ async def test_pause_during_backoff_does_not_persist_the_revoked_reply(monkeypat
         await asyncio.Event().wait()  # Act must stop this pending read itself.
 
     monkeypatch.setattr(llm_gateway, "_sleep_cancellable", pause)
-    prompt = loop_state.assembled_prompt
+    prompt = loop_state.prompt_inputs
     with pytest.raises(HitlPark):
-        await asyncio.wait_for(_run_llm_turn(loop_state, ctx, prompt, prompt.messages, 1), timeout=2)
+        await asyncio.wait_for(_run_llm_turn(loop_state, ctx, scripted_inputs(prompt), [], 1), timeout=2)
     records = await memory.recall_recent(loop_state.scope, [MemoryEventType.LLM_RESPONSE], 10, ctx.provider_ctx)
     assert records == []
     assert llm.calls == 1

@@ -57,7 +57,7 @@ async def test_same_tool_and_purpose_with_optional_judgement(monkeypatch, standa
 
     ctx.assembler.assemble = assemble
 
-    async def stream(*args):
+    async def stream(*args, **kwargs):
         yield _make_tool_call_chunk("control__report_observation")
 
     monkeypatch.setattr(observing, "stream_llm_resilient", stream)
@@ -87,7 +87,7 @@ async def test_missing_verdict_is_retried_before_accepting_submission(monkeypatc
                 act_recap="recap", task_status="continue" if len(received) > 1 else None)
             return NS(content=submitted.content, metadata=submitted.metadata, is_error=False)
 
-    async def stream(ctx, state, request):
+    async def stream(ctx, state, request, **kwargs):
         received.append(request)
         yield _make_tool_call_chunk("control__report_observation")
 
@@ -145,7 +145,7 @@ async def test_unadvertised_ask_user_is_never_dispatched(monkeypatch):
         async def invoke(self, **kwargs):
             pytest.fail("ask_user must not reach the gateway")
 
-    async def stream(*args):
+    async def stream(*args, **kwargs):
         yield _make_tool_call_chunk("control__ask_user")
 
     monkeypatch.setattr(observing, "stream_llm_resilient", stream)

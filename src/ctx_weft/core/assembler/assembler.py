@@ -274,8 +274,12 @@ class ContextAssembler:
         return context
 
     async def compile(self, inputs: PromptContext | dict, *, template=None,
-                      token_counter=estimate_tokens) -> AssembledPrompt:
-        """Compile assembled/event inputs without selecting sources or live state."""
+                      token_counter=estimate_tokens, reuse: bool = False) -> AssembledPrompt:
+        """Compile inputs; opt into reuse only for an unchanged runtime base.
+
+        Reassemble after changing inputs. Historical/request inputs containing
+        continuations or a frozen tool override are always compiled independently.
+        """
         from ctx_weft.core.assembler.builder import PromptBuilder
         from ctx_weft.core.assembler.context import PromptContext, record_from_json
         from ctx_weft.protocols.context import normalize_content_parts
@@ -284,13 +288,22 @@ class ContextAssembler:
             inputs = PromptContext.from_payload(inputs)
         if inputs.scope.get("session_id") not in (None, self.deps.provider_ctx.session_id):
             raise ValueError("prompt inputs belong to a different session")
+        record_context = (getattr(self.deps.provider_ctx, "tenant_id", "default"),
+                          self.deps.provider_ctx.session_id)
+        if reuse and (inputs.appended_messages or inputs.tools is not None):
+            raise ValueError("only base prompt inputs can reuse compilation")
+        cached = inputs._compiled_base
+        if reuse and cached is not None:
+            owner, memory, cached_template, counter, prompt = cached
+            if (owner == record_context and memory is self.deps.memory
+                    and cached_template is template and counter == token_counter):
+                return prompt
+        requested_template = template
         if template is None and inputs.template_id:
             if self.deps.template_lookup is None:
                 raise ValueError(f"template lookup is required for {inputs.template_id!r}")
             template = await self.deps.template_lookup.get_template(
                 inputs.template_id, None, self.deps.provider_ctx)
-        record_context = (getattr(self.deps.provider_ctx, "tenant_id", "default"),
-                          self.deps.provider_ctx.session_id)
         # Cached reads retain the provider's tenant/session boundary.
         records = dict(inputs._records) if inputs._record_context == record_context else {}
         for item in inputs.memory_blocks:
@@ -330,6 +343,9 @@ class ContextAssembler:
                 role=item["role"], content=content, tool_calls=item["tool_calls"],
                 tool_call_id=item["tool_call_id"]))
         prompt.inputs = inputs
+        if reuse:
+            inputs._compiled_base = (record_context, self.deps.memory, requested_template,
+                                     token_counter, prompt)
         return prompt
 
     @staticmethod

@@ -25,9 +25,9 @@ from ctx_weft.core.capabilities.control_tools import (
 )
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop.driver import StepDriver
-from ctx_weft.core.loop.task_memory_fold import segment_fold
 from ctx_weft.core.loop.steps import observe as recap_mod
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
+from ctx_weft.core.loop.task_memory_fold import segment_fold
 from ctx_weft.protocols import (
     ImagePart,
     MemoryAddress,
@@ -235,7 +235,7 @@ def _make_usage_chunk():
         tool_call=None, text="")
 
 
-async def _fake_stream(ctx, state, request):
+async def _fake_stream(ctx, state, request, **kwargs):
     # 判定档（`plain_text`）的 terminal tool 是 `report_observation`——2026-09-28 起两档是两个
     # 工具，名字对不上 `run_observe_react` 就不会终止，报告只能从 last_text 兜底取。
     yield _make_tool_call_chunk(REPORT_OBSERVATION_NAME)

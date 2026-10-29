@@ -17,6 +17,7 @@ from ctx_weft.protocols import (
     ProviderContext,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 
 def _template_with_role():
@@ -150,10 +151,10 @@ async def fake_state_ctx():
     # Minimal assembler and LLM (won't be called — summarize_for_compact is monkeypatched)
     class _FakeAssembler:
         async def compile(self, inputs, **kwargs):
-            return inputs
+            return await compiled_test_inputs(inputs, **kwargs)
 
         async def assemble(self, request: Any) -> Any:
-            return SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")])
+            return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")]), purpose=request.purpose)
 
     class _FakeLLM:
         def __init__(self) -> None:

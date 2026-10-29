@@ -32,7 +32,6 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from ctx_weft.protocols.context import ContentPart, normalize_content_parts
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Adapter 契约：数据类型（adapter 读 LLMRequest/Message/Tool，产 LLMChunk/ToolCall/Usage）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -240,7 +239,8 @@ class LLMRequest:
     prompt_token_estimate: int | None = None
     temperature: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)  # trace_id / run_id / 计费标签
-    # Collection-time assembler inputs, not compiled text or provider wire state.
+    # Pre-serialized inputs for direct/custom callers. Core steps pass the live
+    # PromptContext separately to the gateway, which serializes it at event emission.
     prompt_inputs: dict[str, Any] | None = None
 
 

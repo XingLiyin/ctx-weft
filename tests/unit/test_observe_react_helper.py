@@ -10,6 +10,7 @@ from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 pytestmark = pytest.mark.asyncio
 
@@ -112,10 +113,10 @@ def _make_ctx(tool_content: str, event_bus=None, gateway=None):
 
     class _FakeAssembler:
         async def compile(self, inputs, **kwargs):
-            return inputs
+            return await compiled_test_inputs(inputs, **kwargs)
 
         async def assemble(self, req):
-            return SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")])
+            return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")]), purpose=req.purpose)
 
     class _FakeLLM:
         tokenizer = HeuristicTokenizer()
@@ -143,7 +144,7 @@ async def test_helper_returns_tool_content_when_control_tool_called(monkeypatch)
     """Round 1 produces a tool_call; gateway returns ControlResult('REPORT').
     Helper must return ('REPORT', last_text)."""
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_token_chunk("thinking...")
         yield _make_tool_call_chunk("control__report_observation")
         yield _make_usage_chunk()
@@ -153,14 +154,7 @@ async def test_helper_returns_tool_content_when_control_tool_called(monkeypatch)
     state = _make_state()
     ctx = _make_ctx(tool_content="REPORT")
 
-    tool_content, last_text = await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[LLMMessage(role="user", content="observe this")],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=3,
-        terminal_tool_name="control__report_observation",
-    )
+    tool_content, last_text = await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe this")], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=3, terminal_tool_name="control__report_observation")
 
     assert tool_content is not None
     assert tool_content.content == "REPORT"
@@ -175,7 +169,7 @@ async def test_plain_text_round_nudged_then_terminal(monkeypatch):
 
     requests = []
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         requests.append(request)
         if len(requests) == 1:
             yield _make_token_chunk("prose recap")
@@ -189,14 +183,7 @@ async def test_plain_text_round_nudged_then_terminal(monkeypatch):
     state = _make_state()
     ctx = _make_ctx(tool_content="REPORT")
 
-    result, last_text = await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[LLMMessage(role="user", content="observe this")],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=3,
-        terminal_tool_name="control__report_observation",
-    )
+    result, last_text = await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe this")], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=3, terminal_tool_name="control__report_observation")
 
     assert result is not None, "纯文本轮后应催促重试而非直接返回 None"
     assert result.content == "REPORT"
@@ -212,7 +199,7 @@ async def test_helper_returns_none_when_no_tool_called(monkeypatch):
     """LLM returns only text (no tool_calls) every round; helper exhausts max_rounds
     then returns (None, last_text)."""
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_token_chunk("just text")
         yield _make_usage_chunk()
 
@@ -221,14 +208,7 @@ async def test_helper_returns_none_when_no_tool_called(monkeypatch):
     state = _make_state()
     ctx = _make_ctx(tool_content="IGNORED")
 
-    tool_content, last_text = await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[LLMMessage(role="user", content="observe this")],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=3,
-        terminal_tool_name="control__report_observation",
-    )
+    tool_content, last_text = await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe this")], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=3, terminal_tool_name="control__report_observation")
 
     assert tool_content is None
     assert last_text == "just text"
@@ -237,7 +217,7 @@ async def test_helper_returns_none_when_no_tool_called(monkeypatch):
 async def test_helper_last_text_from_final_round(monkeypatch):
     """When the control tool is called, last_text is the text from that round."""
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_token_chunk("final thinking")
         yield _make_tool_call_chunk("control__report_observation")
         yield _make_usage_chunk()
@@ -247,14 +227,7 @@ async def test_helper_last_text_from_final_round(monkeypatch):
     state = _make_state()
     ctx = _make_ctx(tool_content="DONE")
 
-    tool_content, last_text = await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[LLMMessage(role="user", content="observe this")],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=3,
-        terminal_tool_name="control__report_observation",
-    )
+    tool_content, last_text = await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe this")], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=3, terminal_tool_name="control__report_observation")
 
     assert tool_content is not None
     assert tool_content.content == "DONE"
@@ -264,7 +237,7 @@ async def test_helper_last_text_from_final_round(monkeypatch):
 async def test_helper_token_accounting(monkeypatch):
     """session.token_used is accumulated from usage chunks."""
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_usage_chunk(prompt_tokens=20, completion_tokens=8)
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _fake_stream)
@@ -273,14 +246,7 @@ async def test_helper_token_accounting(monkeypatch):
     state.session.token_used = 0
     ctx = _make_ctx(tool_content="X")
 
-    await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=1,
-        terminal_tool_name="control__report_observation",
-    )
+    await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=1, terminal_tool_name="control__report_observation")
 
     assert state.session.token_used == 28  # 20 + 8
 
@@ -298,7 +264,7 @@ async def test_ask_user_does_not_terminate_loop(monkeypatch):
     ASK_USER_TOOL = "control__ask_user"
     TERMINAL_TOOL = "control__report_observation"
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_token_chunk("thinking about user question")
         yield _make_tool_call_chunk(ASK_USER_TOOL, call_id="tc_ask")
         yield _make_usage_chunk()
@@ -308,14 +274,7 @@ async def test_ask_user_does_not_terminate_loop(monkeypatch):
     state = _make_state()
     ctx = _make_ctx(tool_content="ASK_USER_RESULT")
 
-    tool_content, last_text = await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[LLMMessage(role="user", content="observe this")],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=1,
-        terminal_tool_name=TERMINAL_TOOL,
-    )
+    tool_content, last_text = await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe this")], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=1, terminal_tool_name=TERMINAL_TOOL)
 
     # ask_user's ControlResult must NOT be returned as terminal content
     assert tool_content is None, (
@@ -331,7 +290,7 @@ async def test_response_finished_type_and_origin_follow_state_origin(monkeypatch
     整个被 monkeypatch 掉不会跑到那段）。前台/后台的区别只体现在事件的 origin 字段上，
     origin 随 state.origin 走，run_observe_react 本身不感知也不分支。"""
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_token_chunk("thinking")
         yield _make_tool_call_chunk("control__report_observation")
         yield _make_usage_chunk()
@@ -344,14 +303,7 @@ async def test_response_finished_type_and_origin_follow_state_origin(monkeypatch
         state.origin = origin
         ctx = _make_ctx(tool_content="REPORT", event_bus=bus)
 
-        await ObserveStep()._run_react(
-            state, ctx,
-            system="SYS",
-            messages=[],
-            tools=[SimpleNamespace(name="control__report_observation")],
-            max_rounds=1,
-            terminal_tool_name="control__report_observation",
-        )
+        await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=1, terminal_tool_name="control__report_observation")
 
         assert bus.types == [EventType.LLM_RESPONSE_FINISHED], (origin, bus.types)
         assert bus.events[0].origin == origin
@@ -362,7 +314,7 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
 
     TERMINAL = "control__report_observation"
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_token_chunk("thinking")
         yield _make_tool_call_chunk(TERMINAL)
         yield _make_usage_chunk()
@@ -384,10 +336,10 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
 
     class _FakeAssembler2:
         async def compile(self, inputs, **kwargs):
-            return inputs
+            return await compiled_test_inputs(inputs, **kwargs)
 
         async def assemble(self, req):
-            return SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")])
+            return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")]), purpose=req.purpose)
 
     class _FakeLLM2:
         tokenizer = HeuristicTokenizer()
@@ -405,14 +357,7 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
         capability_gateway=_RichGateway(),
     )
 
-    result, last_text = await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[LLMMessage(role="user", content="observe this")],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=3,
-        terminal_tool_name=TERMINAL,
-    )
+    result, last_text = await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe this")], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=3, terminal_tool_name=TERMINAL)
     assert result is not None
     assert result.content == "recap"
     assert result.metadata.get("task_summary") == "sum"
@@ -461,7 +406,7 @@ async def test_terminal_tool_error_does_not_terminate_loop(monkeypatch):
     返回成功结果，错误文案不进入结果。"""
     requests = []
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         requests.append(request)
         yield _make_token_chunk("round text")
         yield _make_tool_call_chunk("control__report_observation")
@@ -475,14 +420,7 @@ async def test_terminal_tool_error_does_not_terminate_loop(monkeypatch):
     state = _make_state()
     ctx = _make_ctx(tool_content="unused", gateway=gw)
 
-    result, last_text = await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[LLMMessage(role="user", content="observe this")],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=3,
-        terminal_tool_name="control__report_observation",
-    )
+    result, last_text = await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe this")], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=3, terminal_tool_name="control__report_observation")
 
     assert gw.calls == 2, "首轮错误后应重试而非终止"
     assert result is not None
@@ -496,7 +434,7 @@ async def test_terminal_tool_error_exhausts_rounds_returns_none(monkeypatch):
     """terminal 工具连续失败直至轮次耗尽 → 返回 (None, last_text) 兜底，
     不把错误文案当终止结果。"""
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_token_chunk("trying")
         yield _make_tool_call_chunk("control__report_observation")
         yield _make_usage_chunk()
@@ -508,14 +446,7 @@ async def test_terminal_tool_error_exhausts_rounds_returns_none(monkeypatch):
     state = _make_state()
     ctx = _make_ctx(tool_content="unused", gateway=gw)
 
-    result, last_text = await ObserveStep()._run_react(
-        state, ctx,
-        system="SYS",
-        messages=[LLMMessage(role="user", content="observe this")],
-        tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=2,
-        terminal_tool_name="control__report_observation",
-    )
+    result, last_text = await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe this")], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=2, terminal_tool_name="control__report_observation")
 
     assert result is None
     assert last_text == "trying"
@@ -524,7 +455,7 @@ async def test_terminal_tool_error_exhausts_rounds_returns_none(monkeypatch):
 async def test_response_finished_payload_carries_usage_split(monkeypatch):
     """LLM_RESPONSE_FINISHED 的 payload["usage"] 经 asdict 自动携带七字段拆分。"""
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield SimpleNamespace(
             kind="usage",
             usage=LLMUsage(prompt_tokens=127, completion_tokens=5, total_tokens=132,
@@ -539,11 +470,7 @@ async def test_response_finished_payload_carries_usage_split(monkeypatch):
     state = _make_state()
     ctx = _make_ctx(tool_content="DONE", event_bus=bus)
 
-    await ObserveStep()._run_react(
-        state, ctx, system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")],
-        max_rounds=1,
-        terminal_tool_name="control__report_observation",
-    )
+    await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")], purpose="observe"), max_rounds=1, terminal_tool_name="control__report_observation")
 
     finished = [e for e in bus.events if e.type == EventType.LLM_RESPONSE_FINISHED]
     assert finished

@@ -46,7 +46,7 @@ async def test_launch_runs_step_on_snapshot(monkeypatch):
         task=SimpleNamespace(id="t1", parent_task_id=None, title="", status="ACTIVE"),
         agent=SimpleNamespace(id="a1"),
         scope=SimpleNamespace(),
-        assembled_prompt=object(),
+        prompt_inputs=object(),
         transcript=[object()],
         verdict=object(),
         extra={"template": SimpleNamespace(), "bound_capabilities": ["CAP"]},

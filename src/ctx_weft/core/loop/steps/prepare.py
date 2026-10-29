@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ctx_weft.protocols import load_records
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.loop.commit import commit_round, defer_until_commit
 from ctx_weft.core.loop.driver import (
@@ -38,6 +37,7 @@ from ctx_weft.core.utils.estimate import (
     estimate_tokens,
     estimate_tool_calls_tokens,
 )
+from ctx_weft.protocols import load_records
 from ctx_weft.protocols.events import EventType
 
 
@@ -129,10 +129,11 @@ class PrepareStep(Step):
                 },
             )
             inputs = await ctx.assembler.assemble(request)
-            return await ctx.assembler.compile(
-                inputs, template=template, token_counter=request.token_counter)
+            prompt = await ctx.assembler.compile(
+                inputs, template=template, token_counter=request.token_counter, reuse=True)
+            return inputs, prompt
 
-        prompt = await _assemble()
+        inputs, prompt = await _assemble()
         if token_estimate == 0:
             token_estimate = _estimate_assembled_tokens(prompt, ctx.llm.tokenizer.count)
 
@@ -157,7 +158,7 @@ class PrepareStep(Step):
             # 解释权在 `_can_recover_context`（它只在已恢复过至少一次时才采信）。
             state.extra[COMPACT_NOOP_KEY] = not any(
                 ev.type == EventType.MEMORY_COMPACTED for ev in compact_events)
-            prompt = await _assemble()
+            inputs, prompt = await _assemble()
 
         # GuidanceSource 已完成本轮所有可能的读取后，再消费一次性转向。这样 Prepare
         # 不需要知道 source 的收集函数，compact 后的第二次 assemble 也仍能看到同一 hint。
@@ -173,7 +174,7 @@ class PrepareStep(Step):
         # ── 7. 发事件 + 返回 ─────────────────────────────────────────────────
         return StepOutcome(
             next_step="act",
-            state_patch={"assembled_prompt": prompt},
+            state_patch={"prompt_inputs": inputs},
             events=[
                 make_event(state, EventType.CONTEXT_TOKENS_ESTIMATED, payload={
                     "estimated_tokens": token_estimate,
