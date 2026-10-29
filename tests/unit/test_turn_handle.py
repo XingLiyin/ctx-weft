@@ -20,6 +20,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     ToolCall,
+    load_records,
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.events.bus.in_process.bus import InProcessEventBus
@@ -110,7 +111,7 @@ async def test_wait_for_finish_ignores_an_earlier_overlapping_launchs_recap_done
     事件之后才等到它迟到的 ObserveApplied」这个精确场景——与
     `test_wait_for_finish_returns_after_deferred_fold_lands` 互补：那条测真实折叠
     落地，这条测「等的必须是对的那次」。"""
-    
+
     class _NeverDoneTask:
         """占位：只需要 `.done()` 恒为 False，不需要真的是 asyncio.Task。"""
 
@@ -163,7 +164,7 @@ async def test_wait_for_finish_matches_observe_applied_by_value_not_identity():
     这里构造的 `ObserveApplied` 事件 `type` 字段是裸字符串 `"ObserveApplied"`（模拟一个
     序列化往返的宿主总线投出来的事件），`run_id` 与登记的在途 launch 一致——断言
     `wait_for_finish` 依然认得出它、正常返回，而不是耗光 `timeout` 才靠超时兜底返回。"""
-    
+
     class _NeverDoneTask:
         def done(self) -> bool:
             return False
@@ -216,7 +217,7 @@ async def test_wait_for_finish_does_not_hang_when_recap_done_arrives_before_term
     原地耗尽这个 `timeout` 才返回——用耗时区分两者，与
     `test_wait_for_finish_matches_observe_applied_by_value_not_identity` 同一手法。
     """
-    
+
     class _NeverDoneTask:
         def done(self) -> bool:
             return False
@@ -322,7 +323,7 @@ async def test_wait_for_finish_returns_after_deferred_fold_lands():
     pctx = ProviderContext(session_id=handle.session_id, tenant_id="default",
                            task_id=handle.task_id, agent_id=handle.agent_id)
 
-    turns = await memory.load_view(
+    turns = await load_records(memory,
         agent_scope, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
     recap = [r for r in turns if r.role == "assistant"
              and r.metadata.get("origin_task_id") == handle.task_id

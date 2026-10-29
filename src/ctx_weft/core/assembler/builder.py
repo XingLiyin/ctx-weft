@@ -46,21 +46,13 @@ class PromptOperation:
     merge: bool = False
 
 
-def _intent_values(request) -> tuple[str, bool, str]:
+def _intent_values(context) -> tuple[str, bool, str]:
     """Return template name, judge flag and compact scope after validation."""
-    from ctx_weft.core.assembler.assembler import CompactIntent, ReviewIntent
-
-    if request.purpose == "observe":
-        intent = request.intent
-        judge = intent.judge_task if isinstance(intent, ReviewIntent) else (
-            request.extra or {}).get("judge_task", True)
-        return "observe", bool(judge), "task"
-    if request.purpose == "compact":
-        intent = request.intent
-        scope = intent.scope if isinstance(intent, CompactIntent) else (
-            "agent" if (request.extra or {}).get("compact_scope") == "agent" else "task")
-        return "compact", False, scope
-    if request.purpose == "recognize_intent":
+    if context.purpose == "observe":
+        return "observe", context.judge_task, "task"
+    if context.purpose == "compact":
+        return "compact", False, context.compact_scope
+    if context.purpose == "recognize_intent":
         return "metadata", False, "task"
     return "act", False, "task"
 
@@ -92,17 +84,28 @@ def _memory_type(record) -> str:
     return str(record.type or legacy_type_of(record.kind, record.scope, record.role))
 
 
-def _history_facts(context) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
     from ctx_weft.protocols import MemoryEventType, MemoryKind, MemoryScope
 
-    task_id = getattr(context.request.task, "id", "")
+    records = context._records if records is None else records
+    task_id = context.task.get("id", "")
+    base = max((r.metadata.get("seq_no", 0) for r in records.values()
+                if r.scope is MemoryScope.TASK), default=0) + 1
     rows = []
-    for block in context.get("history"):
-        record = block.value
+    for block in context.memory_blocks:
+        if block["kind"] != "history":
+            continue
+        record = records[block["memory_id"]]
+        if record.kind is not None and record.kind not in (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY):
+            continue
+        metadata = block["metadata"]
+        sequence = metadata.get("sequence", record.metadata.get("seq_no", 0))
+        if "staged_order" in metadata and "seq_no" not in record.metadata:
+            sequence = base + metadata["staged_order"]
         rows.append((
             (
                 record.timestamp.isoformat() if record.timestamp else "",
-                block.metadata.get("sequence", record.metadata.get("seq_no", 0)),
+                sequence,
             ),
             block,
             record,
@@ -239,47 +242,40 @@ def _shift_headings(markdown: str, base_level: int = 2) -> str:
 
 
 def _capability_facts(context, purpose: str) -> list[dict[str, Any]]:
-    from ctx_weft.protocols.capability import (
-        AgentCapability,
-        SkillCapability,
-        ToolCapability,
-        qualify,
-    )
+    from ctx_weft.protocols.capability import qualify
 
-    current_skill = getattr(getattr(context.request.task, "settings", None), "skill_name", "")
+    current_skill = context.skill_name
     blocks = [
-        block for block in context.get("capabilities")
-        if purpose in getattr(block.value, "purposes", ())
+        block for block in context.capabilities
+        if purpose in block["definition"].get("purposes", ())
     ]
-    typed = (
-        ("skill", SkillCapability), ("tool", ToolCapability), ("agent", AgentCapability))
     sections = []
-    for kind, klass in typed:
-        candidates = [block for block in blocks if isinstance(block.value, klass)]
+    for kind in ("skill", "tool", "agent"):
+        candidates = [block for block in blocks if block["definition"]["kind"] == kind]
         if kind == "skill" and current_skill:
             candidates = [
                 block for block in candidates
-                if qualify(block.value.id) != current_skill
+                if qualify(block["definition"]["id"]) != current_skill
             ]
         if not candidates:
             continue
         groups: dict[str, dict[str, Any]] = {}
         ungrouped = []
         for block in candidates:
-            cap = block.value
+            cap = block["definition"]
             item = dict(
-                name=qualify(cap.id),
-                signature=_compact_signature(getattr(cap, "input_schema", None)),
-                description=cap.description,
+                name=qualify(cap["id"]),
+                signature=_compact_signature(cap.get("input_schema")),
+                description=cap["description"],
             )
-            provider = block.metadata.get("provider_name", "")
+            provider = block["metadata"].get("provider_name", "")
             if not provider:
                 ungrouped.append(item)
                 continue
             group = groups.setdefault(provider, dict(
                 name=provider,
                 prefix=qualify(provider) + "__",
-                description=(block.metadata.get("provider_description") or "").strip(),
+                description=(block["metadata"].get("provider_description") or "").strip(),
                 entries=[],
             ))
             group["entries"].append(item)
@@ -287,21 +283,25 @@ def _capability_facts(context, purpose: str) -> list[dict[str, Any]]:
     return sections
 
 
-def _prompt_facts(context) -> dict[str, Any]:
-    from ctx_weft.core.utils.task_ref import task_label, task_ref_parts
+def _prompt_facts(context, records=None, template=None) -> dict[str, Any]:
+    from ctx_weft.core.utils.task_ref import task_label_parts, task_ref_parts
+    from ctx_weft.protocols.context import normalize_content_parts
 
-    request = context.request
-    template_name, judge_task, scope = _intent_values(request)
-    task_block = context.first("task_spec")
-    task = task_block.value if task_block is not None else request.task
-    title = task.title or ""
-    description = task.description or ""
-    raw_prompt = task.user_prompt
+    records = context._records if records is None else records
+    template_name, judge_task, scope = _intent_values(context)
+    task = context.task
+    title = task.get("title") or ""
+    description = task.get("description") or ""
+
+    def task_content(name):
+        record_id = task.get(f"{name}_memory_id")
+        return records[record_id].content if record_id else normalize_content_parts(task.get(name))
+
+    raw_prompt = task_content("user_prompt")
     user_prompt = raw_prompt if isinstance(raw_prompt, str) else (
         content_to_text(raw_prompt) if raw_prompt else "")
 
-    identity_block = context.first("identity")
-    identity = identity_block.value if identity_block is not None else request.template
+    identity = template
     actor = _identity_facet(identity, "act")
     selected_name = (
         "observe" if template_name == "observe" and judge_task
@@ -313,31 +313,32 @@ def _prompt_facts(context) -> dict[str, Any]:
     soul = getattr(selected, "text", "") if template_name == "act" else getattr(actor, "text", "")
     role = getattr(selected, "text", "")
 
-    background_block = context.first("background")
-    background = (
-        content_to_text(background_block.value.content) if background_block is not None else "")
-    directive_block = context.first("directive")
+    background_blocks = [item for item in context.memory_blocks + context.references if item["kind"] == "background"]
+    background_blocks.sort(key=lambda item: item["position"])
+    background = ""
+    if background_blocks:
+        item = background_blocks[0]
+        background = content_to_text(records[item["memory_id"]].content if "memory_id" in item
+                                     else normalize_content_parts(item["content"]))
     directive = None
-    if directive_block is not None:
-        definition = directive_block.value
+    if context.skill_definitions:
+        definition = context.skill_definitions[0]["definition"]
         directive = dict(
-            skill_name=getattr(definition, "skill_name", ""),
-            body=_shift_headings(getattr(definition, "instructions", "")),
+            skill_name=definition.get("skill_name", ""),
+            body=_shift_headings(definition.get("instructions", "")),
         )
 
-    capability_sections = _capability_facts(context, request.purpose)
-    extra = request.extra or {}
-    guidance_block = context.first("guidance")
+    capability_sections = _capability_facts(context, context.purpose)
     guidance = None
     resume_snapshot = None
-    if guidance_block is not None:
-        guidance = dict(guidance_block.value["guidance"])
-        resume_snapshot = guidance_block.value.get("resume")
+    if context.guidance:
+        guidance = dict(context.guidance[0]["state"]["guidance"])
+        resume_snapshot = context.guidance[0]["state"].get("resume")
     ctx = dict(
         title=title,
         description=description,
         user_prompt=user_prompt,
-        task_ref=task_ref_parts(getattr(task, "id", "") or "", title),
+        task_ref=task_ref_parts(task.get("id", "") or "", title),
         soul=soul,
         project_background=background,
         directive=directive,
@@ -350,18 +351,18 @@ def _prompt_facts(context) -> dict[str, Any]:
     )
     if template_name == "observe":
         ctx.update(
-            switch_reason=getattr(task, "switch_reason", ""),
-            terminal_only=bool(getattr(request.intent, "terminal_only", False)),
+            switch_reason=task.get("switch_reason", ""),
+            terminal_only=context.terminal_only,
             evaluation_role=role if judge_task else "",
             summary_principles=getattr(compact, "text", "") if compact else "",
         )
-        boundary = extra.get("observe_boundary") or "normal"
+        boundary = context.observe_boundary or "normal"
         supported_boundaries = {
             "actor_done", "finish", "finish_park", "normal", "plain_text",
             "max_turns", "context_limit", "interrupt", "dispatch", "mechanical", "task_switch",
         }
-        ref = task_label(task) if getattr(task, "id", None) else ""
-        outputs = getattr(task, "outputs", None)
+        ref = task_label_parts(task.get("id", ""), title, raw_prompt) if task.get("id") else ""
+        outputs = task_content("outputs")
         output_text = outputs if isinstance(outputs, str) else (
             content_to_text(outputs) if outputs else "")
         inject = boundary in {"actor_done", "finish", "finish_park"}
@@ -377,7 +378,7 @@ def _prompt_facts(context) -> dict[str, Any]:
                     outcome=row.get("outcome", ""),
                     note=row.get("note"),
                 )
-                for row in (extra.get("subtasks") or [])
+                for row in context.subtasks
             ]
             ctx.update(
                 plain_text_yielded=boundary == "plain_text",
@@ -389,31 +390,36 @@ def _prompt_facts(context) -> dict[str, Any]:
     else:
         ctx["role"] = role
 
-    history, refs = _history_facts(context)
+    history, refs = _history_facts(context, records)
     sources = []
-    for block in context.blocks:
-        if block.kind not in {"blackboard", "summary", "reference"}:
+    for block in sorted(context.memory_blocks + context.knowledge + context.references,
+                        key=lambda item: item["position"]):
+        if block["kind"] not in {"blackboard", "summary", "reference"}:
             continue
-        value = block.value
-        content = getattr(value, "content", value)
-        metadata = dict(block.metadata)
-        if hasattr(value, "metadata"):
-            metadata = {**getattr(value, "metadata", {}), **metadata}
+        metadata = dict(block["metadata"])
+        if "memory_id" in block:
+            value = records[block["memory_id"]]
+            content = value.content
+            metadata = {**value.metadata, **metadata}
+            timestamp = value.timestamp.isoformat() if value.timestamp else metadata.get("timestamp")
+        else:
+            value = block.get("document", block)
+            content = normalize_content_parts(value["content"])
+            metadata = {**value.get("metadata", value.get("value_metadata", {})), **metadata}
+            timestamp = value.get("timestamp", metadata.get("timestamp"))
         sources.append(dict(
-            kind=block.kind,
+            kind=block["kind"],
             content=content_to_text(content),
             metadata=metadata,
-            timestamp=(
-                value.timestamp.isoformat()
-                if getattr(value, "timestamp", None) else metadata.get("timestamp")),
-            group=f"source:{block.id}",
+            timestamp=timestamp,
+            group=f"source:{block['id']}",
         ))
     return dict(
         template_name=template_name,
         ctx=ctx,
         history=history,
         source_blocks=sources,
-        user_prompt_in_memory=task.user_prompt_in_memory,
+        user_prompt_in_memory=task.get("user_prompt_in_memory", False),
         capabilities_priority=1,
         directive_priority=1,
         **refs,
@@ -438,7 +444,7 @@ class PromptBuilder:
     _last_refs: tuple[str, ...] = field(default=(), init=False)
     _last_trace: list[dict] = field(default_factory=list, init=False)
 
-    def compile(self, context, *, tools: list[LLMTool] | None = None):
+    def compile(self, context, *, tools: list[LLMTool] | None = None, records=None, template=None):
         """Compile one PromptContext through its executable purpose template."""
         from ctx_weft.core.assembler.prompts import render_purpose
         from ctx_weft.core.utils.estimate import effective_limit, tools_signature
@@ -447,7 +453,7 @@ class PromptBuilder:
         self._serial = 0
         self._tool_groups.clear()
         self.tools(tools or [])
-        facts = _prompt_facts(context)
+        facts = _prompt_facts(context, records, template)
         purpose = facts.pop("template_name")
         self.message_transform = None
         if purpose != "act":
@@ -458,17 +464,15 @@ class PromptBuilder:
             prompt=self,
             purpose=purpose,
             context=context,
-            request=context.request,
             **facts,
         )
-        session = context.request.session
         assembled = self.build(
-            effective_limit(session.context_limit, session.reserved_output_tokens),
-            context_limit=session.context_limit,
-            reserved_output_tokens=session.reserved_output_tokens,
+            effective_limit(context.context_limit, context.reserved_output_tokens),
+            context_limit=context.context_limit,
+            reserved_output_tokens=context.reserved_output_tokens,
         )
         assembled.metadata["tools_signature"] = tools_signature(assembled.tools)
-        assembled.metadata["purpose"] = context.request.purpose
+        assembled.metadata["purpose"] = context.purpose
         return assembled
 
     def _add(

@@ -17,7 +17,7 @@
 消失**，且返回值看起来一切正常。
 
 ⚠️ **降级会换掉 record id**。调用方若在降级**之前**采集过 id 集（L1/L3 的折叠范围就是
-这么来的，见子设计 §6.1），必须在 `demote_all` 之后**重新 `load_view`**：拿旧 id 去
+这么来的，见子设计 §6.1），必须在 `demote_all` 之后**重新 `load_records`**：拿旧 id 去
 `fold`，被降级过的那几条一条都 supersede 不掉，于是同一段对话在视图里出现两次
 （旧的已被本模块 supersede，但**新的**补偿记录还活着，而摘要又已按旧内容生成）。
 同理，调用方手里那份「降级前」的 records 也已过期——用它算摘要 / 取 `original` 节，
@@ -32,7 +32,7 @@ from typing import Any
 
 from ctx_weft.core.media.policy import DemotionPlan, demotable_ref, plan_demotions
 from ctx_weft.core.media.refs import encode_image_placeholder, find_image_placeholders
-from ctx_weft.protocols import MemoryEvent, MemoryScope, TextPart
+from ctx_weft.protocols import MemoryEvent, MemoryScope, TextPart, load_records
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +174,10 @@ async def demote_for_budget(
 
     参数名注：子设计 §8 写的是 `demote_for_budget(memory, scope, ctx, ...)`，那个
     `scope` 指坐标；v2 已把坐标改名 `address`、`scope` 让位给归属范围枚举
-    （`protocols/memory.py`）。此处随 `load_view(address, scope, ctx, kinds)` 的现行
+    （`protocols/memory.py`）。此处随 `load_records(address, scope, ctx, kinds)` 的现行
     词汇，位置参数顺序不变。
     """
-    records = await memory.load_view(address, scope, ctx, kinds=list(kinds) if kinds else None)
+    records = await load_records(memory, address, scope, ctx, kinds=list(kinds) if kinds else None)
     plan = plan_demotions(records, keep_recent=keep_recent)
     if not plan.batches:
         return 0
@@ -199,16 +199,16 @@ async def demote_all(
 
     仍需 ``address`` / ``scope``：`MemoryProvider` 没有「按 id 取记录」的读接口，且同刻
     tie 组的顺序保护要看**整个视图**——折叠范围的边界很可能正好切在一个同刻组中间，
-    只看范围内的记录会把组外那半条的顺序丢掉。故本函数照样 `load_view` 全量视图，
+    只看范围内的记录会把组外那半条的顺序丢掉。故本函数照样 `load_records` 全量视图，
     只是把降级范围限定在 ``record_ids`` 内。
 
-    ⚠️ 调用方在本函数之后**必须重新 `load_view`**（id 与内容都已改变），理由见模块
+    ⚠️ 调用方在本函数之后**必须重新 `load_records`**（id 与内容都已改变），理由见模块
     docstring。
     """
     wanted = {str(r) for r in record_ids}
     if not wanted:
         return 0
-    records = await memory.load_view(address, scope, ctx, kinds=list(kinds) if kinds else None)
+    records = await load_records(memory, address, scope, ctx, kinds=list(kinds) if kinds else None)
     plan = plan_demotions(records, keep_recent=0, only_ids=wanted)
     if not plan.batches:
         return 0

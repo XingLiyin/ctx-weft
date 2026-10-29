@@ -22,7 +22,15 @@ class _FakeMem:
         self._count = count
         self.applied = []  # (layer, summary, keep_last)
 
-    async def load_view(self, address, scope, ctx, kinds=None):
+    async def load_view_ids(self, address, scope, ctx, kinds=None, *, end_at=None):
+        records = await self._records(address, scope, ctx, kinds)
+        self._selected = {r.id: r for r in records}
+        return list(self._selected)
+
+    async def read_records(self, ids, ctx):
+        return [self._selected[i] for i in ids]
+
+    async def _records(self, address, scope, ctx, kinds=None):
         from datetime import datetime, timezone
         from ctx_weft.protocols import MemoryKind, MemoryScope, MemoryRecord
         if scope is not MemoryScope.TASK or self._count <= 0:

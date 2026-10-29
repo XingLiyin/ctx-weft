@@ -33,6 +33,7 @@ from ctx_weft.protocols.hitl import (
 )
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 from tests.hitl_env import make_hitl
 from tests.step_helpers import patch_observe_start
 
@@ -79,7 +80,7 @@ def _env(*, unattended: bool, llm=None):
         resolved_model=SimpleNamespace(model="mock", account=""),
     )
     ctx = LoopContext(
-        assembler=None, llm=llm, memory=InMemoryMemoryProvider(), event_bus=bus,
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=llm, memory=InMemoryMemoryProvider(), event_bus=bus,
         provider_ctx=ProviderContext(
             session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1"),
         hitl=hitl_service,
@@ -180,8 +181,8 @@ async def test_unattended_interactive_task_runs_to_stop_end_to_end(monkeypatch):
         unattended=True, llm=llm)
     from ctx_weft.core.assembler.assembler import AssembledPrompt
     from ctx_weft.protocols import LLMMessage
-    state.assembled_prompt = AssembledPrompt(
-        system="", messages=[LLMMessage(role="user", content="hi")], tools=[], token_count=1)
+    state.prompt_inputs = scripted_inputs(AssembledPrompt(
+        system="", messages=[LLMMessage(role="user", content="hi")], tools=[], token_count=1))
 
     outcome = await act.ActStep().execute(state, ctx)
 

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ctx_weft import SessionStartParams
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, ToolCall
+from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, ToolCall, load_records
 from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
@@ -32,7 +32,7 @@ REPLY = "RETRACT THIS REPLY"
 async def content(memory, task_id, agent_id):
     result = []
     for scope in (MemoryScope.TASK, MemoryScope.AGENT):
-        records = await memory.load_view(MemoryAddress(session_id=SID,
+        records = await load_records(memory, MemoryAddress(session_id=SID,
             task_id=task_id if scope == MemoryScope.TASK else None, agent_id=agent_id),
             scope, ProviderContext(session_id=SID, tenant_id="default"))
         result.extend((str(scope), r.role, str(r.content).replace(task_id, "<task>")) for r in records)

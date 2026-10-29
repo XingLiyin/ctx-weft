@@ -22,6 +22,7 @@ import pytest
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.protocols import (
     MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext,
+    load_records,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
@@ -90,7 +91,7 @@ def _l3_state(address=_ROOT):
 
 
 async def _task_view(mem, address=_ROOT):
-    return await mem.load_view(address, MemoryScope.TASK, _pctx(),
+    return await load_records(mem, address, MemoryScope.TASK, _pctx(),
                                kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY,
                                       MemoryKind.TOOL_AUDIT])
 
@@ -234,7 +235,7 @@ async def _capsule(mem, oid: str, t: int, body_chars: int):
 
 async def _is_rich(mem, oid: str) -> bool:
     addr = MemoryAddress(session_id="s1", task_id=oid, agent_id="a1")
-    return bool(await mem.load_view(addr, MemoryScope.TASK, _pctx()))
+    return bool(await load_records(mem, addr, MemoryScope.TASK, _pctx()))
 
 
 def _escalating_state(*, limit, target):

@@ -37,6 +37,7 @@ from ctx_weft.core.utils.estimate import (
     estimate_tokens,
     estimate_tool_calls_tokens,
 )
+from ctx_weft.protocols import load_records
 from ctx_weft.protocols.events import EventType
 
 
@@ -109,12 +110,12 @@ class PrepareStep(Step):
         settings = state.task.settings
         purpose = settings.purpose if isinstance(settings, NormalTaskSettings) else "act"
 
-        def _assemble():
+        async def _assemble():
             # 这一轮暂存、还没落盘的对话记录（用户消息 / HITL 答复 / 答复回灌的工具结果，
             # 见 `ingest_or_stage`）。LLM 开口之前这一轮要用的恰恰是它们，所以装配时叠加进
             # 历史。**每次装配现取**：压缩前会先提交，那之后它们已经在 memory 里了。
             staged = _staged_memory(state, ctx)
-            return ctx.assembler.assemble(ContextRequest(
+            request = ContextRequest(
                 purpose=purpose,
                 scope=state.scope,
                 task=state.task,
@@ -126,9 +127,13 @@ class PrepareStep(Step):
                 extra={
                     "staged_memory": staged,
                 },
-            ))
+            )
+            inputs = await ctx.assembler.assemble(request)
+            prompt = await ctx.assembler.compile(
+                inputs, template=template, token_counter=request.token_counter, reuse=True)
+            return inputs, prompt
 
-        prompt = await _assemble()
+        inputs, prompt = await _assemble()
         if token_estimate == 0:
             token_estimate = _estimate_assembled_tokens(prompt, ctx.llm.tokenizer.count)
 
@@ -153,7 +158,7 @@ class PrepareStep(Step):
             # 解释权在 `_can_recover_context`（它只在已恢复过至少一次时才采信）。
             state.extra[COMPACT_NOOP_KEY] = not any(
                 ev.type == EventType.MEMORY_COMPACTED for ev in compact_events)
-            prompt = await _assemble()
+            inputs, prompt = await _assemble()
 
         # GuidanceSource 已完成本轮所有可能的读取后，再消费一次性转向。这样 Prepare
         # 不需要知道 source 的收集函数，compact 后的第二次 assemble 也仍能看到同一 hint。
@@ -169,7 +174,7 @@ class PrepareStep(Step):
         # ── 7. 发事件 + 返回 ─────────────────────────────────────────────────
         return StepOutcome(
             next_step="act",
-            state_patch={"assembled_prompt": prompt},
+            state_patch={"prompt_inputs": inputs},
             events=[
                 make_event(state, EventType.CONTEXT_TOKENS_ESTIMATED, payload={
                     "estimated_tokens": token_estimate,
@@ -216,7 +221,7 @@ class PrepareStep(Step):
                 # v2 P3a：TASK 视图 + user/assistant 回合谓词（= 旧 USER_PROMPT+LLM_RESPONSE
                 # 口径，与 act._account_tokens 的 context_message_count 对齐）。升序视图：
                 # 基线计数之后的即新增记录。
-                view = await ctx.memory.load_view(
+                view = await load_records(ctx.memory,
                     state.scope, MemoryScope.TASK, ctx.provider_ctx)
                 convo = [
                     r for r in view

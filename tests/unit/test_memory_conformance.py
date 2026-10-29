@@ -58,6 +58,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     Subscription,
+    load_records,
 )
 from ctx_weft.protocols.context import ImagePart, TextPart
 from ctx_weft.protocols.memory_compat import MemoryKind
@@ -163,7 +164,7 @@ def _multimodal() -> list[Any]:
 
 
 async def _contents(m: MemoryProvider, **kw: Any) -> list[Any]:
-    view = await m.load_view(_addr(), MemoryScope.TASK, _ctx(), **kw)
+    view = await load_records(m, _addr(), MemoryScope.TASK, _ctx(), **kw)
     return [r.content for r in view]
 
 
@@ -199,7 +200,7 @@ async def test_provider_satisfies_runtime_protocol(memory: MemoryProvider) -> No
 async def test_ingest_returns_id_and_record_becomes_visible(memory: MemoryProvider) -> None:
     rid = await memory.ingest(_turn("hello"), _ctx())
     assert isinstance(rid, str) and rid
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert [r.id for r in view] == [rid]
     assert [r.content for r in view] == ["hello"]
 
@@ -214,7 +215,7 @@ async def test_ingest_adopts_caller_supplied_id(memory: MemoryProvider) -> None:
     """契约：event.id 给定 → 必须采用并原样回显。"""
     returned = await memory.ingest(_turn("hello", event_id="mem_pre_001"), _ctx())
     assert returned == "mem_pre_001"
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert [r.id for r in view] == ["mem_pre_001"]
 
 
@@ -224,7 +225,7 @@ async def test_ingest_same_id_twice_is_noop(memory: MemoryProvider) -> None:
     second = await memory.ingest(_turn("changed content", event_id="mem_pre_001"), _ctx())
     assert first == second == "mem_pre_001"
 
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert len(view) == 1
     assert view[0].content == "hello"
 
@@ -239,7 +240,7 @@ async def test_ingest_noop_does_not_advance_seq_counter(memory: MemoryProvider) 
     await memory.ingest(_turn("dup", event_id="mem_pre_001"), _ctx())
     await memory.ingest(_turn("next", t=1), _ctx())
 
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert [r.content for r in view] == ["hello", "next"]
     if all("seq_no" in r.metadata for r in view):
         assert sorted(r.metadata["seq_no"] for r in view) == [1, 2]
@@ -252,7 +253,7 @@ async def test_ingest_superseded_id_stays_noop(memory: MemoryProvider) -> None:
 
     returned = await memory.ingest(_turn("hello", event_id="mem_pre_001"), _ctx())
     assert returned == "mem_pre_001"
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert view == []
 
 
@@ -273,7 +274,7 @@ async def test_fold_supersedes_and_writes_replacement(memory: MemoryProvider) ->
     )
     assert len(new_ids) == 1 and isinstance(new_ids[0], str) and new_ids[0]
 
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     # 两个效果必须同时可见：旧的没了、补偿的在了（时间正序）
     assert [r.content for r in view] == ["SUMMARY", "a2"]
     assert new_ids[0] in {r.id for r in view}
@@ -317,7 +318,7 @@ async def test_fold_returns_ids_in_replacement_order(memory: MemoryProvider) -> 
         _ctx(),
     )
     assert len(new_ids) == 2 and len(set(new_ids)) == 2
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert [r.id for r in view] == new_ids
 
 
@@ -331,7 +332,7 @@ async def test_fold_does_not_touch_other_scopes(memory: MemoryProvider) -> None:
     await memory.fold([a], [], _ctx())
 
     assert await _contents(memory) == []
-    agent_view = await memory.load_view(
+    agent_view = await load_records(memory,
         _addr(task_id=None), MemoryScope.AGENT, _ctx())
     assert [r.content for r in agent_view] == ["agent-exp"]
 
@@ -385,7 +386,7 @@ async def test_load_view_task_scope_is_isolated_per_task(memory: MemoryProvider)
     await memory.ingest(_turn("promptA", t=0, task_id="tA"), _ctx())
     await memory.ingest(_turn("promptB", t=1, task_id="tB"), _ctx())
 
-    view = await memory.load_view(_addr(task_id="tA"), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(task_id="tA"), MemoryScope.TASK, _ctx())
     assert [r.content for r in view] == ["promptA"]
 
 
@@ -397,7 +398,7 @@ async def test_load_view_task_scope_aggregates_across_tasks_by_agent(
     await memory.ingest(_turn("b", t=1, task_id="tB"), _ctx())
     await memory.ingest(_turn("other", t=2, task_id="tC", agent_id="ag2"), _ctx())
 
-    view = await memory.load_view(
+    view = await load_records(memory,
         MemoryAddress(session_id=_SESSION, agent_id=_AGENT), MemoryScope.TASK, _ctx())
     assert [r.content for r in view] == ["a", "b"]
 
@@ -409,7 +410,7 @@ async def test_load_view_agent_scope_accumulates_across_tasks(
         await memory.ingest(
             _turn(text, t=i, task_id=None, scope=MemoryScope.AGENT, role="assistant"), _ctx())
 
-    view = await memory.load_view(
+    view = await load_records(memory,
         MemoryAddress(session_id=_SESSION, agent_id=_AGENT), MemoryScope.AGENT, _ctx())
     assert [r.content for r in view] == ["r1", "r2"]
 
@@ -428,7 +429,7 @@ async def test_load_view_session_scope_sees_only_session_partition(
         ),
         _ctx(),
     )
-    view = await memory.load_view(
+    view = await load_records(memory,
         MemoryAddress(session_id=_SESSION), MemoryScope.SESSION, _ctx())
     assert [r.content for r in view] == ["session-note"]
 
@@ -465,14 +466,14 @@ async def test_load_view_rejects_illegal_half_address(
 ) -> None:
     """非法非 None 字段必须 loud ValueError——静默漏召回是最难查的一类缺陷。"""
     with pytest.raises(ValueError):
-        await memory.load_view(address, scope, _ctx())
+        await load_records(memory, address, scope, _ctx())
 
 
 async def test_load_view_records_carry_kind_scope_and_address(
     memory: MemoryProvider,
 ) -> None:
     await memory.ingest(_turn("hi", t=0), _ctx())
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert isinstance(rec, MemoryRecord)
     assert rec.kind is MemoryKind.CONVERSATION_TURN
     assert rec.scope is MemoryScope.TASK
@@ -486,7 +487,7 @@ async def test_load_view_records_carry_kind_scope_and_address(
 async def test_load_view_on_empty_partition_returns_empty_list(
     memory: MemoryProvider,
 ) -> None:
-    assert await memory.load_view(_addr(task_id="nope"), MemoryScope.TASK, _ctx()) == []
+    assert await load_records(memory, _addr(task_id="nope"), MemoryScope.TASK, _ctx()) == []
 
 
 async def test_load_view_normalizes_legacy_typed_events(memory: MemoryProvider) -> None:
@@ -501,7 +502,7 @@ async def test_load_view_normalizes_legacy_typed_events(memory: MemoryProvider) 
         ),
         _ctx(),
     )
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert rec.content == "legacy prompt"
     assert rec.kind is MemoryKind.CONVERSATION_TURN
     assert rec.scope is MemoryScope.TASK
@@ -749,14 +750,14 @@ def _assert_lossless(content: Any) -> None:
 
 async def test_load_view_returns_content_parts_losslessly(memory: MemoryProvider) -> None:
     await memory.ingest(_turn(_multimodal(), t=0), _ctx())
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     _assert_lossless(rec.content)
 
 
 async def test_str_content_stays_str(memory: MemoryProvider) -> None:
     """契约 2 的另一半：str 进 str 出，纯文本路径不得被包装成 parts。"""
     await memory.ingest(_turn("plain text", t=0), _ctx())
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert isinstance(rec.content, str)
     assert rec.content == "plain text"
 
@@ -764,14 +765,14 @@ async def test_str_content_stays_str(memory: MemoryProvider) -> None:
 async def test_empty_string_content_survives(memory: MemoryProvider) -> None:
     """空串是合法内容（占位回合），不得被当成缺失而丢弃或转成 None。"""
     await memory.ingest(_turn("", t=0), _ctx())
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert rec.content == ""
 
 
 async def test_image_byte_size_survives_roundtrip(memory: MemoryProvider) -> None:
     """Task D 的 `ImagePart.byte_size` 必须往返——丢了预算就对大图失明。"""
     await memory.ingest(_turn(_multimodal(), t=0), _ctx())
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert isinstance(rec.content, list)
     assert rec.content[1].byte_size == 64
 
@@ -782,7 +783,7 @@ async def test_fold_replacement_preserves_content_parts(memory: MemoryProvider) 
         [_turn(_multimodal(), t=0, kind=MemoryKind.SUMMARY, role="assistant")],
         _ctx(),
     )
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     _assert_lossless(rec.content)
 
 
@@ -801,7 +802,7 @@ async def test_ref_shaped_image_is_not_rewritten(memory: MemoryProvider) -> None
                          source_type="ref", byte_size=4096)], t=0),
         _ctx(),
     )
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert isinstance(rec.content, list)
     part = rec.content[0]
     assert isinstance(part, ImagePart)
@@ -830,7 +831,7 @@ async def test_blob_refs_roundtrip_losslessly(memory: MemoryProvider) -> None:
         ),
         _ctx(),
     )
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert sorted(rec.blob_refs) == ["blob:aaaa", "blob:bbbb"]
 
 
@@ -843,7 +844,7 @@ async def test_dict_shaped_parts_come_back_as_dataclasses(memory: MemoryProvider
                 "data": _PNG_B64, "media_type": "image/png", "byte_size": 64}], t=0),
         _ctx(),
     )
-    (rec,) = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    (rec,) = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     _assert_lossless(rec.content)
 
 
@@ -885,8 +886,8 @@ async def test_load_view_isolates_tenants(memory: MemoryProvider) -> None:
     await memory.ingest(_turn(_SECRET, t=0), _tctx(_TENANT_A))
     await memory.ingest(_turn("b-own", t=1), _tctx(_TENANT_B))
 
-    view_a = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(_TENANT_A))
-    view_b = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(_TENANT_B))
+    view_a = await load_records(memory, _addr(), MemoryScope.TASK, _tctx(_TENANT_A))
+    view_b = await load_records(memory, _addr(), MemoryScope.TASK, _tctx(_TENANT_B))
     assert [r.content for r in view_a] == [_SECRET]
     assert [r.content for r in view_b] == ["b-own"], (
         "B 必须读到**自己的**那条——只断言 B 读不到 A 的话，返空也能通过"
@@ -904,8 +905,8 @@ async def test_load_view_isolates_tenants_in_agent_scope(memory: MemoryProvider)
     )
     agent_addr = MemoryAddress(session_id=_SESSION, agent_id=_AGENT)
 
-    view_a = await memory.load_view(agent_addr, MemoryScope.AGENT, _tctx(_TENANT_A))
-    view_b = await memory.load_view(agent_addr, MemoryScope.AGENT, _tctx(_TENANT_B))
+    view_a = await load_records(memory, agent_addr, MemoryScope.AGENT, _tctx(_TENANT_A))
+    view_b = await load_records(memory, agent_addr, MemoryScope.AGENT, _tctx(_TENANT_B))
     assert [r.content for r in view_a] == [_SECRET]
     assert [r.content for r in view_b] == ["b-own"]
 
@@ -925,8 +926,8 @@ async def test_load_view_isolates_tenants_in_session_scope(memory: MemoryProvide
         )
     session_addr = MemoryAddress(session_id=_SESSION)
 
-    view_a = await memory.load_view(session_addr, MemoryScope.SESSION, _tctx(_TENANT_A))
-    view_b = await memory.load_view(session_addr, MemoryScope.SESSION, _tctx(_TENANT_B))
+    view_a = await load_records(memory, session_addr, MemoryScope.SESSION, _tctx(_TENANT_A))
+    view_b = await load_records(memory, session_addr, MemoryScope.SESSION, _tctx(_TENANT_B))
     assert [r.content for r in view_a] == [_SECRET]
     assert [r.content for r in view_b] == ["b-own"]
 
@@ -941,7 +942,7 @@ async def test_load_view_same_tenant_still_sees_all_its_own_rows(
     await memory.ingest(_turn("first", t=0), _tctx(_TENANT_A))
     await memory.ingest(_turn("second", t=1), _tctx(_TENANT_A, task_id="t1"))
 
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(_TENANT_A))
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _tctx(_TENANT_A))
     assert [r.content for r in view] == ["first", "second"]
 
 
@@ -956,7 +957,7 @@ async def test_default_tenant_equivalents_are_one_partition(
     **静默返空**（表现是「会话突然失忆」），比泄漏更难诊断。
     """
     await memory.ingest(_turn("row", t=0), _tctx(write_tenant))
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(read_tenant))
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _tctx(read_tenant))
     assert [r.content for r in view] == ["row"]
 
 
@@ -968,7 +969,7 @@ async def test_omitted_tenant_field_matches_explicit_default(
     仓内绝大多数构造点就是这个形态，存量数据同理——它必须与显式 "default" 等价。
     """
     await memory.ingest(_turn("legacy-row", t=0), ProviderContext(session_id=_SESSION))
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert [r.content for r in view] == ["legacy-row"]
 
 
@@ -979,8 +980,8 @@ async def test_named_tenant_and_default_tenant_are_isolated(
     await memory.ingest(_turn("default-row", t=0), _ctx())
     await memory.ingest(_turn("named-row", t=1), _tctx(_TENANT_A))
 
-    default_view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
-    named_view = await memory.load_view(_addr(), MemoryScope.TASK, _tctx(_TENANT_A))
+    default_view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
+    named_view = await load_records(memory, _addr(), MemoryScope.TASK, _tctx(_TENANT_A))
     assert [r.content for r in default_view] == ["default-row"]
     assert [r.content for r in named_view] == ["named-row"]
 
@@ -991,7 +992,7 @@ async def test_single_tenant_path_behaviour_is_unchanged(memory: MemoryProvider)
         await memory.ingest(_turn(text, t=i), _ctx())
         for i, text in enumerate(("one", "two", "three"))
     ]
-    view = await memory.load_view(_addr(), MemoryScope.TASK, _ctx())
+    view = await load_records(memory, _addr(), MemoryScope.TASK, _ctx())
     assert [r.id for r in view] == ids
     assert [r.content for r in view] == ["one", "two", "three"]
 

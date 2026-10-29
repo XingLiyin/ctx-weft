@@ -41,6 +41,7 @@ from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
 from ctx_weft.core.utils.ids import is_internal_call_id
+from ctx_weft.protocols import load_records
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,8 @@ class ReconcileStep(Step):
     name = "reconcile"
 
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
-        # → "prepare"（非 "act"）：填完 dangling 后须由 PrepareStep 用补齐的 memory 重装 assembled_prompt
-        # 并绑定 capability,再 act 调 LLM。直接 "act" 会因缺 assembled_prompt 报错（spec/07 §6）。
+        # → "prepare"（非 "act"）：填完 dangling 后须由 PrepareStep 用补齐的 memory 重装 prompt_inputs
+        # 并绑定 capability,再 act 调 LLM。直接 "act" 会因缺 prompt_inputs 报错（spec/07 §6）。
         dangling, tool_record_ids = await _dangling_tool_calls(
             ctx.memory, state.scope, ctx.provider_ctx)
         if not dangling:
@@ -66,7 +67,10 @@ class ReconcileStep(Step):
         await resolve_and_bind(state, ctx)
 
         from ctx_weft.core.control.reducers import (
-            CAP_FOLD_EVENT_TYPES, fold_operations, load_events_of_types)
+            CAP_FOLD_EVENT_TYPES,
+            fold_operations,
+            load_events_of_types,
+        )
         from ctx_weft.core.loop.capability_gateway import tool_result_record_id
 
         # 恢复判据来自**事件流**：capability 事件在 gateway 里于 provider 之前经提交门
@@ -227,8 +231,8 @@ class ReconcileStep(Step):
 
         引用身份沿用原执行 invocation_id（`attempts` 尾项），不是这次重入新生成的。
         """
-        from ctx_weft.core.media.fold import placeholder_refs
         from ctx_weft.core.loop.capability_gateway import ingest_tool_result
+        from ctx_weft.core.media.fold import placeholder_refs
         content = str(result)
         ref_inv = attempts[-1] if attempts else tc.get("id", "")
         if converge and gateway is not None:
@@ -255,7 +259,7 @@ async def _dangling_tool_calls(memory, scope, provider_ctx) -> tuple[list[dict],
     """
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
 
-    view = await memory.load_view(
+    view = await load_records(memory,
         MemoryAddress(session_id=scope.session_id, task_id=scope.task_id,
                       agent_id=scope.agent_id),
         MemoryScope.TASK, provider_ctx,

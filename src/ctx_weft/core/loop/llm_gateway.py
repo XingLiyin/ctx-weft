@@ -1,7 +1,7 @@
 """LLM 请求发送的统一关口：集中所有「发送前合法化」方法 + 流式转发。
 
-四个 step（act / observe / compact / recognize_intent）各自构造 ``LLMRequest`` 后
-都经 :func:`stream_llm` 发送，使「发送前合法化」成为**唯一**关口：装配层（composer）
+四个 step 通过 :func:`build_llm_request` 编译或复用 PromptContext，并构造本轮请求。
+请求经 :func:`stream_llm` 发送，使「发送前合法化」成为**唯一**关口：装配层（composer）
 只负责构造逻辑消息结构，不做合法化；连续同角色 / 孤立 tool result 一律在这里、发送前
 统一处理。
 
@@ -44,17 +44,23 @@ import copy
 import dataclasses
 import logging
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
-from ctx_weft.core.utils.content import rehydrate_content, redact_content_for_event
-from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.driver import make_event
-from ctx_weft.core.utils.estimate import dynamic_max_tokens, estimate_content_tokens, estimate_tool_calls_tokens
 from ctx_weft.core.loop.llm_stream import DelegatingLLMStream, stream_until_cancel
+from ctx_weft.core.utils.content import redact_content_for_event, rehydrate_content
+from ctx_weft.core.utils.estimate import (
+    dynamic_max_tokens,
+    estimate_content_tokens,
+    estimate_tool_calls_tokens,
+)
+from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
+from ctx_weft.protocols.events import EventType
+
 if TYPE_CHECKING:
+    from ctx_weft.core.assembler.context import PromptContext
     from ctx_weft.protocols import ContentPart, LLMChunk, LLMClient, LLMRequest
 
 logger = logging.getLogger(__name__)
@@ -337,7 +343,7 @@ def _estimate_request_tokens(request: "LLMRequest", count) -> int:
 
 
 def request_prompt_estimate(tokenizer, request: "LLMRequest", loop_guard, baseline_msg_count: "int | None") -> int:
-    """算 caller 侧的 used（本请求真实 prompt token 的最佳估算），供各 step 挂到 request。
+    """算本请求真实 prompt token 的最佳估算，由 gateway 挂到 request。
 
     - **增量**（``baseline_msg_count`` 非 None 且有真实基线 ``context_tokens>0``）：
       真实基线 + 仅 ``messages[baseline_msg_count:]``（本轮新增尾段，如工具结果）的估算。
@@ -576,12 +582,105 @@ async def _emit_retry(
     }))
 
 
-def stream_llm_resilient(ctx, state, request) -> DelegatingLLMStream:
+def prompt_event_inputs(prompt, messages, tools):
+    """Use the assembled data directly, adding this request's continuation."""
+    inputs = getattr(prompt, "inputs", None)
+    if inputs is None:
+        return None
+    return inputs.for_request(messages[len(prompt.messages):], tools).to_payload()
+
+
+def resolve_request_tools(prompt, ctx, state):
+    """Runtime pins affect request tools, never the compiled prefix budget."""
+    inputs = getattr(prompt, "inputs", None)
+    cache = getattr(ctx, "capability_cache", None)
+    if inputs is None or cache is None or inputs.purpose == "compact":
+        return prompt.tools
+    from ctx_weft.core.assembler.sources.capability import build_llm_tools
+
+    try:
+        return build_llm_tools(cache.available(state.agent.id, state.task.id), inputs.purpose,
+                               terminal_only=inputs.terminal_only)
+    except Exception:
+        logger.warning("live tool resolution failed; using compiled tools", exc_info=True)
+        return prompt.tools
+
+
+async def build_llm_request(ctx, state, inputs: PromptContext, *,
+                            appended_messages: Sequence[LLMMessage] = (),
+                            baseline_msg_count: int | None = None, turn: int = 0) -> LLMRequest:
+    """Compile/reuse the fixed base and build this round's actual request.
+
+    Continuations remain live LLMMessage objects, including provider reasoning
+    state. Only the streaming gateway serializes their event representation.
+    """
+    from ctx_weft.protocols import LLMRequest
+
+    prompt = await ctx.assembler.compile(
+        inputs, template=state.extra.get("template"),
+        token_counter=ctx.llm.tokenizer.count, reuse=True)
+    tools = (resolve_request_tools(prompt, ctx, state)
+             if inputs.purpose in {"act", "observe"} else prompt.tools)
+    request = LLMRequest(
+        model=resolve_llm_identity(state)[0], system=prompt.system,
+        messages=[*prompt.messages, *appended_messages], tools=tools,
+        metadata={"turn": turn})
+    request.prompt_token_estimate = request_prompt_estimate(
+        ctx.llm.tokenizer, request, getattr(state.agent, "loop_guard", None), baseline_msg_count)
+    return request
+
+
+async def externalize_prompt_images(inputs, *, event_blob_store, ctx):
+    """Never introduce inline image bytes into a prompt event.
+
+    Memory references stay references. Only unpersisted input content can still
+    contain inline images; send those through the existing event blob boundary.
+    """
+    from ctx_weft.core.utils.content import content_to_event_jsonable
+    from ctx_weft.protocols.context import normalize_content_parts
+
+    async def content(value):
+        if not isinstance(value, list):
+            return value
+        result = []
+        for part in value:
+            if isinstance(part, dict) and part.get("type") == "image" and part.get("source_type", "base64") != "ref":
+                parts = normalize_content_parts([part])
+                if event_blob_store is not None and event_blob_store.can_externalize:
+                    result.extend(await content_to_event_jsonable(
+                        parts, event_blob_store=event_blob_store, ctx=ctx))
+                else:
+                    result.append({"type": "text", "text": redact_content_for_event(parts)})
+            else:
+                result.append(part)
+        return result
+
+    result = {**inputs, "task": dict(inputs["task"])}
+    for key in ("user_prompt", "outputs"):
+        if key in result["task"]:
+            result["task"][key] = await content(result["task"][key])
+    for group, key in (("appended_messages", "content"), ("references", "content")):
+        result[group] = [{**item, key: await content(item[key])} if key in item else item
+                         for item in inputs.get(group, [])]
+    result["memory_blocks"] = [
+        {**item, "record": {**item["record"], "content": await content(item["record"]["content"])}}
+        if "record" in item else item for item in inputs["memory_blocks"]
+    ]
+    return result
+
+
+
+def stream_llm_resilient(ctx, state, request, *, inputs: PromptContext | None = None,
+                         appended_messages: Sequence[LLMMessage] = ()) -> DelegatingLLMStream:
     """Expose the current attempt's shared result without another collector."""
-    return DelegatingLLMStream(lambda owner: _stream_llm_resilient(owner, ctx, state, request))
+    appended_messages = tuple(appended_messages)
+    return DelegatingLLMStream(
+        lambda owner: _stream_llm_resilient(owner, ctx, state, request,
+                                          inputs=inputs, appended_messages=appended_messages))
 
 
-async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LLMChunk"]:
+async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
+                               appended_messages=()) -> AsyncIterator["LLMChunk"]:
     """退避自愈包装：把 retriable+outage 的 LLM 调用在进程内指数退避重试。
 
     - 中途 outage 先关闭旧流、废弃结果并发 RESPONSE_DISCARDED，再从空状态重试。
@@ -636,13 +735,28 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
             "request_id": request_id, "model": model, "llm_account": llm_account,
             "turn": turn}))
         owner.request_started = True
-        await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
-            "request_id": request_id, "turn": turn, "system": request.system,
-            "messages": [
+        prompt_payload = {
+            "request_id": request_id, "turn": turn,
+            "tool_names": [t.name for t in request.tools],
+        }
+        event_inputs = (inputs.for_request(appended_messages, request.tools).to_payload()
+                        if inputs is not None else request.prompt_inputs)
+        if event_inputs is not None:
+            event_inputs = await externalize_prompt_images(
+                event_inputs, event_blob_store=getattr(ctx, "event_blob_store", None),
+                ctx=ctx.provider_ctx)
+            prompt_payload.update({
+                **event_inputs,
+                # Freeze the actual per-request live/pinned tool surface.
+                "tools": [dataclasses.asdict(tool) for tool in request.tools],
+            })
+        else:
+            # Custom callers without an assembler still use the legacy event.
+            prompt_payload.update(system=request.system, messages=[
                 {"role": m.role, "content": redact_content_for_event(m.content)}
                 for m in request.messages
-            ],
-            "tool_names": [t.name for t in request.tools]}))
+            ])
+        await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload=prompt_payload))
 
     loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
     apply_dynamic_max_tokens(ctx, request, loop_guard)
@@ -657,7 +771,8 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     midstream_deadline = None
     # Adapters/legalization may mutate a request. Every retry receives the same
     # original input, never a previous attempt's mutations or partial response.
-    original_request = copy.deepcopy(request)
+    # Assembled inputs belong to the event; adapters/retries need no copy of them.
+    original_request = copy.deepcopy(dataclasses.replace(request, prompt_inputs=None))
     tok = getattr(ctx, "cancel_token", None)
     attempt = 0
     last_error = None

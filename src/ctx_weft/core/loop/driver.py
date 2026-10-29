@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from ctx_weft.core.assembler import AssembledPrompt, ContextAssembler
+from ctx_weft.core.assembler import ContextAssembler, PromptContext
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
@@ -220,7 +220,7 @@ class LoopState:
     sequence_counter: int = 0  # 每发一个事件 +1
 
     # 由 PrepareStep 写入
-    assembled_prompt: AssembledPrompt | None = None
+    prompt_inputs: PromptContext | None = None
     # 由 ActStep 写入
     transcript: list[TurnRecord] = field(default_factory=list)
     act_exit_reason: str = ""
@@ -299,6 +299,8 @@ class LoopContext:
     # blob store：出网前把 ref 还原成 base64 用（Phase 3b）。默认 None → 不 rehydrate，
     # 既有构造点与既有测试行为逐字节不变。
     blob_store: "Any" = None
+    # Debug prompt snapshots externalize unpersisted image inputs separately.
+    event_blob_store: "Any" = None
     steps: "StepDriver | None" = None
     execution: StepExecution = field(default_factory=StepExecution)
 

@@ -14,10 +14,17 @@ import logging
 from contextlib import aclosing
 from typing import Any
 
-from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepDriver, StepOutcome, make_event
+from ctx_weft.core.loop.driver import (
+    LoopContext,
+    LoopState,
+    Step,
+    StepDriver,
+    StepOutcome,
+    make_event,
+)
 from ctx_weft.core.loop.llm_gateway import (
+    build_llm_request,
     llm_request_id,
-    request_prompt_estimate,
     resolve_llm_identity,
     stream_llm_resilient,
 )
@@ -78,18 +85,9 @@ class RecognizeIntentStep(Step):
             token_counter=ctx.llm.tokenizer.count,
             intent=MetadataIntent(),
         )
-        prompt = await ctx.assembler.assemble(request)
+        inputs = await ctx.assembler.assemble(request)
         if token is not None:
             token.raise_if_cancelled()
-
-        from ctx_weft.protocols import LLMRequest
-
-        llm_request = LLMRequest(
-            model=resolve_llm_identity(state)[0],
-            system=prompt.system,
-            messages=prompt.messages,
-            tools=prompt.tools,
-        )
 
         await ctx.event_bus.emit(make_event(state, EventType.RECOGNIZE_INTENT_STARTED, payload={
             "task_id": target_task_id,
@@ -105,28 +103,15 @@ class RecognizeIntentStep(Step):
 
         from ctx_weft.protocols import ToolCall
 
-        # 复审修复第二轮（task-6）：request_prompt_estimate 在 stream_llm_resilient 被
-        # 调用**之前**跑——此刻 LLM_REQUEST_STARTED 不可能已经发出（它是 gateway 函数体
-        # 内的第一段代码，函数还没被调用）。单独一个 try：失败仍按 pre-task-6 的既有语义
-        # 降级返回（这段原本就在同一个吞异常的 try 里），但**不**补发
-        # LLM_RESPONSE_FINISHED——否则会产出一条无 STARTED 匹配的孤儿事件（反向孤儿）。
-        # 注：原来这里还有一次 apply_dynamic_max_tokens(ctx, llm_request, _guard) 调用，
-        # 是切网关前的遗留——gateway 内部已经调它，这里纯属多余空操作，直接删掉（与
-        # act.py / compact.py「完全委托 gateway」的既有约定一致）。
-        _guard = getattr(state.agent, "loop_guard", None)
+        # Compilation and budgeting happen before any LLM request events.
         try:
-            llm_request.prompt_token_estimate = request_prompt_estimate(
-                ctx.llm.tokenizer, llm_request, _guard, None)
+            llm_request = await build_llm_request(ctx, state, inputs)
         except Exception:
             logger.exception(
-                "RecognizeIntentStep: prompt token estimate failed for task %s", target_task_id)
+                "RecognizeIntentStep: request construction failed for task %s", target_task_id)
             return StepOutcome(next_step=None)
 
-        # 这个 try 才是「STARTED 确定已发出」的区间：stream_llm_resilient 把
-        # apply_dynamic_max_tokens 挪到了 LLM_REQUEST_STARTED/LLM_PROMPT_SENT 发射之后
-        # （llm_gateway.py，同一轮复审修复）——进了这段代码往下走，就意味着 STARTED
-        # 已经发出，下面的 except 分支据此才需要、也才能安全地补发 LLM_RESPONSE_FINISHED。
-        stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
+        stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request, inputs=inputs))
         registry = StepDriver.for_context(ctx).executions
         try:
             async with aclosing(stream_until_cancel(stream, token)) as chunks:

@@ -20,6 +20,7 @@ from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.events import EventOrigin
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter, _serialize_messages
 from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 from tests.integration.test_interactive_task import _act_state_ctx
 
 
@@ -130,10 +131,10 @@ async def test_all_four_entries_reuse_one_collector_and_preserve_deltas(
         events.append(event)
 
     async def assemble(request):
-        return state.assembled_prompt
+        return state.prompt_inputs
 
     ctx.event_bus = SimpleNamespace(emit=emit)
-    ctx.assembler = SimpleNamespace(assemble=assemble)
+    ctx.assembler = SimpleNamespace(assemble=assemble, compile=compiled_test_inputs)
     state.origin = {
         "act": EventOrigin.LOOP_ACT,
         "observe": EventOrigin.LOOP_OBSERVE,
@@ -143,18 +144,10 @@ async def test_all_four_entries_reuse_one_collector_and_preserve_deltas(
     try:
         if entry == "act":
             await _run_llm_turn(
-                state, ctx, state.assembled_prompt, state.assembled_prompt.messages, 1
+                state, ctx, scripted_inputs(state.prompt_inputs), [], 1
             )
         elif entry == "observe":
-            await ObserveStep()._run_react(
-                state,
-                ctx,
-                system="",
-                messages=state.assembled_prompt.messages,
-                tools=[],
-                max_rounds=1,
-                terminal_tool_name="unused",
-            )
+            await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="", messages=state.prompt_inputs._scripted_prompt.messages, tools=[], purpose="observe"), max_rounds=1, terminal_tool_name="unused")
         elif entry == "compact":
             await summarize_for_compact(state, ctx)
         else:

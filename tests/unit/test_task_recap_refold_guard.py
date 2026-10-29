@@ -17,9 +17,9 @@ async def test_compact_boundary_skips_when_no_active_raw(fake_state_ctx, monkeyp
     # Augment agent with max_turns_per_observe
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     # 该段已折叠：视图内无 active assistant 回合（新护栏走 load_view，不再经 count_recent）
-    async def _empty_view(address, scope, pctx, kinds=None):
+    async def _empty_view(address, scope, pctx, kinds=None, *, end_at=None):
         return []
-    monkeypatch.setattr(ctx.memory, "load_view", _empty_view)
+    monkeypatch.setattr(ctx.memory, "load_view_ids", _empty_view)
     called = {"react": False}
     async def _react(*a, **k):
         called["react"] = True

@@ -48,7 +48,8 @@ async def test_escalates_l1_l2_l3(monkeypatch):
     monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const({"c1"}))
     # L3 现有可折性 guard：collapse_keep_last=3，须让 TASK 视图报 > 3 条材料，L3 才会跑
     # （v2：guard 走 len(load_view)）。
-    memory = SimpleNamespace(load_view=lambda addr, layer, ctx, kinds=None: _const([object()] * 10))
+    memory = SimpleNamespace(load_view_ids=lambda *a, **kw: _const(list(range(10))),
+                             read_records=lambda ids, ctx: _const([object()] * len(ids)))
 
     await cm.escalating_compact(_state(), SimpleNamespace(memory=memory, provider_ctx=None),
                                 token_estimate=900, trigger="compact")
@@ -97,7 +98,8 @@ async def test_finished_emitted_when_nothing_folded(monkeypatch):
     monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _const(900))
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(0))       # L1 guard fail
     monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(set())) # L2 no kept
-    memory = SimpleNamespace(load_view=lambda addr, layer, ctx, kinds=None: _const([]))  # L3 no material
+    memory = SimpleNamespace(load_view_ids=lambda *a, **kw: _const([]),
+                             read_records=lambda ids, ctx: _const([]))  # L3 no material
 
     events = await cm.escalating_compact(
         _state(), SimpleNamespace(memory=memory, provider_ctx=None),

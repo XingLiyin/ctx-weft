@@ -2,20 +2,25 @@
 
 A transient outage that exhausts self-heal must propagate LLMOutageError, not return "".
 """
+
 from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.protocols import LLMChunk, LLMOutageError
 from ctx_weft.core.loop.steps import compact as compact_mod
+from ctx_weft.protocols import LLMChunk, LLMOutageError
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 pytestmark = pytest.mark.asyncio
 
 
 class _Assembler:
+    async def compile(self, inputs, **kwargs):
+        return await compiled_test_inputs(inputs, **kwargs)
+
     async def assemble(self, request):
-        return SimpleNamespace(system="sys", messages=[])
+        return scripted_inputs(SimpleNamespace(system="sys", messages=[]), purpose=request.purpose)
 
 
 def _state_ctx():
@@ -31,7 +36,7 @@ def _state_ctx():
 
 
 async def test_summarize_for_compact_returns_llm_text(monkeypatch):
-    async def _ok(ctx, state, request):
+    async def _ok(ctx, state, request, **kwargs):
         for t in ["sum", "mary"]:
             yield LLMChunk(kind="token", text=t)
     monkeypatch.setattr(compact_mod, "stream_llm_resilient", _ok)
@@ -43,7 +48,7 @@ async def test_summarize_for_compact_returns_llm_text(monkeypatch):
 
 
 async def test_summarize_for_compact_propagates_outage(monkeypatch):
-    async def _raise(ctx, state, request):
+    async def _raise(ctx, state, request, **kwargs):
         raise LLMOutageError("self-heal exhausted")
         yield  # pragma: no cover  (make this an async generator)
     monkeypatch.setattr(compact_mod, "stream_llm_resilient", _raise)

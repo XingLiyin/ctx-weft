@@ -13,18 +13,17 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from ctx_weft.core.utils.estimate import estimate_tokens
-
 import pytest
 
-from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, finalize_task_memory
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
+from ctx_weft.core.utils.estimate import estimate_tokens
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
+from ctx_weft.protocols.memory_compat import legacy_type_of
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from ctx_weft.protocols.memory_compat import legacy_type_of
+from tests.assembler_testkit import recalled_blocks
 
 pytestmark = pytest.mark.asyncio
 
@@ -97,7 +96,7 @@ async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryAddress
     """Drive AgentRecallSource.fetch and return sorted blocks."""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)
-    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = await recalled_blocks(req, deps)
     blocks.sort(key=lambda b: (b.value.timestamp, b.metadata.get("sequence", 0)))
     return blocks
 
@@ -274,7 +273,7 @@ async def test_cross_agent_child_body_isolated_from_parent() -> None:
         f"found in: {[c[:60] for c in contents if '子任务' in c]}"
     )
     assert not any("已收集 5 份" in c for c in contents), (
-        f"parent recall must NOT surface child's TASK_COMPACT_SUMMARY (cross-agent isolation)"
+        "parent recall must NOT surface child's TASK_COMPACT_SUMMARY (cross-agent isolation)"
     )
 
     # 父可见 dispatch result（黑盒 bubble，conversation turn），含 mem_content、配对 oc_cross、归 parent 单元

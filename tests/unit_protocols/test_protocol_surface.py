@@ -1,11 +1,4 @@
-"""方法面清点（v2 设计 §4/§7 · P4b-2）：MemoryProvider 协议 = 8 方法。
-
-写(2) ingest/fold + 读(3) load_view/recall_topic/recall_semantic +
-订阅(2) subscribe_topic/list_subscriptions + 能力(1) describe。
-旧 5 方法（recall_recent/by_agent/count_recent/supersede/apply_compact）与
-CompactResult 自协议删除；in-memory provider 的读 wrapper 仅为存量测试兼容
-（非协议方法，见 P4a 范围决策）。
-"""
+"""MemoryProvider selects IDs and loads immutable records; load_view is retired."""
 
 from __future__ import annotations
 
@@ -14,13 +7,13 @@ from ctx_weft.protocols import MemoryProvider
 
 V2_SURFACE = (
     "ingest", "fold",
-    "load_view", "recall_topic", "recall_semantic",
+    "load_view_ids", "read_records", "recall_topic", "recall_semantic",
     "subscribe_topic", "list_subscriptions",
     "describe",
 )
 SUNSET = (
     "recall_recent", "recall_recent_by_agent", "count_recent",
-    "supersede", "apply_compact",
+    "supersede", "apply_compact", "load_view",
 )
 
 

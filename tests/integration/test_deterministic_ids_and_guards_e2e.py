@@ -28,6 +28,7 @@ from ctx_weft.protocols import (
     MemoryKind,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.hitl import HitlAsk, HitlDecision, UserTurnDelivery
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -93,7 +94,7 @@ async def test_staged_records_sort_after_everything_already_in_memory() -> None:
     pctx = ProviderContext(session_id=sid, tenant_id="default",
                            task_id=q1.task_id, agent_id=q1.agent_id)
     # 只看**会被渲染**的那些：审计记录不进 prompt、不参与 composer 的归并排序。
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx,
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx,
                                kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY])
     # 装配一次，触发叠加路径给暂存记录补序号
     from types import SimpleNamespace

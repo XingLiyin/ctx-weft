@@ -17,6 +17,7 @@ from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.protocols import LLMMessage, LLMUsage, MemoryAddress
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 # ── minimal fakes（与 test_observe_react_helper 同构，自包含避免跨测试文件 import）──
 
@@ -108,8 +109,11 @@ def _make_ctx(event_bus, *, llm=None):
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return await compiled_test_inputs(inputs, **kwargs)
+
         async def assemble(self, req):
-            return SimpleNamespace(system="SYS", messages=[], tools=[])
+            return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[]), purpose=req.purpose)
 
     return LoopContext(
         assembler=_FakeAssembler(),
@@ -151,7 +155,7 @@ async def test_act_request_events_carry_resolved_model_identity():
     ctx = _make_ctx(bus, llm=_FakeLLM(chunks=[_make_usage_chunk()]))
     prompt = SimpleNamespace(system="SYS", tools=[])
 
-    await _run_llm_turn(state, ctx, prompt, [], 1)
+    await _run_llm_turn(state, ctx, scripted_inputs(prompt), [], 1)
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED][0]
     assert started.payload["model"] == "deepseek-v4-pro"
@@ -166,7 +170,7 @@ async def test_act_request_events_carry_mock_adapters_model():
     state = _make_state(model="mock-adapter-model", account="")
     ctx = _make_ctx(bus, llm=_FakeLLM(chunks=[_make_usage_chunk()]))
 
-    await _run_llm_turn(state, ctx, SimpleNamespace(system="SYS", tools=[]), [], 1)
+    await _run_llm_turn(state, ctx, scripted_inputs(SimpleNamespace(system="SYS", tools=[])), [], 1)
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED][0]
     assert started.payload["model"] == "mock-adapter-model"
@@ -185,12 +189,7 @@ async def test_observe_request_events_carry_resolved_model_identity():
     llm = _FakeLLM(chunks=[_make_tool_call_chunk("report_observation"), _make_usage_chunk()])
     ctx = _make_ctx(bus, llm=llm)
 
-    await ObserveStep()._run_react(
-        state, ctx, system="SYS",
-        messages=[LLMMessage(role="user", content="observe")],
-        tools=[], max_rounds=1,
-        terminal_tool_name="report_observation",
-    )
+    await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content="observe")], tools=[], purpose="observe"), max_rounds=1, terminal_tool_name="report_observation")
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED][0]
     assert started.payload["model"] == "deepseek-v4-pro"

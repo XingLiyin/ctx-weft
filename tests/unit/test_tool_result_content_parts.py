@@ -19,7 +19,7 @@ from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver
 from ctx_weft.core.loop.steps import observe as recap_mod
-from ctx_weft.protocols import ImagePart, MemoryAddress, ProviderContext, TextPart
+from ctx_weft.protocols import ImagePart, MemoryAddress, ProviderContext, TextPart, load_records
 from ctx_weft.protocols.capability import (
     AuthorizationDecision,
     Authorizer,
@@ -183,7 +183,7 @@ async def test_memory_record_keeps_the_parts():
                                                                   source_type="ref")]))
     ctxp = ProviderContext(session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1")
     from ctx_weft.protocols import MemoryScope
-    view = await mem.load_view(
+    view = await load_records(mem,
         MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1"),
         MemoryScope.TASK, ctxp,
     )

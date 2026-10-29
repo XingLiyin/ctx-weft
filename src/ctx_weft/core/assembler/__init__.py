@@ -1,4 +1,4 @@
-"""Raw context collection and Jinja-controlled prompt compilation."""
+"""Two stages: assemble prompt event inputs, then compile them through Jinja."""
 
 from ctx_weft.core.assembler.assembler import (
     ActIntent,

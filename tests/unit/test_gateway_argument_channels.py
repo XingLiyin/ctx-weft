@@ -18,7 +18,7 @@ from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.capabilities.cache import CapabilityCache
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.capability import (
     AuthorizationDecision,
     CapabilityEvent,
@@ -200,7 +200,7 @@ async def test_audit_records_redacted_copy() -> None:
         f"event payload leaks plaintext: {audit_args!r}"
     )
 
-    recs = await mem.load_view(state.scope, MemoryScope.TASK, ctx.provider_ctx,
+    recs = await load_records(mem, state.scope, MemoryScope.TASK, ctx.provider_ctx,
                                kinds=[MemoryKind.TOOL_AUDIT])
     assert recs, "no TOOL_AUDIT record"
     audit_text = str(recs[0].content)

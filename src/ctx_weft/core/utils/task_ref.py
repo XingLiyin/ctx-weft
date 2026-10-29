@@ -21,7 +21,7 @@ id 稳定但不可读。两个一起印，各自补上对方的短板，代价�
 
 from __future__ import annotations
 
-__all__ = ["task_ref", "task_label", "task_ref_parts"]
+__all__ = ["task_ref", "task_label", "task_label_parts", "task_ref_parts"]
 
 #: `task_label` 的标题回退长度上限（取 prompt 首行时截断）。
 TASK_LABEL_MAX = 80
@@ -60,12 +60,18 @@ def task_label(task) -> str:
     从 `act_guidance._task_label` 移来（2026-09-28）：observe 的 cue 也要这道锚，而
     composer 在 assembler 层、不该反向 import loop 层。放这里两边共用一份，不写第二套回退。
     """
-    title = (getattr(task, "title", "") or "").strip()
+    return task_label_parts(getattr(task, "id", "") or "", getattr(task, "title", "") or "",
+                            getattr(task, "user_prompt", None))
+
+
+def task_label_parts(task_id: str, title: str, user_prompt=None) -> str:
+    """Render the same label from persisted prompt fields without a Task object."""
+    title = (title or "").strip()
     if not title:
         from ctx_weft.core.utils.content import content_to_text
 
-        prompt = content_to_text(getattr(task, "user_prompt", None) or "").strip()
+        prompt = content_to_text(user_prompt or "").strip()
         if prompt:
             first = prompt.splitlines()[0].strip()
             title = first[:TASK_LABEL_MAX] + "…" if len(first) > TASK_LABEL_MAX else first
-    return task_ref_parts(getattr(task, "id", "") or "", title)
+    return task_ref_parts(task_id, title)

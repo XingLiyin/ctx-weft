@@ -150,6 +150,7 @@ class InvocationResult:
 
     invocation_id: str
     tool_name: str
+    memory_id: str | None = field(default=None, kw_only=True)
     # 拼好的 result，追加进 LLM messages。默认是**文本**（与改造前逐字节相同）；
     # 仅当 provider 的 result content 里带了非文本 part（或人类备注带图）时才是
     # `list[ContentPart]`（形如 `[TextPart(文本), *parts]`）。
@@ -761,11 +762,11 @@ class CapabilityGateway:
             content = normalize_content_parts([TextPart(text=text), *note_parts, *parts])
 
         # 7. 记录 result（事件 + TOOL_RESULT 入 memory）——审计通道（脱敏副本）
-        await self._record_result(state, ctx, tool_name, invocation_id, audit_args, content, is_error, is_dispatch, is_silent, tool_call_id)
+        memory_id = await self._record_result(state, ctx, tool_name, invocation_id, audit_args, content, is_error, is_dispatch, is_silent, tool_call_id)
 
         return InvocationResult(
             invocation_id=invocation_id, tool_name=tool_name,
-            content=content, metadata=metadata, is_error=is_error,
+            content=content, metadata=metadata, is_error=is_error, memory_id=memory_id,
         )
 
     @staticmethod
@@ -965,7 +966,7 @@ class CapabilityGateway:
 
     async def _record_result(
         self, state, ctx, tool_name, invocation_id, sanitized, content, is_error, is_dispatch, is_silent, tool_call_id,
-    ) -> None:
+    ) -> str | None:
         """发 CapabilityFinished + ingest TOOL_RESULT（派发暂挂 / SILENT 不入 / 普通写 task 层）。"""
         from ctx_weft.core.loop.driver import make_event
         # 事件 payload 必须先脱敏再截断：content 可能是 list[ContentPart]（工具返图时），
@@ -982,6 +983,7 @@ class CapabilityGateway:
             "result_length": len(redacted),
             "tool_call_id": tool_call_id,
         }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY))
+        memory_id = None
         if is_dispatch and tool_name in _PLAN_DISPATCH_TOOLS:
             # envelope: 给 `_record_invocation` eager 写的 plan 框补配对 ack，避免该框
             # 悬挂（被 legalize 剥掉）。**写在执行之后**，`content` 就是工具的真回执
@@ -990,7 +992,7 @@ class CapabilityGateway:
             # 只活在当轮。窗口从「两次相邻 ingest」变成「一次工具调用」，而
             # delegate_plan 是纯进程内 staging（微秒级）；工具报错时落的是真错误，
             # 也好过一句假的「Plan created」。
-            await self._memory.ingest(
+            memory_id = await self._memory.ingest(
                 MemoryEvent(
                     kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
                     address=_tool_scope(state),
@@ -1004,7 +1006,7 @@ class CapabilityGateway:
                 ctx.provider_ctx,
             )
         elif not is_dispatch and not is_silent:
-            await ingest_tool_result(
+            memory_id = await ingest_tool_result(
                 self._memory, ctx.provider_ctx, _tool_scope(state),
                 tool_call_id=tool_call_id, content=content, is_error=is_error,
                 invocation_id=invocation_id, tool_name=tool_name,
@@ -1018,6 +1020,7 @@ class CapabilityGateway:
         # 要不要留着」无关。
         if ctx.hitl is not None:
             await ctx.hitl.close_for_tool_call(ctx.provider_ctx.session_id, tool_call_id)
+        return memory_id
 
     def _find_provider(self, capability_id: str) -> ToolCapabilityProvider | None:
         prefix = capability_id.rsplit(":", 1)[0]
@@ -1126,13 +1129,13 @@ class CapabilityGateway:
         text = await self._converge_result(text, ctx, ref_inv, tool_name, cap.spillable)
         content: "str | list[ContentPart]" = (
             normalize_content_parts([TextPart(text=text), *parts]) if parts else text)
-        await self._record_result(
+        memory_id = await self._record_result(
             state, ctx, tool_name, ref_inv, {}, content,
             verdict.result_is_error, is_dispatch, is_silent, tool_call_id)
         logger.info("CapabilityGateway: %s concluded without re-running", ledger_key)
         return InvocationResult(
             invocation_id=invocation_id, tool_name=tool_name,
-            content=content, is_error=verdict.result_is_error)
+            content=content, is_error=verdict.result_is_error, memory_id=memory_id)
 
     def _get_authorizer(self, capability_id: str) -> Authorizer:
         if capability_id in self._provider_authorizers:

@@ -14,6 +14,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
+from ctx_weft.core.assembler.context import PromptContext
 from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME, SWITCH_TASK_NAME
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
@@ -30,10 +31,10 @@ from ctx_weft.core.loop.driver import (
     make_event,
 )
 from ctx_weft.core.loop.llm_gateway import (
-    llm_request_id,
     PROMPT_EST_BASE_KEY,
     PROMPT_EST_SEG_KEY,
-    request_prompt_estimate,
+    build_llm_request,
+    llm_request_id,
     resolve_llm_identity,
     stream_llm_resilient,
 )
@@ -46,12 +47,12 @@ from ctx_weft.core.utils.estimate import effective_limit
 from ctx_weft.core.utils.ids import MintedCall, generate_id, mint_turn_call_ids
 from ctx_weft.protocols import (
     LLMMessage,
-    LLMRequest,
     LLMUsage,
     MemoryEvent,
     MemoryKind,
     MemoryScope,
     ToolCall,
+    load_records,
 )
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols.hitl import (
@@ -84,9 +85,9 @@ class ActStep(Step):
     name = "act"
 
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
-        prompt = state.assembled_prompt
-        if prompt is None:
-            raise RuntimeError("ActStep requires assembled_prompt — PrepareStep must run first")
+        inputs = state.prompt_inputs
+        if inputs is None:
+            raise RuntimeError("ActStep requires prompt_inputs — PrepareStep must run first")
 
         agent = state.agent
         # 轮数预算**跨「上下文恢复」累计**：越过停机线后本步会经 PrepareStep 压缩再重入
@@ -103,7 +104,7 @@ class ActStep(Step):
 
         # 运行时态势 guidance（任务树/已完成子任务/收尾提醒）已随装配管线注入
         # （PrepareStep → GuidanceSource → composer 末条 user 尾部），此处不再修饰。
-        current_messages = list(prompt.messages)
+        appended_messages: list[LLMMessage] = []
         # 动态 max_tokens 的增量基线：上一轮实际发送的 message 条数（= 本轮 usage 对应的真实
         # prompt 基线）。None=本轮无循环内真实基线（首轮）→ request_prompt_estimate 走整份估算。
         baseline_msg_count: int | None = None
@@ -115,15 +116,14 @@ class ActStep(Step):
                 state, EventType.ACT_TURN_STARTED, payload={"turn": turn_num}))
 
             # 1) 单轮 LLM：流式累积文本 / reasoning / tool_calls / usage（软打断在内部 park）
-            sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
-            turn = await _run_llm_turn(state, ctx, prompt, current_messages, turn_num, baseline_msg_count)
+            turn = await _run_llm_turn(state, ctx, inputs, appended_messages, turn_num, baseline_msg_count)
 
             # 2) token 记账 + context_limit 判定
             context_limit_hit = await _account_tokens(state, ctx, turn.usage)
             # 仅当本轮真实刷新了 context_tokens（usage>0）才前移基线；否则保持旧值/None，
             # 让下一轮退回整份估算（更保守），避免基线与陈旧 context_tokens 错配。
             if turn.usage.prompt_tokens > 0:
-                baseline_msg_count = sent_msg_count
+                baseline_msg_count = len(turn.messages_sent)
 
             # 3) assistant 回合落 memory + 接回 message 历史 + 记 transcript
             persisted_turn = await _ingest_assistant_turn(
@@ -131,11 +131,12 @@ class ActStep(Step):
                 anchor=turn.anchor, minted=turn.minted)
             asst_tool_dicts = persisted_turn.tool_calls
             state.extra["assistant_record_id"] = persisted_turn.record_id
-            current_messages.append(LLMMessage(
+            appended_messages.append(LLMMessage(
                 role="assistant", content=turn.text, tool_calls=asst_tool_dicts,
-                reasoning_content=turn.reasoning or None, provider_state=turn.provider_state))
+                reasoning_content=turn.reasoning or None, provider_state=turn.provider_state,
+                memory_id=persisted_turn.record_id))
             turn_record = TurnRecord(
-                turn=turn_num, messages_sent=list(current_messages),
+                turn=turn_num, messages_sent=[*turn.messages_sent, appended_messages[-1]],
                 assistant_text=turn.text, tool_calls=turn.tool_calls, usage=turn.usage)
 
             # 4) 纯文本（无 tool call）：interactive 让位用户 / 否则即任务产出 → observe
@@ -167,8 +168,9 @@ class ActStep(Step):
             #    永不产孤儿；且紧接着就是 compact，折的正是这批新料。
             tool_results = await _execute_tool_calls(state, ctx, turn.tool_calls)
             for tr in tool_results:
-                current_messages.append(LLMMessage(
-                    role="tool", content=tr["result"], tool_call_id=tr["tool_call_id"]))
+                appended_messages.append(LLMMessage(
+                    role="tool", content=tr["result"], tool_call_id=tr["tool_call_id"],
+                    memory_id=tr.get("memory_id")))
             turn_record.tool_results = tool_results
             transcript.append(turn_record)
             await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
@@ -236,7 +238,7 @@ class ActStep(Step):
         #   **从不回写** loop_guard.context_tokens（est 是局部量），所以 compact → prepare
         #   会让 prepare 用压缩前的陈旧基线再开一次门、白跑第二次压缩；③ prepare 顺带做了
         #   续跑必须做的两件事——resolve_and_bind 重解能力面 + `_assemble()` 重建
-        #   assembled_prompt（本步的 current_messages 正是从它来的）。
+        #   prompt_inputs，供 gateway 编译恢复后的基础消息。
         if state.task.suspend_requested:
             next_step = "suspend"
         elif exit_reason == "context_limit" and _can_recover_context(state):
@@ -405,10 +407,11 @@ class _LLMTurnOutput:
     anchor: str = ""
     minted: list[MintedCall] = dataclasses.field(default_factory=list)
     provider_state: dict[str, Any] = dataclasses.field(default_factory=dict)
+    messages_sent: list[LLMMessage] = dataclasses.field(default_factory=list)
 
 
 async def _run_llm_turn(
-    state: LoopState, ctx: LoopContext, prompt: Any, current_messages: list[LLMMessage],
+    state: LoopState, ctx: LoopContext, inputs: PromptContext, appended_messages: list[LLMMessage],
     turn_num: int, baseline_msg_count: int | None = None,
 ) -> _LLMTurnOutput:
     """发请求事件 → 流式累积 token/reasoning/tool_calls/usage → 处理软打断 → 发 RESPONSE_FINISHED。
@@ -424,17 +427,16 @@ async def _run_llm_turn(
     # 值，无需新增参数或跨函数传值即可对齐（详见 llm_gateway.stream_llm_resilient 文档字符串）。
     req_id = llm_request_id(state)
 
-    llm_request = LLMRequest(
-        model=model, system=prompt.system, messages=list(current_messages), tools=prompt.tools)
-    llm_request.prompt_token_estimate = request_prompt_estimate(
-        ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
+    llm_request = await build_llm_request(
+        ctx, state, inputs, appended_messages=appended_messages,
+        baseline_msg_count=baseline_msg_count, turn=turn_num)
     # turn：LLM_REQUEST_STARTED / LLM_PROMPT_SENT 现由 gateway 发射，但 turn_num 是本函数的局部
     # 循环变量、state 上没有对应字段——经 metadata 这个既有的瞬态透传通道带给 gateway（同
     # PROMPT_EST_BASE_KEY/PROMPT_EST_SEG_KEY 的做法），不新增函数参数。
-    llm_request.metadata["turn"] = turn_num
 
     interrupted = False
-    stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
+    stream = ensure_collected_stream(stream_llm_resilient(
+        ctx, state, llm_request, inputs=inputs, appended_messages=appended_messages))
 
     # A stop and a chunk can arrive together. A body exception/break does not
     # close an async generator automatically; await closure before run unwind.
@@ -475,7 +477,7 @@ async def _run_llm_turn(
 
     # 摄入前铸造内部调用标识（spec: conversation-integrity）：LLM 复用 wire id（call_1
     # 类短值）是常态，跨轮次/跨任务重建后按裸 id 配对会错配。本函数是唯一供值点——
-    # 事件 payload、memory 记录、current_messages、gateway/HITL 全部消费同一次铸造的
+    # 事件 payload、memory 记录、appended_messages、gateway/HITL 全部消费同一次铸造的
     # 值。锚 = 预铸的 assistant 记录 id（ingest 经 MemoryEvent.id 采纳，见
     # _ingest_assistant_turn），跨平面一致且与 tool_call_id 派生同源。observe 的
     # ObserveStep._run_react 对自己的回合同口径（live 平面，不入 memory）。
@@ -517,7 +519,8 @@ async def _run_llm_turn(
 
     return _LLMTurnOutput(
         text=text, reasoning=reasoning, tool_calls=tool_calls, usage=usage,
-        anchor=anchor, minted=minted, provider_state=result.provider_state)
+        anchor=anchor, minted=minted, provider_state=result.provider_state,
+        messages_sent=llm_request.messages)
 
 
 def _can_recover_context(state: LoopState) -> bool:
@@ -566,14 +569,14 @@ async def _account_tokens(state: LoopState, ctx: LoopContext, usage: LLMUsage) -
 
             # v2 P3a：len(视图谓词) 取代 count_recent（= 旧 USER_PROMPT+LLM_RESPONSE 口径，
             # 与 prepare._estimate_tokens 对齐）。
-            view = await ctx.memory.load_view(state.scope, MemoryScope.TASK, ctx.provider_ctx)
+            view = await load_records(ctx.memory, state.scope, MemoryScope.TASK, ctx.provider_ctx)
             agent.loop_guard.context_message_count = sum(
                 1 for r in view
                 if r.kind is MemoryKind.CONVERSATION_TURN and r.role in ("user", "assistant")
             )
         except Exception as exc:
             # best-effort 计数：失败不影响主流程，但记 debug 便于排查（不静默吞）。
-            logger.debug("load_view count for loop_guard failed: %s", exc)
+            logger.debug("load_records count for loop_guard failed: %s", exc)
 
     # 累加 session.token_used（供 token_budget 检查使用）
     state.session.token_used += usage.prompt_tokens + usage.completion_tokens
@@ -754,6 +757,7 @@ async def _execute_tool_calls(
             "name": tc.name,
             "result": result.content,
             "is_error": result.is_error,
+            "memory_id": getattr(result, "memory_id", None),
         })
 
     ctx.run_phase.in_tool_loop = False
@@ -1013,7 +1017,7 @@ async def _cold_park(
     """
     observe_request = None
     if observe_boundary is not None:
-        from ctx_weft.core.loop.steps.observe import make_observe_request, capture_context
+        from ctx_weft.core.loop.steps.observe import capture_context, make_observe_request
         observe_request = make_observe_request(
             state, observe_boundary,
             observe_boundary in {"plain_text", "finish_park", "task_switch"} and has_observe_role(state))

@@ -32,7 +32,6 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from ctx_weft.protocols.context import ContentPart, normalize_content_parts
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Adapter 契约：数据类型（adapter 读 LLMRequest/Message/Tool，产 LLMChunk/ToolCall/Usage）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -113,6 +112,9 @@ class LLMMessage:
     # Request-local continuation data (e.g. signed Anthropic thinking blocks).
     # Not part of front-end events or persistent conversation storage.
     provider_state: dict[str, Any] = field(default_factory=dict)
+    # Debug prompt reconstruction only; adapters never send this field.
+    # Set only when content can be read unchanged from an immutable memory row.
+    memory_id: str | None = None
 
     def __post_init__(self) -> None:
         """把 dict 形态的 content 归一回 ContentPart dataclass（多模态 Phase 3c Task E2）。
@@ -237,6 +239,9 @@ class LLMRequest:
     prompt_token_estimate: int | None = None
     temperature: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)  # trace_id / run_id / 计费标签
+    # Pre-serialized inputs for direct/custom callers. Core steps pass the live
+    # PromptContext separately to the gateway, which serializes it at event emission.
+    prompt_inputs: dict[str, Any] | None = None
 
 
 @dataclass

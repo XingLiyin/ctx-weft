@@ -28,6 +28,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     TextPart,
+    load_records,
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.llm.adapters.mock import MockResponse
@@ -123,7 +124,7 @@ async def test_crash_between_result_event_and_memory_keeps_the_image_retrievable
         await rt.recover_agent(AID)
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
 
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx,
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx,
                                kinds=[MemoryKind.CONVERSATION_TURN])
     results = [r for r in view if r.role == "tool"]
     assert len(results) == 1, [r.id for r in results]

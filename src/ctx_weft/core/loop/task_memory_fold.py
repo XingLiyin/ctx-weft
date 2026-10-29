@@ -25,6 +25,7 @@ from ctx_weft.protocols import (
     MemoryProvider,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.capability import qualify
 
@@ -68,7 +69,7 @@ async def segment_fold(
     的那一段一条都没折——锚点逻辑根本没机会生效。固定段结束时间之后，迟到的折叠自己落回
     原位，调用方不必为此等待。None = 不设限（前台同步段折用，它没有迟到可言）。
     """
-    view = await memory.load_view(address, layer, ctx, kinds=_VIEW_KINDS)
+    view = await load_records(memory, address, layer, ctx, kinds=_VIEW_KINDS)
     events_before = len(view)
     current = {r.id for r in view}
     selected = view
@@ -273,7 +274,7 @@ def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outco
 async def find_finish_target(memory, provider_ctx, scope, task_id, *, legacy_outcome="success"):
     """Read a complete persisted finish pair; partial writes are not ready."""
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
-    turns = await memory.load_view(
+    turns = await load_records(memory,
         MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     own = [r for r in turns if r.metadata.get("origin_task_id") == task_id]
@@ -314,7 +315,7 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
 
     from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope
 
-    turns = await memory.load_view(
+    turns = await load_records(memory,
         MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN],
     )

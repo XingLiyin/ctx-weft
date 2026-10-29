@@ -1,4 +1,4 @@
-"""Collect raw context and compile it through a purpose Jinja template."""
+"""Assemble event-ready prompt inputs, then compile them through purpose templates."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from ctx_weft.core.utils.estimate import estimate_tokens
@@ -144,17 +145,17 @@ class ContextBlock:
     kind: BlockKind
     value: Any
     metadata: dict[str, Any] = field(default_factory=dict)
+    memory_id: str | None = None
 
 
 # ── AssembledPrompt ───────────────────────────────────────────────────────────
 
 
 class AssembledPrompt:
-    """Compiled prompt whose tool surface may follow the live capability cache.
+    """Compiled text/tools plus the same inputs used to produce them.
 
-    Text and the fallback tool list are the exact snapshot compiled by Jinja and
-    PromptBuilder.  Act reuses this object for several LLM turns, though, so a
-    resolver is needed for capabilities pinned after assembly.
+    Runtime pins are resolved by the request builder. tools_fn remains available
+    to custom callers that explicitly supply a resolver.
     """
 
     def __init__(
@@ -172,6 +173,7 @@ class AssembledPrompt:
         self.token_count = token_count
         self.metadata = metadata if metadata is not None else {}
         self.tools_fn = tools_fn
+        self.inputs: PromptContext | None = None
 
     @property
     def tools(self) -> list[LLMTool]:
@@ -243,6 +245,7 @@ class AssemblerDeps:
     # provider_name → CapabilityProvider（持有 live 对象，fetch 时读取 .description；
     # MCP 在 connect 后才有 description，故须 live 读取而非装配时快照）
     capability_provider_index: dict[str, Any] = field(default_factory=dict)
+    template_lookup: Any = None
 
 
 # ── ContextAssembler ───────────────────────────────────────────────────────────
@@ -255,56 +258,105 @@ class ContextAssembler:
     sources: list[ContextSource]
     deps: AssemblerDeps
 
-    async def assemble(self, request: ContextRequest) -> AssembledPrompt:
-        """Collect raw sources, then compile once through purpose Jinja."""
-        from ctx_weft.core.assembler.builder import PromptBuilder
-
-        context = await self.collect(request)
-        prompt = PromptBuilder(request.token_counter).compile(
-            context, tools=self._tools_snapshot(context))
-        self._install_live_tools(prompt, request)
-        return prompt
-
-    async def collect(self, request: ContextRequest) -> PromptContext:
-        """Collect raw source blocks without applying prompt policy or budget."""
+    async def assemble(self, request: ContextRequest) -> PromptContext:
+        """Select sources and freeze their inputs directly in event form."""
         from ctx_weft.core.assembler.context import PromptContext
 
-        all_blocks: list[ContextBlock] = []
+        context = PromptContext.from_request(request)
+        context._record_context = (getattr(self.deps.provider_ctx, "tenant_id", "default"),
+                                   self.deps.provider_ctx.session_id)
+        staged_ids = {event.id for event in request.extra.get("staged_memory", [])}
         async with asyncio.TaskGroup() as tg:
             futs = [tg.create_task(self._collect(s, request)) for s in self.sources]
         for f in futs:
-            all_blocks.extend(f.result())
-        return PromptContext(request=request, blocks=tuple(all_blocks))
+            for block in f.result():
+                context.add(block, staged_ids=staged_ids)
+        return context
+
+    async def compile(self, inputs: PromptContext | dict, *, template=None,
+                      token_counter=estimate_tokens, reuse: bool = False) -> AssembledPrompt:
+        """Compile inputs; opt into reuse only for an unchanged runtime base.
+
+        Reassemble after changing inputs. Historical/request inputs containing
+        continuations or a frozen tool override are always compiled independently.
+        """
+        from ctx_weft.core.assembler.builder import PromptBuilder
+        from ctx_weft.core.assembler.context import PromptContext, record_from_json
+        from ctx_weft.protocols.context import normalize_content_parts
+
+        if isinstance(inputs, dict):
+            inputs = PromptContext.from_payload(inputs)
+        if inputs.scope.get("session_id") not in (None, self.deps.provider_ctx.session_id):
+            raise ValueError("prompt inputs belong to a different session")
+        record_context = (getattr(self.deps.provider_ctx, "tenant_id", "default"),
+                          self.deps.provider_ctx.session_id)
+        if reuse and (inputs.appended_messages or inputs.tools is not None):
+            raise ValueError("only base prompt inputs can reuse compilation")
+        cached = inputs._compiled_base
+        if reuse and cached is not None:
+            owner, memory, cached_template, counter, prompt = cached
+            if (owner == record_context and memory is self.deps.memory
+                    and cached_template is template and counter == token_counter):
+                return prompt
+        requested_template = template
+        if template is None and inputs.template_id:
+            if self.deps.template_lookup is None:
+                raise ValueError(f"template lookup is required for {inputs.template_id!r}")
+            template = await self.deps.template_lookup.get_template(
+                inputs.template_id, None, self.deps.provider_ctx)
+        # Cached reads retain the provider's tenant/session boundary.
+        records = dict(inputs._records) if inputs._record_context == record_context else {}
+        for item in inputs.memory_blocks:
+            if "record" in item:
+                records[item["memory_id"]] = record_from_json(item["record"])
+        missing = [record_id for record_id in inputs.memory_ids() if record_id not in records]
+        if missing:
+            records.update((record.id, record) for record in await self.deps.memory.read_records(
+                missing, self.deps.provider_ctx))
+        missing = set(inputs.memory_ids()) - records.keys()
+        if missing:
+            raise ValueError(f"prompt memory records missing: {sorted(missing)}")
+        inputs._records = records
+        inputs._record_context = record_context
+        # Avoid repeating task input/output content already available by ID.
+        for name in ("user_prompt", "outputs"):
+            value = normalize_content_parts(inputs.task.get(name))
+            if value:
+                match = next((r for r in records.values() if r.id and r.content == value), None)
+                if match is not None:
+                    inputs.task.pop(name)
+                    inputs.task[f"{name}_memory_id"] = match.id
+
+        def count(text):
+            digest = sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+            if digest not in inputs.token_counts:
+                inputs.token_counts[digest] = token_counter(text)
+            return inputs.token_counts[digest]
+
+        prompt = PromptBuilder(count).compile(
+            inputs, tools=self._compile_tools(inputs), records=records, template=template)
+        if inputs.tools is not None:
+            prompt.tools = [LLMTool(**tool) for tool in inputs.tools]
+        for item in inputs.appended_messages:
+            content = records[item["memory_id"]].content if item.get("memory_id") else item["content"]
+            prompt.messages.append(LLMMessage(
+                role=item["role"], content=content, tool_calls=item["tool_calls"],
+                tool_call_id=item["tool_call_id"]))
+        prompt.inputs = inputs
+        if reuse:
+            inputs._compiled_base = (record_context, self.deps.memory, requested_template,
+                                     token_counter, prompt)
+        return prompt
 
     @staticmethod
-    def _tools_snapshot(context: PromptContext) -> list[LLMTool]:
-        """Build tools from the same raw capability blocks seen by Jinja."""
-        if context.request.purpose == "compact":
+    def _compile_tools(context: PromptContext) -> list[LLMTool]:
+        """Compile tools from the same fixed definitions used for prompt prose."""
+        if context.purpose == "compact":
             return []
         from ctx_weft.core.assembler.sources.capability import build_llm_tools
 
-        capabilities = [block.value for block in context.get("capabilities")]
-        return build_llm_tools(capabilities, context.request.purpose,
-                               terminal_only=bool(getattr(context.request.intent, "terminal_only", False)))
-
-    def _install_live_tools(
-        self,
-        prompt: AssembledPrompt,
-        request: ContextRequest,
-    ) -> None:
-        """Keep runtime pins visible during a multi-turn act loop."""
-        cache = self.deps.capability_cache
-        if cache is None or request.purpose == "compact":
-            return
-
-        from ctx_weft.core.assembler.sources.capability import build_llm_tools
-
-        agent_id = getattr(request.agent, "id", "") or request.scope.agent_id
-        task_id = getattr(request.task, "id", "") or request.scope.task_id
-        purpose = request.purpose
-        prompt.tools_fn = lambda: build_llm_tools(
-            cache.available(agent_id, task_id), purpose,
-            terminal_only=bool(getattr(request.intent, "terminal_only", False)))
+        return build_llm_tools([item["definition"] for item in context.capabilities], context.purpose,
+                               terminal_only=context.terminal_only)
 
     async def _collect(self, source: ContextSource, request: ContextRequest) -> list[ContextBlock]:
         blocks: list[ContextBlock] = []

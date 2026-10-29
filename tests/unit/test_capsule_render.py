@@ -16,18 +16,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
-from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.llm_gateway import drop_orphan_tool_results
 from ctx_weft.protocols import (
     LLMMessage,
+    MemoryAddress,
     MemoryEvent,
     MemoryEventType,
-    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from tests.assembler_testkit import history_messages
+from tests.assembler_testkit import history_messages, recalled_blocks
 
 pytestmark = pytest.mark.asyncio
 
@@ -67,7 +66,7 @@ async def _collect(mem, scope) -> list:
         template=None,
         bound_capabilities=[],
     )
-    return [b async for b in AgentRecallSource().fetch(req, deps)]
+    return await recalled_blocks(req, deps)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -14,8 +14,7 @@ from ctx_weft.core.capabilities.control_tools import (
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop import task_memory_fold as fp
 from ctx_weft.core.loop.driver import StepDriver
-from ctx_weft.protocols import MemoryEventType
-
+from ctx_weft.protocols import MemoryEventType, load_records
 
 # ── helpers shared by new ReAct-based tests ───────────────────────────────────
 
@@ -51,8 +50,8 @@ def _neutralize_refold_guard(monkeypatch, ctx) -> None:
     """
     from datetime import datetime, timezone
 
-    from ctx_weft.protocols import MemoryEventType as MT
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryRecord, MemoryScope
+    from ctx_weft.protocols import MemoryEventType as MT
 
     async def fake_load_view(address, scope, pctx, kinds=None):
         return [MemoryRecord(
@@ -62,7 +61,10 @@ def _neutralize_refold_guard(monkeypatch, ctx) -> None:
             address=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         )]
 
-    monkeypatch.setattr(ctx.memory, "load_view", fake_load_view)
+    async def fake_ids(*args, **kwargs):
+        return ["guard"]
+
+    monkeypatch.setattr(ctx.memory, "load_view_ids", fake_ids)
     async def fake_read_records(ids, pctx):
         return await fake_load_view(None, None, pctx) if "guard" in ids else []
     monkeypatch.setattr(ctx.memory, "read_records", fake_read_records)
@@ -88,14 +90,14 @@ class _FakeGateway:
         )
 
 
-async def _fake_stream_report_observation(ctx, state, request):
+async def _fake_stream_report_observation(ctx, state, request, **kwargs):
     """Fake LLM that calls report_observation once —— **只摘要那一档**的 terminal tool。"""
     yield _make_token_chunk("thinking...")
     yield _make_tool_call_chunk(REPORT_OBSERVATION_NAME)
     yield _make_usage_chunk()
 
 
-async def _fake_stream_report_observation(ctx, state, request):
+async def _fake_stream_report_observation(ctx, state, request, **kwargs):
     """判定那一档的 terminal tool（2026-09-28 起两档是两个工具）。
 
     名字必须对得上 `run_observe_react` 的 `terminal_tool_name`，否则那个循环不会终止——
@@ -149,7 +151,7 @@ async def test_serialized_per_task(monkeypatch, fake_state_ctx):
 
     order = []
 
-    async def slow_stream(c, s, req):
+    async def slow_stream(c, s, req, **kwargs):
         order.append("start")
         await asyncio.sleep(0.01)
         yield _make_tool_call_chunk(REPORT_OBSERVATION_NAME)
@@ -178,7 +180,7 @@ async def test_await_pending_waits_for_latest_when_two_launched(monkeypatch, fak
     call_count = 0
     second_done = False
 
-    async def vary_speed(c, s, req):
+    async def vary_speed(c, s, req, **kwargs):
         nonlocal call_count, second_done
         call_count += 1
         current = call_count
@@ -214,7 +216,7 @@ async def test_failure_swallowed(monkeypatch, fake_state_ctx):
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    async def boom(c, s, req):
+    async def boom(c, s, req, **kwargs):
         raise RuntimeError("llm down")
         yield  # make it an async generator
 
@@ -354,7 +356,7 @@ async def test_plain_text_reply_falls_back_to_last_text(monkeypatch, fake_state_
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=2)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    async def _text_only(c, s, req):
+    async def _text_only(c, s, req, **kwargs):
         yield _make_token_chunk("纯文本复述")
         yield _make_usage_chunk()
 
@@ -377,7 +379,7 @@ async def test_no_usable_report_keeps_raw(monkeypatch, fake_state_ctx):
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=2)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    async def _empty(c, s, req):
+    async def _empty(c, s, req, **kwargs):
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
@@ -401,7 +403,7 @@ async def test_no_usable_report_close_does_not_fill_slot(monkeypatch, fake_state
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=2)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    async def _empty(c, s, req):
+    async def _empty(c, s, req, **kwargs):
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
@@ -438,7 +440,7 @@ async def test_no_usable_report_close_preserves_existing_finish_pair(monkeypatch
         metadata={"origin_task_id": state.task.id, "tool_call_id": "tc9"},
     ), ctx.provider_ctx)
 
-    async def _empty(c, s, req):
+    async def _empty(c, s, req, **kwargs):
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)
@@ -572,7 +574,7 @@ async def test_dispatch_recap_completes_benignly_after_cancel(monkeypatch, fake_
     state.agent.loop_config = SimpleNamespace(compact_keep_last=2, max_turns_per_observe=3)
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
 
-    async def slow_stream(c, s, req):
+    async def slow_stream(c, s, req, **kwargs):
         await asyncio.sleep(0.02)  # 给取消留出交叉窗口
         yield _make_tool_call_chunk(REPORT_OBSERVATION_NAME)
         yield _make_usage_chunk()
@@ -679,7 +681,7 @@ async def test_replace_finish_report_declares_surviving_placeholder_refs():
     )
 
     agent_addr = MemoryAddress(session_id="s1", agent_id="a1")
-    view = await mem.load_view(agent_addr, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    view = await load_records(mem, agent_addr, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
     recap_rec = next(r for r in view if r.role == "assistant" and "did the thing" in r.content)
     assert ref in collect_blob_refs(recap_rec), (
         "折叠重写的 finish 对没有声明幸存占位的 ref，GC 会在宽限期后误删"

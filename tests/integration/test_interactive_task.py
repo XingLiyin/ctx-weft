@@ -36,6 +36,7 @@ from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 from tests.hitl_env import make_hitl
 from tests.integration.test_minimal_loop import (
     InlineAgentTemplateProvider,
@@ -108,12 +109,12 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
         tools=[], token_count=1,
     )
     state = LoopState(
-        run_id="r1", session=session, task=task, agent=agent, scope=scope, assembled_prompt=prompt,
+        run_id="r1", session=session, task=task, agent=agent, scope=scope, prompt_inputs=scripted_inputs(prompt),
         resolved_model=SimpleNamespace(model="mock", account=""),
         extra={"template": _template(observe_role=observe_role)},
     )
     ctx = LoopContext(
-        assembler=None, llm=llm, memory=mem, event_bus=bus,
+        assembler=SimpleNamespace(compile=compiled_test_inputs), llm=llm, memory=mem, event_bus=bus,
         provider_ctx=ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1"),
         hitl=hitl_service,
         capability_gateway=gateway,

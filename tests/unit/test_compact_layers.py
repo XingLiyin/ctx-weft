@@ -10,14 +10,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, CompactStep
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.models.task import Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
-from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
+from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 pytestmark = pytest.mark.asyncio
 T = MemoryEventType
@@ -25,8 +26,11 @@ _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _FakeAssembler:
+    async def compile(self, inputs, **kwargs):
+        return await compiled_test_inputs(inputs, **kwargs)
+
     async def assemble(self, request):
-        return SimpleNamespace(messages=[], system="", tools=[], token_count=0)
+        return scripted_inputs(SimpleNamespace(messages=[], system="", tools=[], token_count=0), purpose=request.purpose)
 
 
 class _FakeLLM:

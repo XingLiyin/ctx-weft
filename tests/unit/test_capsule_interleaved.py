@@ -12,16 +12,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from ctx_weft.core.utils.estimate import estimate_tokens
-
 import pytest
 
-from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair, _dispatch_ack
+from ctx_weft.core.loop.steps.finalize import _dispatch_ack, _synthesize_dispatch_pair
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
+from ctx_weft.core.utils.estimate import estimate_tokens
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from tests.assembler_testkit import history_messages
+from tests.assembler_testkit import history_messages, recalled_blocks
 
 pytestmark = pytest.mark.asyncio
 
@@ -83,7 +81,6 @@ async def test_synthesize_writes_only_finish_pair():
     await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, tsc, "段②摘要", 4, role="assistant"), _ctx())
 
     task = _task(prompt="UP1原文")
-    mem_content = "最终答复\n\nProcess Report: 过程报告"
     await _synthesize_dispatch_pair(mem, asc, task, "最终答复", "Process Report: 过程报告", "success", _ctx())
 
     caps = await _caps(mem, asc)
@@ -319,7 +316,6 @@ async def test_embedded_process_report_in_outputs():
 
     # _build_memory_content 会拼成：
     # "I wrote a Process Report: draft\\n\\nProcess Report: real report"
-    mem_content = "I wrote a Process Report: draft\n\nProcess Report: real report"
 
     await _synthesize_dispatch_pair(mem, asc, task, "I wrote a Process Report: draft", "Process Report: real report", "success", _ctx())
 
@@ -411,7 +407,7 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     # Project messages via real AgentRecallSource + PromptBuilder history mapping.
     deps = SimpleNamespace(memory=mem, provider_ctx=pctx)
     req = SimpleNamespace(scope=asc, token_counter=estimate_tokens)
-    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = await recalled_blocks(req, deps)
     messages = history_messages(blocks, task_id="P")
 
     # ── Helper: every tool message must immediately follow an assistant with matching tool_call ──

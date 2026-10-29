@@ -87,7 +87,10 @@ def test_missing_config_field_falls_back_to_disabled():
 
 
 class _FakeMemory:
-    async def load_view(self, *a, **kw):
+    async def read_records(self, ids, ctx):
+        return []
+
+    async def load_view_ids(self, *a, **kw):
         return []
 
 

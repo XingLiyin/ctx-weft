@@ -1,5 +1,8 @@
+import json
+
 from ctx_weft.core.utils.content import content_to_text, redact_content_for_event
 from ctx_weft.protocols import ImagePart, LLMMessage, TextPart
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 _LONG_B64 = "QUJDRA==" * 500          # 模拟真实图片的体量
 
@@ -124,8 +127,11 @@ class _FakeLLM:
 
 def _make_ctx(event_bus, *, llm=None):
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return await compiled_test_inputs(inputs, **kwargs)
+
         async def assemble(self, req):
-            return SimpleNamespace(system="SYS", messages=[], tools=[])
+            return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[]), purpose=req.purpose)
 
     return LoopContext(
         assembler=_FakeAssembler(),
@@ -145,10 +151,10 @@ async def test_act_prompt_sent_event_has_no_base64():
     prompt = SimpleNamespace(system="SYS", tools=[])
     current_messages = [LLMMessage(role="user", content=[TextPart(text="看图"), _img()])]
 
-    await _run_llm_turn(state, ctx, prompt, current_messages, 1)
+    await _run_llm_turn(state, ctx, scripted_inputs(prompt), current_messages, 1)
 
     sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT][0]
-    blob = sent.payload["messages"][0]["content"]
+    blob = json.dumps(sent.payload, ensure_ascii=False)
     assert _LONG_B64 not in blob
     assert "看图" in blob and "image/png" in blob
 
@@ -160,15 +166,10 @@ async def test_observe_prompt_sent_event_has_no_base64():
     state = _make_state(origin=EventOrigin.LOOP_OBSERVE)
     ctx = _make_ctx(bus, llm=_FakeLLM(chunks=[_make_usage_chunk()]))
 
-    await ObserveStep()._run_react(
-        state, ctx, system="SYS",
-        messages=[LLMMessage(role="user", content=[TextPart(text="看图"), _img()])],
-        tools=[], max_rounds=1,
-        terminal_tool_name="report_observation",
-    )
+    await ObserveStep()._run_react(state, ctx, inputs=scripted_inputs(system="SYS", messages=[LLMMessage(role="user", content=[TextPart(text="看图"), _img()])], tools=[], purpose="observe"), max_rounds=1, terminal_tool_name="report_observation")
 
     sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT][0]
-    blob = sent.payload["messages"][0]["content"]
+    blob = json.dumps(sent.payload, ensure_ascii=False)
     assert _LONG_B64 not in blob
     assert "看图" in blob and "image/png" in blob
 
@@ -178,12 +179,15 @@ async def test_recognize_intent_prompt_event_keeps_text_not_empty():
     发射、脱敏走 redact_content_for_event：多模态消息的文本不该被丢空。"""
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return await compiled_test_inputs(inputs, **kwargs)
+
         async def assemble(self, request):
-            return SimpleNamespace(
+            return scripted_inputs(SimpleNamespace(
                 system="SYS",
                 messages=[LLMMessage(role="user", content=[TextPart(text="看图"), _img()])],
                 tools=[],
-            )
+            ), purpose=request.purpose)
 
     class _FakeLLM:
         tokenizer = HeuristicTokenizer()
@@ -222,6 +226,6 @@ async def test_recognize_intent_prompt_event_keeps_text_not_empty():
     assert [e for e in bus.events if e.type == "RecognizeIntentLLMPrompt"] == []
     prompt_ev = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT][0]
     assert prompt_ev.origin == EventOrigin.LOOP_RECOGNIZE_INTENT
-    content = prompt_ev.payload["messages"][0]["content"]
+    content = json.dumps(prompt_ev.payload["references"][0]["content"], ensure_ascii=False)
     assert content != ""
     assert "看图" in content

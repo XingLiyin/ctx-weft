@@ -25,7 +25,7 @@ from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.loop.steps.reconcile import ReconcileStep
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.ids import mint_call_id
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.capability import (
     AuthorizationDecision,
     CapabilityEvent,
@@ -144,7 +144,7 @@ async def _mk_fixture(policy="reviewed", *, invoked=True, finished=False, tool=N
 
 
 async def _tool_records(ctx, state):
-    recs = await ctx.memory.load_view(state.scope, MemoryScope.TASK, ctx.provider_ctx)
+    recs = await load_records(ctx.memory, state.scope, MemoryScope.TASK, ctx.provider_ctx)
     return [r for r in recs if r.role == "tool"]
 
 

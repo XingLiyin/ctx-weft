@@ -36,6 +36,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     TextPart,
+    load_records,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
@@ -100,7 +101,7 @@ async def _seed(mem, contents, *, same_ts=False, role="user"):
 
 
 async def _view(mem):
-    return await mem.load_view(_ADDR, MemoryScope.TASK, _pctx())
+    return await load_records(mem, _ADDR, MemoryScope.TASK, _pctx())
 
 
 def _make_record(*, content, blob_refs=None):

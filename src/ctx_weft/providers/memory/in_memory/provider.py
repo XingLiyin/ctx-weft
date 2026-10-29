@@ -6,23 +6,24 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
+from ctx_weft.core.utils.clock import as_utc
 from ctx_weft.protocols import (
     EVENT_LAYER,
     MemoryAddress,
     MemoryEvent,
     MemoryEventType,
     MemoryKind,
-    MemoryScope,
     MemoryProvider,
     MemoryProviderInfo,
     MemoryRecord,
-    MemoryAddress,
+    MemoryScope,
     ProviderContext,
     Subscription,
 )
+from ctx_weft.protocols._legacy_dispatch import visible_dispatch_ids
 from ctx_weft.protocols.memory_compat import (
     kind_of,
     layer_of,
@@ -32,7 +33,6 @@ from ctx_weft.protocols.memory_compat import (
     validate_half_address,
 )
 
-
 _DEFAULT_TENANT = "default"
 
 
@@ -40,7 +40,7 @@ def normalize_tenant(tenant_id: str | None) -> str:
     """租户归一（协议「多租户隔离契约」第 3 条）：None / 空串 → ``"default"``。
 
     写读两侧走同一个函数是这条隔离的**安全前提**：串接不一致（一处 ``"default"``、
-    一处 ``""``、一处 None）时若两侧各自比较原值，load_view 会静默返空——表现是
+    一处 ``""``、一处 None）时若两侧各自比较原值，load_view_ids 会静默返空——表现是
     「会话突然失忆」，比泄漏本身更难诊断。归一到同一规范值后，严格比较只在两侧
     都给出明确非默认值时才生效，既有数据与既有调用点（`ProviderContext.tenant_id`
     默认值就是 ``"default"``）因此逐字节不受影响。
@@ -71,12 +71,13 @@ class InMemoryMemoryProvider(MemoryProvider):
     name = "in_memory"
 
     async def read_records(self, record_ids, ctx):
-        wanted = set(record_ids)
+        positions = {record_id: index for index, record_id in enumerate(dict.fromkeys(record_ids))}
+        wanted = set(positions)
         records = [self._to_record(s) for s in self._events
                    if s.id in wanted and s.tenant == normalize_tenant(ctx.tenant_id)
                    and s.event.address.session_id == ctx.session_id]
-        records.sort(key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
-        return normalize_view(records)
+        records.sort(key=lambda r: (as_utc(r.timestamp), r.metadata.get("seq_no", 0), positions[r.id]))
+        return normalize_view(records, include_unpaired_dispatch=True)
 
     def __init__(self) -> None:
         self._events: list[_StoredEvent] = []
@@ -170,17 +171,18 @@ class InMemoryMemoryProvider(MemoryProvider):
                 new_ids.append(self._ingest_locked(ev, ctx, event_id))
         return new_ids
 
-    # ── load_view（v2 §4：工作记忆回放）─────────────────────────────────────────
+    # ── load_view_ids（v2 §4：工作记忆回放）─────────────────────────────────────────
 
     _DEFAULT_KINDS = (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY)
 
-    async def load_view(
+    async def load_view_ids(
         self,
         address: MemoryAddress,
         scope: MemoryScope,
         ctx: ProviderContext,
         kinds: list[MemoryKind] | None = None,
-    ) -> list[MemoryRecord]:
+        *, end_at: datetime | None = None,
+    ) -> list[str]:
         validate_half_address(address, scope)
         wanted = set(kinds) if kinds is not None else set(self._DEFAULT_KINDS)
         tenant = normalize_tenant(ctx.tenant_id)
@@ -193,8 +195,12 @@ class InMemoryMemoryProvider(MemoryProvider):
             and s.kind in wanted
             and self._address_match(s.event.address, address, scope)
         ]
-        matching.sort(key=lambda s: (s.event.timestamp, s.seq_no))
-        return normalize_view([self._to_record(s) for s in matching])
+        matching.sort(key=lambda s: (as_utc(s.event.timestamp), s.seq_no))
+        visible = visible_dispatch_ids(
+            (s.id, s.event.type, (s.event.metadata or {}).get("tool_call_id")) for s in matching)
+        end = as_utc(end_at) if end_at is not None else None
+        return [s.id for s in matching if s.id in visible
+                and (end is None or as_utc(s.event.timestamp) <= end)]
 
 
     @staticmethod
@@ -224,7 +230,7 @@ class InMemoryMemoryProvider(MemoryProvider):
 
     def _to_legacy_record(self, stored: _StoredEvent) -> MemoryRecord:
         """recall wrapper 出口：v2 行回填 legacy 等价 type——wrapper 的契约就是 legacy 视界
-        （旧断言/旧渲染按 record.type 消费）；load_view 出口不回填（kind 优先词汇）。"""
+        （旧断言/旧渲染按 record.type 消费）；load_view_ids 出口不回填（kind 优先词汇）。"""
         rec = self._to_record(stored)
         if rec.type is None:
             rec.type = legacy_type_of(rec.kind, rec.scope, rec.role)
@@ -352,7 +358,7 @@ class InMemoryMemoryProvider(MemoryProvider):
     # apply_compact 已删：策展政策（keep_last/protect/段界/锚点）上移框架侧 segment_fold，
     # provider 只保留原子 fold。下方 recall_recent / recall_recent_by_agent / count_recent /
     # supersede 为**非协议**实例方法，仅供存量测试兼容（P4a 范围决策）；新代码一律
-    # load_view / fold。日落路径：随存量测试逐文件迁移后删除。
+    # load_view_ids / fold。日落路径：随存量测试逐文件迁移后删除。
 
 
     async def supersede(

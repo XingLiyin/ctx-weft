@@ -20,9 +20,10 @@ from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 pytestmark = pytest.mark.asyncio
 
@@ -58,8 +59,11 @@ class _FakeTM:
 class _FakeAssembler:
     """summarize_for_compact 需要 ctx.assembler.assemble；返回空 prompt（内容由 _FakeLLM 摘要）。"""
 
+    async def compile(self, inputs, **kwargs):
+        return await compiled_test_inputs(inputs, **kwargs)
+
     async def assemble(self, request) -> AssembledPrompt:
-        return AssembledPrompt(system="", messages=[], tools=[], token_count=0)
+        return scripted_inputs(AssembledPrompt(system="", messages=[], tools=[], token_count=0), purpose=request.purpose)
 
 
 class _FakeLLM:
@@ -491,7 +495,9 @@ def test_original_section_splits_on_legacy_and_current_delims() -> None:
     """坍缩分隔标记改成英文后，存量库里带旧中文标记的 USER_PROMPT 仍须能切出「原始消息」节
     ——切不出就会把「原文 + 旧摘要」整体当原文，再坍缩时无界增长。"""
     from ctx_weft.core.loop.steps.compact import (
-        COLLAPSE_DELIM, LEGACY_COLLAPSE_DELIMS, _original_section,
+        COLLAPSE_DELIM,
+        LEGACY_COLLAPSE_DELIMS,
+        _original_section,
     )
     for delim in (COLLAPSE_DELIM, *LEGACY_COLLAPSE_DELIMS):
         assert _original_section(f"原始消息{delim}执行摘要正文") == "原始消息", \

@@ -13,6 +13,7 @@ v2 P2a（2026-07-27）：自 core/loop/steps/legacy_dispatch.py 移入 protocols
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -25,7 +26,22 @@ if TYPE_CHECKING:
 _DELEGATE_DEFAULT = qualify("control:delegate_task")
 
 
-def normalize_legacy_dispatch(records: "list[MemoryRecord]") -> "list[MemoryRecord]":
+def visible_dispatch_ids(entries: Iterable[tuple[str, str | None, object]]) -> set[str]:
+    """Select IDs using only legacy type and tool-call identity, never content."""
+    rows = list(entries)
+    result_tcids = {
+        tcid for _, type_, tcid in rows
+        if type_ == MemoryEventType.TASK_DISPATCH_RESULT
+    }
+    return {
+        record_id for record_id, type_, tcid in rows
+        if type_ != MemoryEventType.TASK_DISPATCH or tcid in result_tcids
+    }
+
+
+def normalize_legacy_dispatch(
+    records: "list[MemoryRecord]", *, include_unpaired: bool = False,
+) -> "list[MemoryRecord]":
     """把 records 里的 legacy TASK_DISPATCH/RESULT 就地归一化成 AGENT_CONVERSATION_TURN。
 
     - TASK_DISPATCH → assistant 回合（tool_calls 承载 delegate 调用），origin_task_id 取写入
@@ -35,16 +51,13 @@ def normalize_legacy_dispatch(records: "list[MemoryRecord]") -> "list[MemoryReco
       与 delegate assistant 回合靠 tool_call_id 配对。
     - 非 legacy 记录原样透传，顺序不变（调用方依赖 recall 的 (timestamp) 序）。
     """
-    result_tcids = {
-        r.metadata.get("tool_call_id")
-        for r in records
-        if r.type == MemoryEventType.TASK_DISPATCH_RESULT
-    }
+    visible = visible_dispatch_ids(
+        (r.id, r.type, r.metadata.get("tool_call_id")) for r in records)
     out: list[MemoryRecord] = []
     for r in records:
         if r.type == MemoryEventType.TASK_DISPATCH:
             tcid = r.metadata.get("tool_call_id")
-            if tcid not in result_tcids:
+            if not include_unpaired and r.id not in visible:
                 continue  # 孤立 legacy dispatch 隐去（同旧渲染行为）
             out.append(_as_delegate_turn(r, tcid))
         elif r.type == MemoryEventType.TASK_DISPATCH_RESULT:

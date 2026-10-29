@@ -16,6 +16,7 @@ from ctx_weft.protocols import (
     MemoryEventType,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.memory_compat import MemoryKind
 
@@ -49,13 +50,13 @@ async def test_load_view_ascending_and_default_kinds() -> None:
     await m.ingest(_legacy(MemoryEventType.TOOL_INVOCATION, "audit", 1), _ctx())
     await m.ingest(_legacy(MemoryEventType.LLM_RESPONSE, "resp", 2, role="assistant"), _ctx())
 
-    view = await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
+    view = await load_records(m, MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
                              MemoryScope.TASK, _ctx())
     # 默认 kinds = CONVERSATION_TURN + SUMMARY：audit 不在；升序（旧→新）
     assert [r.content for r in view] == ["up", "resp"]
     assert all(r.kind is MemoryKind.CONVERSATION_TURN for r in view)
 
-    audit = await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
+    audit = await load_records(m, MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
                               MemoryScope.TASK, _ctx(), kinds=[MemoryKind.TOOL_AUDIT])
     assert [r.content for r in audit] == ["audit"]
 
@@ -65,7 +66,7 @@ async def test_load_view_cross_task_by_agent() -> None:
     await m.ingest(_legacy(MemoryEventType.USER_PROMPT, "one", 0, task_id="tA", role="user"), _ctx())
     await m.ingest(_legacy(MemoryEventType.USER_PROMPT, "two", 1, task_id="tB", role="user"), _ctx())
 
-    view = await m.load_view(MemoryAddress(session_id="s1", agent_id="a1"),
+    view = await load_records(m, MemoryAddress(session_id="s1", agent_id="a1"),
                              MemoryScope.TASK, _ctx())
     assert [r.content for r in view] == ["one", "two"]
     assert [r.address.task_id for r in view] == ["tA", "tB"]  # 来源回显
@@ -74,12 +75,12 @@ async def test_load_view_cross_task_by_agent() -> None:
 async def test_load_view_half_address_validation() -> None:
     m = InMemoryMemoryProvider()
     with pytest.raises(ValueError):
-        await m.load_view(MemoryAddress(session_id="s1"), MemoryScope.TASK, _ctx())
+        await load_records(m, MemoryAddress(session_id="s1"), MemoryScope.TASK, _ctx())
     with pytest.raises(ValueError):
-        await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
+        await load_records(m, MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
                           MemoryScope.AGENT, _ctx())
     with pytest.raises(ValueError):
-        await m.load_view(MemoryAddress(session_id="s1", agent_id="a1"),
+        await load_records(m, MemoryAddress(session_id="s1", agent_id="a1"),
                           MemoryScope.SESSION, _ctx())
 
 
@@ -89,7 +90,7 @@ async def test_load_view_sees_both_vocabularies() -> None:
     await m.ingest(_v2(MemoryKind.CONVERSATION_TURN, MemoryScope.TASK, "new-vocab", 1,
                        role="assistant"), _ctx())
 
-    view = await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
+    view = await load_records(m, MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
                              MemoryScope.TASK, _ctx())
     assert [r.content for r in view] == ["old-vocab", "new-vocab"]
     assert all(r.kind is MemoryKind.CONVERSATION_TURN for r in view)  # kind 统一重打
@@ -104,7 +105,7 @@ async def test_load_view_excludes_superseded_and_dead_types() -> None:
     ), _ctx())
     await m.supersede([rid], _ctx())
 
-    view = await m.load_view(MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
+    view = await load_records(m, MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
                              MemoryScope.TASK, _ctx())
     assert view == []
 

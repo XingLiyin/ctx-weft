@@ -1,6 +1,6 @@
 """SqlMemoryProvider：SQLAlchemy async 的 MemoryProvider 实现（默认 SQLite，postgres 同源）。
 
-协议面 8 方法齐备：写 ingest / fold、读 load_view / recall_topic / recall_semantic、
+协议面 9 方法齐备：写 ingest / fold、读 load_view_ids / read_records / recall_topic / recall_semantic、
 订阅 subscribe_topic / list_subscriptions、能力 describe。
 
 与 `providers/memory/in_memory/provider.py` 是同一套契约的两个实现，
@@ -18,7 +18,8 @@
 - **多模态无损存取**：``content_format`` 判别列（见 models.py）；``list[ContentPart]``
   经 ``content_to_jsonable`` 落 JSON、``content_from_jsonable`` 还原，**持久化层不拍扁**。
 - **词汇双读**：新行 ``type`` 列存 kind 字符串，存量行存 legacy 类型字符串；
-  load_view 用 ``kind_expansion`` 展开 ``type IN (...)``，返回前经 ``normalize_view``。
+  load_view_ids 用 ``kind_expansion`` 展开 ``type IN (...)`` 并选择配对可见的 ID；
+  read_records 读取原内容并经 ``normalize_view`` 统一表示。
   零数据迁移（v2 设计 §6）。
 - **fold 原子**：遗忘 + 补偿在单个事务内（SQLite / postgres 天然满足）。
 
@@ -33,12 +34,14 @@ import json
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ctx_weft.core.utils.clock import as_utc
 from ctx_weft.core.utils.content import (
     collect_blob_refs,
     content_from_jsonable,
@@ -58,6 +61,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     Subscription,
 )
+from ctx_weft.protocols._legacy_dispatch import visible_dispatch_ids
 from ctx_weft.protocols.memory_compat import (
     MemoryKind,
     kind_expansion,
@@ -78,6 +82,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TENANT = "default"
 _DEFAULT_KINDS = (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY)
+_READ_BATCH_SIZE = 500
 
 # content_format 判别列的取值（models.py 有完整说明）
 _FMT_TEXT = "text"
@@ -391,24 +396,28 @@ class SqlMemoryProvider(MemoryProvider):
     async def read_records(self, record_ids, ctx):
         if not record_ids:
             return []
+        ids = list(dict.fromkeys(record_ids))
+        positions = {record_id: index for index, record_id in enumerate(ids)}
+        rows = []
+        declared = {}
         async with self._factory() as db:
-            result = await db.execute(select(MemoryEventModel).where(
-                MemoryEventModel.id.in_(record_ids),
-                _tenant_expr(MemoryEventModel.tenant) == normalize_tenant(ctx.tenant_id),
-                MemoryEventModel.session_id == ctx.session_id,
-            ).order_by(MemoryEventModel.timestamp.asc(), MemoryEventModel.seq_no.asc()))
-            rows = list(result.scalars().all())
-            declared = await _declared_refs(db, rows)
-            return normalize_view([_row_to_record(r, declared.get(r.id)) for r in rows])
+            # Keep bind counts bounded on SQLite. Normalize only after collecting
+            # every chunk: a legacy dispatch and its result may span chunks.
+            for offset in range(0, len(ids), _READ_BATCH_SIZE):
+                result = await db.execute(select(MemoryEventModel).where(
+                    MemoryEventModel.id.in_(ids[offset:offset + _READ_BATCH_SIZE]),
+                    _tenant_expr(MemoryEventModel.tenant) == normalize_tenant(ctx.tenant_id),
+                    MemoryEventModel.session_id == ctx.session_id,
+                ))
+                chunk = list(result.scalars().all())
+                rows.extend(chunk)
+                declared.update(await _declared_refs(db, chunk))
+        rows.sort(key=lambda row: (as_utc(row.timestamp), row.seq_no, positions[row.id]))
+        return normalize_view([_row_to_record(r, declared.get(r.id)) for r in rows],
+                              include_unpaired_dispatch=True)
 
-    async def load_view(
-        self,
-        address: MemoryAddress,
-        scope: MemoryScope,
-        ctx: ProviderContext,
-        kinds: list[MemoryKind] | None = None,
-    ) -> list[MemoryRecord]:
-        """全量幸存视图，``(timestamp, seq_no)`` 升序，半址过滤，租户隔离。"""
+    @staticmethod
+    def _view_conditions(address, scope, ctx, kinds):
         validate_half_address(address, scope)
         wanted = list(kinds) if kinds is not None else list(_DEFAULT_KINDS)
         type_strs: set[str] = set()
@@ -433,16 +442,37 @@ class SqlMemoryProvider(MemoryProvider):
         elif scope is MemoryScope.AGENT:
             conds.append(MemoryEventModel.agent_id == address.agent_id)
 
+        return conds
+
+    async def load_view_ids(
+        self, address: MemoryAddress, scope: MemoryScope, ctx: ProviderContext,
+        kinds: list[MemoryKind] | None = None, *, end_at: datetime | None = None,
+    ) -> list[str]:
+        conds = self._view_conditions(address, scope, ctx, kinds)
+        legacy = (MemoryEventType.TASK_DISPATCH.value, MemoryEventType.TASK_DISPATCH_RESULT.value)
         async with self._factory() as db:
-            result = await db.execute(
-                select(MemoryEventModel)
-                .where(*conds)
-                .order_by(MemoryEventModel.timestamp.asc(), MemoryEventModel.seq_no.asc())
-            )
-            rows = list(result.scalars().all())
-            declared = await _declared_refs(db, rows)
-            return normalize_view(
-                [_row_to_record(r, declared.get(r.id)) for r in rows])
+            result = await db.execute(select(
+                MemoryEventModel.id,
+                MemoryEventModel.type,
+                MemoryEventModel.timestamp,
+                case((MemoryEventModel.type.in_(legacy), MemoryEventModel.metadata_json),
+                     else_=None).label("pair_metadata"),
+            ).where(*conds).order_by(
+                MemoryEventModel.timestamp.asc(), MemoryEventModel.seq_no.asc()))
+            rows = result.all()
+        entries = []
+        for row in rows:
+            metadata = {}
+            if row.pair_metadata:
+                try:
+                    metadata = json.loads(row.pair_metadata)
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            entries.append((row.id, row.type, metadata.get("tool_call_id")))
+        visible = visible_dispatch_ids(entries)
+        end = as_utc(end_at) if end_at is not None else None
+        return [row.id for row in rows if row.id in visible
+                and (end is None or as_utc(row.timestamp) <= end)]
 
     async def recall_topic(
         self,

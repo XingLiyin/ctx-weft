@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
@@ -57,7 +57,7 @@ async def test_non_close_completed_recovers_real_fold(tmp_path, snapshot, cut):
             rt, root = await recover_and_drain(store, memory, mode, snapshot)
             task, = await rt.list_tasks("crash-session")
             assert task.data.status == "AWAITING_HUMAN"
-            summaries = await memory.load_view(
+            summaries = await load_records(memory,
                 MemoryAddress(session_id="crash-session", agent_id=root, task_id=task.data.task_id),
                 MemoryScope.TASK, ProviderContext(session_id="crash-session", tenant_id="default"),
                 kinds=[MemoryKind.SUMMARY])
@@ -105,7 +105,7 @@ async def test_failed_hitl_commit_keeps_completed_until_cold_recovery(tmp_path, 
             assert (positions[EventType.OBSERVE_COMPLETED] < positions[EventType.TASK_FINALIZED]
                     < positions[EventType.HITL_RESOLVED] < positions[EventType.TASK_FINISHED]
                     < positions[EventType.OBSERVE_APPLIED])
-            publications = await memory.load_view(
+            publications = await load_records(memory,
                 MemoryAddress(session_id="crash-session"), MemoryScope.SESSION,
                 ProviderContext(session_id="crash-session", tenant_id="default"),
                 kinds=[MemoryKind.PUBLICATION])

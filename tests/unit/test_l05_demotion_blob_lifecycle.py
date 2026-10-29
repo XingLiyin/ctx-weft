@@ -36,6 +36,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     TextPart,
+    load_records,
 )
 from ctx_weft.providers.blob.fs import FsBlobStore
 from ctx_weft.providers.memory.sql import open_sqlite_memory
@@ -104,7 +105,7 @@ async def test_demotion_leaves_placeholder_that_still_carries_the_ref() -> None:
                                         scope=MemoryScope.TASK, kinds=_KINDS)
             assert n == 1
 
-            recs = await mem.load_view(addr, MemoryScope.TASK, ctx, kinds=_KINDS)
+            recs = await load_records(mem, addr, MemoryScope.TASK, ctx, kinds=_KINDS)
             texts = [p.text for r in recs for p in (r.content or []) if hasattr(p, "text")]
             assert any(ref in t for t in texts), "占位里必须留着 ref，否则 get_image 无从定位"
 

@@ -11,18 +11,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from ctx_weft.core.utils.estimate import estimate_tokens
-
 import pytest
 
-from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
-from ctx_weft.protocols import (
-    MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext,
-)
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.core.utils.estimate import estimate_tokens
+from ctx_weft.protocols import (
+    MemoryAddress,
+    MemoryEvent,
+    MemoryEventType,
+    ProviderContext,
+)
 from ctx_weft.protocols.memory_compat import legacy_type_of
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import recalled_blocks
 
 T = MemoryEventType
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
@@ -63,7 +65,7 @@ async def test_capsule_renders_body_and_finish_pair():
 
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=scope, token_counter=estimate_tokens)
-    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = await recalled_blocks(req, deps)
     blocks.sort(key=lambda b: (b.value.timestamp, b.metadata.get("sequence", 0)))
     types = [
         b.value.type or legacy_type_of(b.value.kind, b.value.scope, b.value.role)

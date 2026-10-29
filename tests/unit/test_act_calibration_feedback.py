@@ -15,10 +15,10 @@ from types import SimpleNamespace
 
 import ctx_weft.core.loop.steps.act as _act_mod
 from ctx_weft.core.loop.llm_gateway import PROMPT_EST_SEG_KEY, _estimate_request_tokens
-from ctx_weft.protocols import LLMUsage, MemoryAddress
 from ctx_weft.core.loop.steps.act import _run_llm_turn
+from ctx_weft.protocols import LLMUsage, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 # ── minimal fakes（与 test_llm_request_identity._make_state/_make_ctx 同构）───────
 
@@ -86,13 +86,16 @@ def _make_state(*, context_tokens: int = 0):
 
 
 def _make_ctx(event_bus, tokenizer: HeuristicTokenizer):
-    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return await compiled_test_inputs(inputs, **kwargs)
+
         async def assemble(self, req):
-            return SimpleNamespace(system="SYS", messages=[], tools=[])
+            return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[]), purpose=req.purpose)
 
     class _FakeLLM:
         def __init__(self, tok: HeuristicTokenizer) -> None:
@@ -122,7 +125,7 @@ _PROMPT = SimpleNamespace(system="SYS", tools=[])
 async def test_feedback_uses_estimate_segment_when_not_floored(monkeypatch):
     captured_request = {}
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         captured_request["req"] = request
         yield _make_usage_chunk(prompt_tokens=10)
 
@@ -132,7 +135,7 @@ async def test_feedback_uses_estimate_segment_when_not_floored(monkeypatch):
     state = _make_state(context_tokens=0)  # 无真实基线 → 整份路径，且 0 不会 floor
     ctx = _make_ctx(bus, tok)
 
-    await _run_llm_turn(state, ctx, _PROMPT, [], 1)
+    await _run_llm_turn(state, ctx, scripted_inputs(_PROMPT), [], 1)
 
     req = captured_request["req"]
     full = _estimate_request_tokens(req, tok.count)
@@ -146,7 +149,7 @@ async def test_feedback_uses_estimate_segment_when_not_floored(monkeypatch):
 async def test_feedback_uses_real_segment_not_floored_value(monkeypatch):
     captured_request = {}
 
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         captured_request["req"] = request
         yield _make_usage_chunk(prompt_tokens=10)
 
@@ -157,7 +160,7 @@ async def test_feedback_uses_real_segment_not_floored_value(monkeypatch):
     state = _make_state(context_tokens=1_000_000)
     ctx = _make_ctx(bus, tok)
 
-    await _run_llm_turn(state, ctx, _PROMPT, [], 1)
+    await _run_llm_turn(state, ctx, scripted_inputs(_PROMPT), [], 1)
 
     req = captured_request["req"]
     full = _estimate_request_tokens(req, tok.count)
@@ -172,7 +175,7 @@ async def test_feedback_uses_real_segment_not_floored_value(monkeypatch):
 
 
 async def test_no_feedback_when_no_usage(monkeypatch):
-    async def _fake_stream(ctx, state, request):
+    async def _fake_stream(ctx, state, request, **kwargs):
         yield _make_usage_chunk(prompt_tokens=0)
 
     monkeypatch.setattr(_act_mod, "stream_llm_resilient", _fake_stream)
@@ -181,6 +184,6 @@ async def test_no_feedback_when_no_usage(monkeypatch):
     state = _make_state(context_tokens=0)
     ctx = _make_ctx(bus, tok)
 
-    await _run_llm_turn(state, ctx, _PROMPT, [], 1)
+    await _run_llm_turn(state, ctx, scripted_inputs(_PROMPT), [], 1)
 
     assert tok.observe_calls == []

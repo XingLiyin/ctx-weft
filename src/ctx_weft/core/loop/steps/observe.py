@@ -29,8 +29,8 @@ from ctx_weft.core.loop.driver import (
     make_event,
 )
 from ctx_weft.core.loop.llm_gateway import (
+    build_llm_request,
     llm_request_id,
-    request_prompt_estimate,
     resolve_llm_identity,
     stream_llm_resilient,
 )
@@ -49,10 +49,11 @@ from ctx_weft.core.utils.verdict import (
     VERDICT_SUCCESS,
     normalize_verdict,
 )
-from ctx_weft.protocols import LLMMessage, LLMRequest, MemoryScope
+from ctx_weft.protocols import LLMMessage, MemoryScope, load_records
 from ctx_weft.protocols.events import EventType
 
 if TYPE_CHECKING:
+    from ctx_weft.core.assembler.context import PromptContext
     from ctx_weft.core.capabilities.control_tools import ControlResult
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,12 @@ class ObserveStep(Step):
             # Foreground judgement shares act's cooperative stop boundary, including
             # assembler/tool awaits. Background recap keeps its independent lifetime.
             import asyncio
-            from ctx_weft.core.loop.steps.act import _await_tool_or_stop, _interrupt_pending, _park_for_interrupt
+
+            from ctx_weft.core.loop.steps.act import (
+                _await_tool_or_stop,
+                _interrupt_pending,
+                _park_for_interrupt,
+            )
             assessment = asyncio.create_task(self._observe(state, ctx, events, True, boundary))
             try:
                 finished = await _await_tool_or_stop(assessment, ctx)
@@ -228,9 +234,9 @@ class ObserveStep(Step):
         # Session-global control tools survive per-agent cache eviction.
         bound = cache.get(state.agent.id) if cache is not None else []
         extra = {"observe_boundary": boundary}
-        records = await context_records(state, ctx)
-        if records is not None:
-            extra["observe_records"] = records
+        record_ids = execution.options.get("context_record_ids")
+        if record_ids is not None:
+            extra["observe_record_ids"] = list(record_ids)
         else:
             extra["observe_end_at"] = _execution(ctx).started_at
         context_task = state.extra.get("observe_context_task", state.task)
@@ -242,13 +248,17 @@ class ObserveStep(Step):
             bound_capabilities=bound, token_counter=ctx.llm.tokenizer.count,
             extra=extra, intent=ReviewIntent(judge_task=judge_task, terminal_only=boundary == "task_switch"),
         )
-        prompt = await ctx.assembler.assemble(request)
+        inputs = await ctx.assembler.assemble(request)
         submitted, last_text = await self._run_react(
-            state, ctx, system=prompt.system, messages=list(prompt.messages),
-            tools=prompt.tools, max_rounds=state.agent.loop_config.max_turns_per_observe,
+            state, ctx, inputs=inputs, max_rounds=state.agent.loop_config.max_turns_per_observe,
             terminal_tool_name=REPORT_OBSERVATION_NAME,
             validate_submission=lambda result: self._submission_error(result, judge_task=judge_task, terminal_only=boundary == "task_switch"),
         )
+        if record_ids is not None and all(record_id in inputs._records for record_id in record_ids):
+            # The gateway's compiler loaded these immutable records for prompting.
+            records = [inputs._records[record_id] for record_id in record_ids]
+            records.sort(key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
+            state.extra["observe_record_cache"] = ((state.extra.get("observe_id"), tuple(record_ids)), records)
         return self._interpret_submission(state, submitted, last_text,
                                           judge_task=judge_task, background=background, terminal_only=boundary == "task_switch")
 
@@ -257,9 +267,7 @@ class ObserveStep(Step):
         state: "Any",
         ctx: "Any",
         *,
-        system: str,
-        messages: "list[LLMMessage]",
-        tools: "Any",
+        inputs: "PromptContext",
         max_rounds: int,
         terminal_tool_name: str,
         validate_submission: Callable[[Any], str | None] | None = None,
@@ -275,7 +283,7 @@ class ObserveStep(Step):
         """
         agent = state.agent
         model, llm_account = resolve_llm_identity(state)
-        current_messages = list(messages)
+        appended_messages: list[LLMMessage] = []
         last_text = ""
         # 动态 max_tokens 的增量基线：上一轮实际发送条数（本轮 usage 对应的真实 prompt 基线）。
         baseline_msg_count: int | None = None
@@ -286,20 +294,16 @@ class ObserveStep(Step):
             # state.sequence_counter 两处读到同一个值，天然一致，不需要新增参数或跨函数传值。
             req_id = llm_request_id(state)
 
-            sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
-            llm_request = LLMRequest(
-                model=model,
-                system=system,
-                messages=list(current_messages),
-                tools=tools,
-            )
-            llm_request.prompt_token_estimate = request_prompt_estimate(
-                ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
+            llm_request = await build_llm_request(
+                ctx, state, inputs, appended_messages=appended_messages,
+                baseline_msg_count=baseline_msg_count, turn=round_num)
+            sent_msg_count = len(llm_request.messages)
+            tools = llm_request.tools
             # turn：gateway 从 metadata["turn"] 取（spec §9.4 统一口径：LLM_* 事件一律用 turn，
             # 不用 round）；round_num 仍是本函数内部的轮次计数局部变量，只是不再直接进 payload。
-            llm_request.metadata["turn"] = round_num
 
-            stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
+            stream = ensure_collected_stream(stream_llm_resilient(
+                ctx, state, llm_request, inputs=inputs, appended_messages=appended_messages))
             async with aclosing(stream):
                 async for _ in stream:
                     stream.accept_current()
@@ -312,7 +316,7 @@ class ObserveStep(Step):
 
             # 摄入前铸造内部调用标识（spec: conversation-integrity，与 act._run_llm_turn 同口径）：
             # observer 回合不入 task 层 memory（工具是 SILENT/控制面），锚仅取唯一性、不持久；
-            # live 消息面（current_messages 的 tool_call↔result 配对）与事件 payload 用同一份值。
+            # live 消息面（appended_messages 的 tool_call↔result 配对）与事件 payload 用同一份值。
             if tool_calls:
                 tool_calls = [
                     m.call for m in mint_turn_call_ids(
@@ -351,17 +355,17 @@ class ObserveStep(Step):
                 # 还有剩余轮次时催促其改用工具提交后重试；耗尽轮次才返回 (None, last_text)。
                 if round_num + 1 >= max_rounds:
                     break
-                current_messages.append(LLMMessage(
+                appended_messages.append(LLMMessage(
                     role="assistant", content=accumulated_text or runtime_prompt('no_reply'),
                     provider_state=result.provider_state,
                 ))
-                current_messages.append(LLMMessage(
+                appended_messages.append(LLMMessage(
                     role="user",
                     content=runtime_prompt("react_nudge", terminal_tool=terminal_tool_name),
                 ))
                 continue
 
-            current_messages.append(LLMMessage(
+            appended_messages.append(LLMMessage(
                 role="assistant",
                 content=accumulated_text,
                 tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.arguments} for tc in tool_calls],
@@ -395,7 +399,7 @@ class ObserveStep(Step):
                         "run_observe_react: no CapabilityGateway for tool '%s'", tc.name
                     )
                     content = runtime_prompt('gateway_missing', tool=tc.name)
-                current_messages.append(LLMMessage(
+                appended_messages.append(LLMMessage(
                     role="tool",
                     content=content,
                     tool_call_id=tc.id,
@@ -525,7 +529,7 @@ class ObserveStep(Step):
             view = [r for r in view if r.scope == MemoryScope.TASK and r.address.task_id == state.task.id
                     and r.kind in (MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT)]
         else:
-            view = await ctx.memory.load_view(
+            view = await load_records(ctx.memory,
                 state.scope, MemoryScope.TASK, ctx.provider_ctx,
                 kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT],
             )
@@ -644,7 +648,7 @@ class ObserveStep(Step):
             # 正常运行时该段刚产生 raw、计数 > 0，护栏为 no-op。
             if not completion and boundary not in CLOSE_BOUNDARIES and boundary != "task_switch":
                 from ctx_weft.protocols import MemoryKind
-                view = await ctx.memory.load_view(
+                view = await load_records(ctx.memory,
                     state.scope, MemoryScope.TASK, ctx.provider_ctx,
                     kinds=[MemoryKind.CONVERSATION_TURN],
                 )
@@ -1078,16 +1082,15 @@ async def capture_context(state, ctx, options):
     if "context_record_ids" in options:
         return
     from ctx_weft.protocols import MemoryAddress, MemoryKind
-    from ctx_weft.core.utils.clock import as_utc
     end = datetime.fromisoformat(options["segment_end_at"])
-    records = []
+    record_ids = []
     for scope in (MemoryScope.TASK, MemoryScope.AGENT):
-        records.extend(await ctx.memory.load_view(
+        record_ids.extend(await ctx.memory.load_view_ids(
             MemoryAddress(session_id=state.session.id, agent_id=state.agent.id),
             scope, ctx.provider_ctx,
             kinds=([MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT]
-                   if scope == MemoryScope.TASK else None)))
-    options["context_record_ids"] = [r.id for r in records if as_utc(r.timestamp) <= as_utc(end)]
+                   if scope == MemoryScope.TASK else None), end_at=end))
+    options["context_record_ids"] = record_ids
     from copy import copy
     state.extra["observe_context_task"] = copy(state.task)
 
@@ -1097,9 +1100,14 @@ async def context_records(state, ctx):
     ids = options.get("context_record_ids")
     if ids is None:
         return None  # Legacy requests retain their bounded live-view fallback.
+    key = (state.extra.get("observe_id"), tuple(ids))
+    cached = state.extra.get("observe_record_cache")
+    if cached is not None and cached[0] == key:
+        return cached[1]
     records = await ctx.memory.read_records(ids, ctx.provider_ctx)
     if set(ids) != {r.id for r in records}:
         raise RuntimeError("observe context contains missing immutable memory records")
+    state.extra["observe_record_cache"] = (key, records)
     return records
 
 

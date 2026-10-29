@@ -23,7 +23,7 @@ import pytest
 
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, ToolCall
+from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, ToolCall, load_records
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
     CapabilityProviderInfo,
@@ -167,7 +167,7 @@ async def test_ot06_finished_but_memory_write_crashed_backfills(tmp_path):
     await ReconcileStep().execute(state, ctx)
 
     assert not calls, "O-T06: 已完成的调用不得重执行"
-    found = [r for r in await mem.load_view(scope, MemoryScope.TASK, pctx)
+    found = [r for r in await load_records(mem, scope, MemoryScope.TASK, pctx)
              if r.id == tool_result_record_id(TC1)]
     assert found and found[0].content == "finished-result-from-event", (
         "O-T06: FINISHED 已发 → 按确定性 id 从事件里那份补写 memory")

@@ -129,6 +129,7 @@ from ctx_weft.protocols.memory import (
     MemoryScope,
     NullMemoryBlobStore,
     Subscription,
+    load_records,
 )
 from ctx_weft.protocols.runtime import (
     InitializationReport,
@@ -250,6 +251,7 @@ __all__ = [
     "MemoryRecord",
     "MemoryAddress",
     "Subscription",
+    "load_records",
     # Blob store（多模态字节侧，与 MemoryProvider 同模块）
     "MemoryBlobStore",
     "NullMemoryBlobStore",

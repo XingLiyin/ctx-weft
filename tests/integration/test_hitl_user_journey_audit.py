@@ -6,7 +6,7 @@ import pytest
 
 from ctx_weft import RuntimeConfig, SessionStartParams
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
@@ -95,7 +95,7 @@ async def test_two_questions_with_retraction_then_restart_and_new_task(tmp_path,
             assert not view.open_runs and not view.pending_observe and not view.hitl.pending
             assert not tm.running_task_ids() and not tm.open_round_task_ids and not rt._run_tokens.get(SID)
             async def content():
-                records = await memory.load_view(MemoryAddress(session_id=SID, agent_id=h.agent_id),
+                records = await load_records(memory, MemoryAddress(session_id=SID, agent_id=h.agent_id),
                     MemoryScope.AGENT, ProviderContext(session_id=SID))
                 return [(r.id, r.content) for r in records]
             before, head = await content(), await store.committed_head(SID)

@@ -9,7 +9,7 @@ import pytest
 
 from ctx_weft import SessionStartParams
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
@@ -23,7 +23,7 @@ _NORMAL_SEGMENTS = {}
 
 
 async def task_body(memory, task_id):
-    records = await memory.load_view(MemoryAddress(session_id=SID, task_id=task_id),
+    records = await load_records(memory, MemoryAddress(session_id=SID, task_id=task_id),
         MemoryScope.TASK, ProviderContext(session_id=SID))
     return [(str(r.kind), r.role, str(r.content)) for r in records]
 
@@ -140,7 +140,7 @@ async def test_handoff_hot_retries_complete_stopped_actor(tmp_path, unknown, ent
             await request_turn(rt, handle, entry)
             await wait_until(lambda: tm.get_task(handle.task_id).status == "FINISHED")
             await drained(rt)
-            records = await memory.load_view(MemoryAddress(session_id=SID, agent_id=handle.agent_id,
+            records = await load_records(memory, MemoryAddress(session_id=SID, agent_id=handle.agent_id,
                 task_id=handle.task_id), MemoryScope.TASK, ProviderContext(session_id=SID))
             assert any(r.role == "user" and "NEW REQUEST SECRET" in str(r.content)
                        and "OLD REQUEST" in str(r.content) for r in records)
@@ -451,7 +451,7 @@ async def test_replacement_before_first_chunk_can_be_retracted_twice(tmp_path, e
             await request_turn(rt, h, entry, "FINAL NEW REQUEST")
             await wait_until(lambda: rt._task_managers[SID].get_task(h.task_id).status == "FINISHED")
             await drained(rt)
-            records = await memory.load_view(MemoryAddress(session_id=SID, agent_id=h.agent_id,
+            records = await load_records(memory, MemoryAddress(session_id=SID, agent_id=h.agent_id,
                 task_id=h.task_id), MemoryScope.TASK, ProviderContext(session_id=SID))
             users = [str(r.content) for r in records if r.role == "user"]
             assert any("FINAL NEW REQUEST" in text and "OLD REQUEST" in text for text in users)

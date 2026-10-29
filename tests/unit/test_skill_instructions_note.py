@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextBlock
 from ctx_weft.core.assembler.builder import PromptBuilder
-from ctx_weft.core.assembler.context import PromptContext
+from tests.assembler_testkit import context_from_blocks
 
 
 def test_runtime_note_is_rendered_after_raw_skill_body():
@@ -18,7 +18,7 @@ def test_runtime_note_is_rendered_after_raw_skill_body():
     directive = SimpleNamespace(skill_name="pdf", instructions=body)
     block = ContextBlock(
         id="directive-1", source="skill", kind="directive", value=directive)
-    prompt = PromptBuilder(len).compile(PromptContext(request, (block,)))
+    prompt = PromptBuilder(len).compile(context_from_blocks(request, (block,)))
     out = "\n".join(str(message.content) for message in prompt.messages)
 
     assert "## Instructions for the current task" in out

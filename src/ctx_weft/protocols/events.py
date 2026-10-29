@@ -153,7 +153,7 @@ class EventType(StrEnum):
     CONTEXT_ASSEMBLED = "ContextAssembled"
     # ── LLM 域 ──
     LLM_REQUEST_STARTED = "LLMRequestStarted"
-    LLM_PROMPT_SENT = "LLMPromptSent"           # 完整 prompt（system + messages + tools），供调试
+    LLM_PROMPT_SENT = "LLMPromptSent"           # prompt 编译输入；自定义调用兼容完整正文
     LLM_TOKEN_STREAMED = "LLMTokenStreamed"
     LLM_REASONING_STREAMED = "LLMReasoningStreamed"    # extended thinking delta
     LLM_RESPONSE_FINISHED = "LLMResponseFinished"

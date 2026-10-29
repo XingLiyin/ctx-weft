@@ -20,7 +20,7 @@ import pytest
 
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -83,7 +83,7 @@ async def _stored_types(rt, session_id: str) -> list[str]:
 
 
 async def _user_texts(rt, session_id: str, agent_id: str, task_id: str) -> list[str]:
-    view = await rt.providers.get_memory().load_view(
+    view = await load_records(rt.providers.get_memory(),
         MemoryAddress(session_id=session_id, task_id=task_id, agent_id=agent_id),
         MemoryScope.TASK,
         ProviderContext(session_id=session_id, tenant_id="default",

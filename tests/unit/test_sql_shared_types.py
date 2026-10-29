@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from ctx_weft.protocols import load_records
 from ctx_weft.providers._sqlalchemy import UtcDateTime, make_session_factory
 
 
@@ -129,13 +130,13 @@ async def test_a_long_tenant_survives_a_round_trip(tmp_path):
     async with open_sqlite_memory(tmp_path / "m.db") as provider:
         await provider.ingest(event, ctx)
 
-        got = await provider.load_view(addr, MemoryScope.TASK, ctx)
+        got = await load_records(provider, addr, MemoryScope.TASK, ctx)
         assert [r.content for r in got] == ["hi"], "长 tenant 的行必须读得回来"
 
         # 换一个租户读同一个地址 → 读不到（隔离没因为长度而失效）
         other = ProviderContext(session_id="ses_1", tenant_id="someone-else")
-        assert await provider.load_view(addr, MemoryScope.TASK, other) == []
+        assert await load_records(provider, addr, MemoryScope.TASK, other) == []
 
         # 只差最后一个字符的 tenant 同样读不到（截断类失误的判据）
         almost = ProviderContext(session_id="ses_1", tenant_id=tenant[:-1])
-        assert await provider.load_view(addr, MemoryScope.TASK, almost) == []
+        assert await load_records(provider, addr, MemoryScope.TASK, almost) == []

@@ -34,15 +34,13 @@ logger = logging.getLogger(__name__)
 
 def build_llm_tools(caps: list[Capability], purpose: str, *, terminal_only: bool = False) -> list[LLMTool]:
     """Build the frozen LLM tool snapshot for one purpose."""
-    tools = [
-        LLMTool(
-            name=qualify(cap.id),
-            description=cap.description,
-            input_schema=cap.input_schema,
-        )
-        for cap in caps
-        if isinstance(cap, ToolCapability) and purpose in cap.purposes
-    ]
+    tools = []
+    for cap in caps:
+        definition = cap if isinstance(cap, dict) else vars(cap)
+        if definition.get("kind") == "tool" and purpose in definition.get("purposes", []):
+            tools.append(LLMTool(name=qualify(definition["id"]),
+                                 description=definition["description"],
+                                 input_schema=definition["input_schema"]))
 
     if terminal_only:
         from copy import deepcopy

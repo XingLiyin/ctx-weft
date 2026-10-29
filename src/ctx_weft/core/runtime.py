@@ -105,6 +105,7 @@ from ctx_weft.protocols import (
     MemoryProvider,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.agent import AgentDetail, AgentSummary, CompactReceipt
 from ctx_weft.protocols.capability import (
@@ -167,7 +168,7 @@ async def _copy_memory_for_inherit(
     """spawn 时把 source agent 的当前召回视图复制进 child agent scope（spec Phase 2 2026-06-30）。
 
     **第一参数是 agent 不是 task**（spec/09 §6）：这个函数从第一天起就是按 agent_id 取
-    记忆的（下面两次 `load_view` 都只给 `agent_id`，不给 `task_id`），从前收 `parent_task`
+    记忆的（下面两次 `load_records` 都只给 `agent_id`，不给 `task_id`），从前收 `parent_task`
     只是为了从它身上推出那个 agent id。改收 agent id 之后，「继承谁的记忆」可以由调用方
     直接锚定——血缘（`parent_agent_id`）与记忆来源就此成为两个正交的轴，
     `dispatch_task` 的「不从任何已有 agent 派生、但要它的上下文」才表达得出来。
@@ -176,7 +177,7 @@ async def _copy_memory_for_inherit(
     是哪条 task）。真正的来源标识是 `inherited_from_agent_id`，恒写。
 
     **全 keyword-only**：第一个位置参数从 `Task` 变成了 `str`，而 Python 不会为此报错
-    ——旧的位置调用会把一个 Task 对象静默绑到 `source_agent_id` 上，`load_view` 拿它
+    ——旧的位置调用会把一个 Task 对象静默绑到 `source_agent_id` 上，`load_records` 拿它
     当 agent_id 查，查空，于是「继承了个寂寞」而测试只在断言处才隐约红。加一道 `*`
     让这类陈旧调用在调用点就 TypeError。
 
@@ -202,11 +203,11 @@ async def _copy_memory_for_inherit(
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
     # v2 P3a：body = TASK 视图默认 kinds（对话+段摘要，跨 task 半址）；frames = AGENT 视图
     # conversation turn（AGENT_COMPACT_SUMMARY = SUMMARY kind，天然排除）。
-    body_records = await memory.load_view(
+    body_records = await load_records(memory,
         MemoryAddress(session_id=session_id, agent_id=source_agent_id),
         MemoryScope.TASK, ctx,
     )
-    frame_records = await memory.load_view(
+    frame_records = await load_records(memory,
         MemoryAddress(session_id=session_id, agent_id=source_agent_id),
         MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN],
     )
@@ -2691,13 +2692,13 @@ class CtxWeftRuntime:
             if not task.user_prompt:
                 continue
             try:
-                view = await memory.load_view(
+                view = await load_records(memory,
                     MemoryAddress(session_id=session_id, task_id=task.id),
                     MemoryScope.TASK, ctx, kinds=[_MK.CONVERSATION_TURN],
                 )
             except Exception:
                 logger.exception(
-                    "_verify_task_prompts_in_memory: load_view failed for task %s — "
+                    "_verify_task_prompts_in_memory: load_records failed for task %s — "
                     "keeping the projection's assumption", task.id)
                 continue
             want_id = task_prompt_record_id(task.id, task.user_prompt)
@@ -4668,7 +4669,7 @@ class CtxWeftRuntime:
                                    task_id=task_id, agent_id=agent_id)
             try:
                 if task_id not in seen:
-                    view = await memory.load_view(
+                    view = await load_records(memory,
                         MemoryAddress(session_id=session.id, task_id=task_id),
                         MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
                     seen[task_id] = {r.id for r in view}
@@ -4841,7 +4842,7 @@ class CtxWeftRuntime:
         让整场恢复停下来。
         """
         try:
-            view = await self.providers.get_memory().load_view(
+            view = await load_records(self.providers.get_memory(),
                 MemoryAddress(session_id=session.id, task_id=task_id, agent_id=agent_id),
                 MemoryScope.TASK,
                 ProviderContext(session_id=session.id, tenant_id=session.tenant_id,
@@ -4859,7 +4860,7 @@ class CtxWeftRuntime:
         """取 scope 内最近一条 USER_PROMPT 内容（供 ① 打断续接的「上一条取消」说明）。"""
         from ctx_weft.protocols import MemoryKind, MemoryScope
         try:
-            view = await self.providers.get_memory().load_view(
+            view = await load_records(self.providers.get_memory(),
                 scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN],
             )
         except Exception:
@@ -5044,6 +5045,7 @@ class CtxWeftRuntime:
         deps = AssemblerDeps(
             memory=memory,
             knowledge_providers=self.providers.get_knowledge_providers(),
+            template_lookup=self._template_lookup,
             provider_ctx=provider_ctx,
             capability_cache=self._capability_cache,
             task_manager=task_manager,
@@ -5141,6 +5143,7 @@ class CtxWeftRuntime:
             # 出网前 rehydrate ref→base64 用（Phase 3b）；未注册时是 NullMemoryBlobStore，
             # rehydrate_content 据其 can_externalize=False 原样返回、零开销。
             blob_store=self.providers.get_memory_blob_store(),
+            event_blob_store=self.providers.get_event_blob_store(),
         )
 
     @staticmethod

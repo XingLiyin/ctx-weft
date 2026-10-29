@@ -15,7 +15,6 @@ import base64
 
 import pytest
 
-from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.assembler.assembler import ContextRequest
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.utils.content import _IMAGE_PART_TOKENS, _IMAGE_PLACEHOLDER_TMPL, content_to_text
@@ -567,8 +566,10 @@ async def test_compact_assembly_carries_no_image_while_act_still_does() -> None:
             extra=extra,
         )
 
-    act_prompt = await assembler.assemble(_request("act", {}))
-    compact_prompt = await assembler.assemble(_request("compact", {"compact_scope": "task"}))
+    act_inputs = await assembler.assemble(_request("act", {}))
+    compact_inputs = await assembler.assemble(_request("compact", {"compact_scope": "task"}))
+    act_prompt = await assembler.compile(act_inputs)
+    compact_prompt = await assembler.compile(compact_inputs)
 
     act_images = [im for m in act_prompt.messages for im in _image_parts(m.content)]
     assert act_images, (

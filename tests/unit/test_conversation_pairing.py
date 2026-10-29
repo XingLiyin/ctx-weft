@@ -34,6 +34,7 @@ from ctx_weft.protocols import (
     MemoryRecord,
     MemoryScope,
     ToolCall,
+    load_records,
 )
 from ctx_weft.providers.llm.adapters.anthropic import _serialize_messages as _anthropic_serialize
 from ctx_weft.providers.llm.adapters.openai import _serialize_messages as _openai_serialize
@@ -118,7 +119,7 @@ async def test_ingest_adopts_anchor_and_records_companions():
     assert persisted.record_id == anchor
     assert persisted.tool_calls[0]["id"] == minted[0].call.id
     # 伴随字段：raw wire id 可追溯。id 本身即账本键——不再另挂 op_id。
-    rec = await mem.load_view(state.scope, MemoryScope.TASK, ctx.provider_ctx)
+    rec = await load_records(mem, state.scope, MemoryScope.TASK, ctx.provider_ctx)
     asst = [r for r in rec if r.role == "assistant"][0]
     tc_md = asst.metadata["tool_calls"][0]
     assert tc_md["id"] == minted[0].call.id
@@ -134,7 +135,7 @@ async def test_ingest_without_minting_keeps_legacy_shape():
         state, ctx, "hi", [ToolCall(id="call_1", name="mcp__t__a", arguments={})], LLMUsage(), 1
     )
     assert persisted.tool_calls[0]["id"] == "call_1"
-    rec = await mem.load_view(state.scope, MemoryScope.TASK, ctx.provider_ctx)
+    rec = await load_records(mem, state.scope, MemoryScope.TASK, ctx.provider_ctx)
     tc_md = [r for r in rec if r.role == "assistant"][0].metadata["tool_calls"][0]
     assert "raw_tool_call_id" not in tc_md and "op_id" not in tc_md
 
@@ -444,7 +445,7 @@ async def test_rebuild_after_fold_keeps_pairing():
     # 段压缩语义：fold 掉第一轮（user + assistant + result，supersede 不可逆）。
     await mem.fold(turn_ids[0][0], [], ctx.provider_ctx)
 
-    view = await mem.load_view(state.scope, MemoryScope.TASK, ctx.provider_ctx)
+    view = await load_records(mem, state.scope, MemoryScope.TASK, ctx.provider_ctx)
     req = SimpleNamespace(token_counter=lambda t: max(1, len(t) // 3))
     blocks = [
         record_to_history_block(r, "agent_recall", i)

@@ -21,7 +21,7 @@ provider 落在 core 侧（构造时注入 `ProviderRegistry`）而不是塞进 
 判断题 1 —— 「第几条 user 回合」的口径
 ════════════════════════════════════════════════════════════════════════════
 
-**从 1 开始数，只数 task 视图里 `role == "user"` 的记录，按视图顺序（`load_view` 已按
+**从 1 开始数，只数 task 视图里 `role == "user"` 的记录，按视图顺序（`load_records` 已按
 `(timestamp, seq_no)` 升序）。** 理由：
 
 - **从 1 开始**：这句话是写给模型看的自然语言（"your 2nd message"），英文序数没有
@@ -43,7 +43,7 @@ provider 落在 core 侧（构造时注入 `ProviderRegistry`）而不是塞进 
 |---|---|
 | ref 不在本视图的任何占位中 | 单条说明性 `TextPart`，**不含 `ImagePart`** |
 | `MemoryBlobStore` 未注册（`blob_store=None` / `NullMemoryBlobStore.get` 返回 None） | 同上，且说明是「字节取不到」而非「没这张图」 |
-| `blob.get` 抛 / `load_view` 抛 | 同上，记 warning |
+| `blob.get` 抛 / `load_records` 抛 | 同上，记 warning |
 
 **取回阶段就发现取不到**与 gateway 出网时的 `[image unavailable]` 降级是两件事：后者
 发生在已经决定要发这张图之后，前者能让模型当场知道「别再试了」。
@@ -72,6 +72,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     TextPart,
+    load_records,
 )
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -274,7 +275,7 @@ async def get_image(
 
     ``ref`` 不存在于本视图的任何 L0.5 占位中时，返回**单条说明性 `TextPart`**——不抛、
     也不返回 `ImagePart`（子设计 §10）。本函数在工具调用循环上，任何异常都会打断 loop，
-    故 `load_view` / `blob.get` 的失败一律吸收成说明性文本。
+    故 `load_records` / `blob.get` 的失败一律吸收成说明性文本。
 
     ``blob_store=None`` 表示宿主没有可用的 blob store（未注册时 `ProviderRegistry`
     给的是 `NullMemoryBlobStore`，其 `get` 恒返回 None，两者行为一致）。字节确实取回来了才
@@ -291,7 +292,7 @@ async def get_image(
 
     records: Sequence[Any] = ()
     try:
-        records = await memory.load_view(
+        records = await load_records(memory,
             address, scope, ctx, kinds=list(kinds) if kinds else None)
     except Exception:
         logger.warning("media:get_image 读视图失败，按「找不到」处理 (address=%s)",

@@ -10,7 +10,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.hitl.registry import PendingHitl
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.utils.clock import now_utc
-from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.hitl import (
     HITL_FORM_WAIT,
     PREFACE_AFTER_INTERRUPT,
@@ -203,7 +203,7 @@ async def test_inject_user_reply_leaves_a_parent_suspended_on_live_children_alon
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default",
                            task_id="t1", agent_id="ag1")
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx)
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx)
     assert any(r.role == "user" and "ship it" in str(r.content) for r in view), (
         "答复仍然必须被写进对话——跳过的只是状态重置"
     )
@@ -263,7 +263,7 @@ async def test_inject_resolved_user_turns_skips_replies_already_in_the_conversat
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     pctx = ProviderContext(session_id="s1", tenant_id="default",
                            task_id="t1", agent_id="ag1")
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx)
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx)
     texts = [str(r.content) for r in view if r.role == "user"]
     assert any("already said" in t for t in texts)
     assert any("not yet said" in t for t in texts)

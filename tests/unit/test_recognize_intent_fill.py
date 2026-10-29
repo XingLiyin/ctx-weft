@@ -8,15 +8,19 @@ from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
 from ctx_weft.protocols import LLMChunk, LLMUsage, ToolCall
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 
 class _FakeAssembler:
     def __init__(self):
         self.calls = []
 
+    async def compile(self, inputs, **kwargs):
+        return await compiled_test_inputs(inputs, **kwargs)
+
     async def assemble(self, request):
         self.calls.append(request)
-        return SimpleNamespace(system="SYS", messages=[], tools=[])
+        return scripted_inputs(SimpleNamespace(system="SYS", messages=[], tools=[]), purpose=request.purpose)
 
 
 class _FakeLLM:

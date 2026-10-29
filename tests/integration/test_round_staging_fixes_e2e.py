@@ -26,6 +26,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     ToolCall,
+    load_records,
 )
 from ctx_weft.protocols.capability import (
     AuthorizationDecision,
@@ -246,7 +247,7 @@ async def test_recovery_restores_an_appended_message_from_the_event_log(message_
         await _poll(lambda: llm.act_requests or None)
 
     assert MESSAGE in _all_request_text(llm.act_requests[0])
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
     msgs = [r for r in view if MESSAGE in content_to_text(r.content)]
     assert len(msgs) == 1 and msgs[0].id == "mem_appended", [r.id for r in msgs]
 

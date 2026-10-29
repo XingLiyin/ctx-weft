@@ -16,9 +16,9 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.assembler.builder import PromptBuilder
-from ctx_weft.core.assembler.context import PromptContext
 from ctx_weft.core.assembler.sources.guidance import GuidanceSource
 from ctx_weft.core.models.task import NormalTaskSettings, Task
+from tests.assembler_testkit import context_from_blocks
 
 
 def _task(hint: str | None) -> Task:
@@ -33,7 +33,7 @@ async def _guidance(task: Task) -> str:
     )
     deps = SimpleNamespace(task_manager=None)
     blocks = [block async for block in GuidanceSource().fetch(request, deps)]
-    prompt = PromptBuilder(len).compile(PromptContext(request, tuple(blocks)))
+    prompt = PromptBuilder(len).compile(context_from_blocks(request, tuple(blocks)), template=request.template)
     return "\n".join(str(message.content) for message in prompt.messages)
 
 

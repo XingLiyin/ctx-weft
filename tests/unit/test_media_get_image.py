@@ -41,6 +41,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     TextPart,
+    load_records,
 )
 from ctx_weft.protocols.capability import (
     AgentCapability,
@@ -258,7 +259,7 @@ async def test_load_view_failure_is_absorbed_into_text() -> None:
     """读视图抛异常也不许炸出去——降级成「找不到」文本。"""
 
     class _Boom(InMemoryMemoryProvider):
-        async def load_view(self, *a, **kw):
+        async def load_view_ids(self, *a, **kw):
             raise RuntimeError("db down")
 
     parts = await get_image(_Boom(), _ADDR, _pctx(), REF, blob_store=_Blobs())
@@ -422,7 +423,7 @@ async def test_gateway_records_the_restored_image_into_task_memory() -> None:
 
     await _invoke_via_gateway(mem, _Blobs(), REF)
 
-    view = await mem.load_view(_ADDR, MemoryScope.TASK, _pctx())
+    view = await load_records(mem, _ADDR, MemoryScope.TASK, _pctx())
     tool_rows = [r for r in view if r.role == "tool"]
     assert len(tool_rows) == 1
     imgs = _images(tool_rows[0].content)

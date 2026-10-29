@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.utils.estimate import estimate_tokens
+from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 
 class _SpyEscalatingCompact:
@@ -56,9 +57,12 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
     class _Assembler:
         def __init__(self):
             self.calls = 0
+        async def compile(self, inputs, **kwargs):
+            return await compiled_test_inputs(inputs, **kwargs)
+
         async def assemble(self, request):
             self.calls += 1
-            return SimpleNamespace(token_count=10, system="", messages=[], tools=[])
+            return scripted_inputs(SimpleNamespace(token_count=10, system="", messages=[], tools=[]), purpose=request.purpose)
 
     class _TM:
         def __init__(self):
@@ -122,8 +126,11 @@ async def test_reason_stashes_bound_capabilities(monkeypatch):
                             run_id="r1", sequence_counter=0)
 
     class _Assembler:
+        async def compile(self, inputs, **kwargs):
+            return await compiled_test_inputs(inputs, **kwargs)
+
         async def assemble(self, request):
-            return SimpleNamespace(token_count=10, system="", messages=[], tools=[])
+            return scripted_inputs(SimpleNamespace(token_count=10, system="", messages=[], tools=[]), purpose=request.purpose)
 
     class _Bus:
         async def emit(self, ev):

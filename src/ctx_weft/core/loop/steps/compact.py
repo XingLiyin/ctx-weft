@@ -27,14 +27,14 @@ from typing import Any
 
 from ctx_weft.core.assembler import CompactIntent, ContextRequest
 from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
+    build_llm_request,
     llm_request_id,
-    request_prompt_estimate,
     resolve_llm_identity,
     stream_llm_resilient,
 )
+from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 
 # 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.utils.content` /
 # `protocols`，不回指 `core.loop`。若日后 media 模块级引入了 `core.loop` 的东西，
@@ -43,7 +43,13 @@ from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 from ctx_weft.core.utils.estimate import effective_limit
-from ctx_weft.protocols import LLMRequest, MemoryAddress, MemoryEvent, MemoryKind, MemoryScope
+from ctx_weft.protocols import (
+    MemoryAddress,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
+    load_records,
+)
 from ctx_weft.protocols.events import EventOrigin, EventType
 
 logger = logging.getLogger(__name__)
@@ -198,25 +204,16 @@ async def summarize_for_compact(
         extra={"compact_scope": scope},
         intent=CompactIntent(scope="agent" if scope == "agent" else "task"),
     )
-    compact_prompt = await ctx.assembler.assemble(request)
-
+    inputs = await ctx.assembler.assemble(request)
+    llm_request = await build_llm_request(ctx, state, inputs)
     model, llm_account = resolve_llm_identity(state)
-    llm_request = LLMRequest(
-        model=model,
-        system=compact_prompt.system,
-        messages=compact_prompt.messages,
-        tools=[],
-    )
-    # 一次性调用（无循环内基线）→ baseline=None，走 max(整份估算, context_tokens)。
-    llm_request.prompt_token_estimate = request_prompt_estimate(
-        ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), None)
 
     bus = getattr(ctx, "event_bus", None)
     # 同 gateway 那 4 个流式事件一个门禁：bus 存在 且 origin==LOOP_COMPACT（见上方 docstring）。
     should_emit_finished = bus is not None and getattr(state, "origin", None) == EventOrigin.LOOP_COMPACT
     req_id = llm_request_id(state) if should_emit_finished else None
 
-    stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
+    stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request, inputs=inputs))
     async with aclosing(stream):
         async for _ in stream:
             stream.accept_current()
@@ -331,7 +328,7 @@ async def collapse_task_layer(
     才求值——无可折之物时不花那次 LLM，且摘要输入里不会有即将被降级的真图（同 L1 的顺序）。
     """
     memory = ctx.memory
-    recs = await memory.load_view(
+    recs = await load_records(memory,
         state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
     fold, kept = _split_for_collapse(recs, keep_last)
     if not _worth_collapsing(fold):
@@ -345,11 +342,11 @@ async def collapse_task_layer(
         memory, [r.id for r in fold], ctx.provider_ctx,
         address=state.scope, scope=MemoryScope.TASK, kinds=_TASK_VIEW_KINDS,
     ):
-        # 🔴 必须重新 load_view：降级是 fold(旧 id, 新事件)，**record id 全换了**。
+        # 🔴 必须重新 load_records：降级是 fold(旧 id, 新事件)，**record id 全换了**。
         # 拿降级前采集的 id 去下面那次 fold，被降过的一条都 supersede 不掉 → 同一段
         # 对话在视图里出现两次；且手里这份 recs 已过期，用它取 `original` 节拿到的仍是
         # 真图，照旧被拍扁，本段的目的完全落空。
-        recs = await memory.load_view(
+        recs = await load_records(memory,
             state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
         fold, kept = _split_for_collapse(recs, keep_last)
         if not _worth_collapsing(fold):
@@ -445,9 +442,9 @@ async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
     """当前 scope 活跃记忆的 token 代理：task 层 body（跨 task 半址聚合）+ agent 层对话/摘要，
     逐条 content 求 ctx.llm.tokenizer.count 之和。用于升级 compact 级间的 before/after 增量粗估（非精确装配）。"""
     total = 0
-    body = await ctx.memory.load_view(
+    body = await load_records(ctx.memory,
         _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
-    agent_recs = await ctx.memory.load_view(
+    agent_recs = await load_records(ctx.memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
     for r in [*body, *agent_recs]:
         text = r.content if isinstance(r.content, str) else content_to_text(r.content)
@@ -464,7 +461,7 @@ async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
     执行（finish 对 → has_finish）、还是派给别的 agent 执行且结果已回（dispatch + result/tool 回合
     → has_result）**，都是「已完成顶层单元」，计入 keep_last。真·在途（active，不计）= 派出但结果
     未回：has_dispatch 且既无 has_finish 也无 has_result。当前正在跑的 task 永不当完成单元。"""
-    recs = await ctx.memory.load_view(
+    recs = await load_records(ctx.memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN],
     )
@@ -513,16 +510,16 @@ async def fold_root_experience(
     `summary_text` 可以是**已算好的摘要文本**，也可以是一个**取摘要的零参 async 函数**
     （Task 5b / P4-L10）：§6.1 的前置降级必须发生在摘要生成**之前**，否则折区里的真图
     会被 `content_to_text` 静默拍扁进摘要输入（连占位都没有），随后记录被 supersede——
-    正是 §6.1 要防的「最新的图反而痕迹全无」。摘要由本函数在降级 + 重新 `load_view`
+    正是 §6.1 要防的「最新的图反而痕迹全无」。摘要由本函数在降级 + 重新 `load_records`
     之后才求值，调用方因此不必把降级逻辑（依赖折区 ids）搬到自己那边去。
     """
     memory = ctx.memory
-    # AGENT 视图默认 kinds（对话+摘要）；legacy dispatch 配对已在 load_view 内归一，升序即时序。
-    recs = await memory.load_view(
+    # AGENT 视图默认 kinds（对话+摘要）；legacy dispatch 配对已在 load_records 内归一，升序即时序。
+    recs = await load_records(memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
     )
     # task 层胶囊（跨 task 半址聚合，每条 address.task_id 标来源单元）
-    body_recs = await memory.load_view(
+    body_recs = await load_records(memory,
         _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS,
     )
 
@@ -593,7 +590,7 @@ async def fold_root_experience(
         return 0
 
     # §6.1：折叠范围内的残留真图先无条件降级（不受 keep_recent 保护），理由同
-    # collapse_task_layer 处。折区横跨两个视图，故两次 demote_all（各自 load_view）。
+    # collapse_task_layer 处。折区横跨两个视图，故两次 demote_all（各自 load_records）。
     if _media_enabled(ctx):
         demoted = await demote_all(
             memory, ids, ctx.provider_ctx, address=_agent_half(state.scope),
@@ -602,12 +599,12 @@ async def fold_root_experience(
             memory, ids, ctx.provider_ctx, address=_agent_half(state.scope),
             scope=MemoryScope.AGENT)
         if demoted:
-            # 🔴 必须重新 load_view + 重算 ids：降级换掉了 record id，拿旧 id 去下面那次
+            # 🔴 必须重新 load_records + 重算 ids：降级换掉了 record id，拿旧 id 去下面那次
             # fold，被降过的一条都 supersede 不掉 → 同一段对话在视图里出现两次
             # （旧的没被 supersede、新的补偿记录也活着），而摘要已按旧内容生成。
-            recs = await memory.load_view(
+            recs = await load_records(memory,
                 _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
-            body_recs = await memory.load_view(
+            body_recs = await load_records(memory,
                 _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx,
                 kinds=_TASK_VIEW_KINDS)
             ids = _collect(recs, body_recs)
@@ -670,9 +667,9 @@ async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: s
       作 lean 表示。已无 assistant 槽（已 lean / 纯 dispatch 对）的单元跳过。
     无 LLM。返回 supersede 条数。"""
     memory = ctx.memory
-    body = await memory.load_view(
+    body = await load_records(memory,
         _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
-    turns = await memory.load_view(
+    turns = await load_records(memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN])
     has_dispatch, has_finish = _dispatch_finish_sets(turns)
@@ -700,7 +697,7 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -
     **从老到新排序**（曾返回无序 set）：L2 逐颗降级、达标即停，顺序决定了先牺牲谁——
     必须是最老的先降，最近完成的胶囊最后才动。
     """
-    recs = await ctx.memory.load_view(
+    recs = await load_records(ctx.memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN])
     parent_of, first_ts = {}, {}
@@ -859,7 +856,7 @@ async def escalating_compact(
     # 计数用 TASK 视图里**会被渲染**的记录（对话回合 + SUMMARY 段摘要）——与
     # collapse_task_layer 的保留名额同口径：retry 累积的是段摘要，只数 raw 会漏计、L3 永不
     # 触发；而 TOOL_AUDIT 不进 prompt，算进来会让门槛虚高、提前开门。
-    task_n = len(_rendered_only(await ctx.memory.load_view(
+    task_n = len(_rendered_only(await load_records(ctx.memory,
         state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)))
     if task_n > collapse_keep:
         # 传「取摘要的函数」而非摘要文本（同 L1）：按回合切之后 L3 可能发现无可折之物而

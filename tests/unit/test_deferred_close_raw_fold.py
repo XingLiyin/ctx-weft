@@ -133,6 +133,7 @@ async def test_slot_hit_folds_raw_immediately() -> None:
                                has_llm_summary=False)
 
     import asyncio
+
     from ctx_weft.core.loop.steps.observe import ObservationResult, apply_close_report
     state = _state(task, scope)
     state.extra = {"observe_id": "obs-long-report"}
@@ -226,7 +227,7 @@ async def test_bg_replace_success_folds_raw(monkeypatch, fake_state_ctx) -> None
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     await _preset_placeholder_pair(ctx.memory, state.scope, state.task.id, ctx.provider_ctx)
 
-    async def _stream(c, s, req):
+    async def _stream(c, s, req, **kwargs):
         yield _token_chunk("…")
         yield _tool_call_chunk()
         yield _usage_chunk()
@@ -253,7 +254,7 @@ async def test_bg_no_usable_report_keeps_raw_and_placeholder(monkeypatch, fake_s
     state.session = SimpleNamespace(id="s1", tenant_id="default", token_used=0)
     await _preset_placeholder_pair(ctx.memory, state.scope, state.task.id, ctx.provider_ctx)
 
-    async def _empty(c, s, req):
+    async def _empty(c, s, req, **kwargs):
         yield _usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _empty)

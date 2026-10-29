@@ -34,11 +34,61 @@ def prompt_request(*, task_id: str = "t1", purpose: str = "act", **overrides):
 def history_messages(blocks, *, task_id: str = "t1"):
     """Project raw history blocks with the same mapper used before Jinja placement."""
     request = prompt_request(task_id=task_id)
-    rows, _refs = _history_facts(PromptContext(request, tuple(blocks)))
+    rows, _refs = _history_facts(context_from_blocks(request, blocks))
     return [row["message"] for row in rows]
 
 
 def compile_prompt(blocks, request=None, *, tools=None):
     request = request or prompt_request()
     return PromptBuilder(request.token_counter).compile(
-        PromptContext(request, tuple(blocks)), tools=tools or [])
+        context_from_blocks(request, blocks), tools=tools or [], template=request.template)
+
+
+def context_from_blocks(request, blocks):
+    context = PromptContext.from_request(request)
+    for block in blocks:
+        context.add(block)
+    return context
+
+
+async def compiled_test_inputs(inputs, **kwargs):
+    """Compiler half for tests whose assembler already returns a scripted prompt."""
+    return getattr(inputs, "_scripted_prompt", inputs)
+
+
+def scripted_inputs(prompt=None, *, system="", messages=(), tools=(), purpose="act"):
+    """Keep step tests scripted while exercising the PromptContext boundary."""
+    from ctx_weft.core.assembler.assembler import AssembledPrompt
+    from ctx_weft.protocols import LLMTool
+
+    if isinstance(prompt, PromptContext):
+        return prompt
+    if prompt is None:
+        prompt = AssembledPrompt(system, list(messages), list(tools), 0)
+    if not hasattr(prompt, "messages"):
+        prompt.messages = []
+    prompt.tools = [tool if isinstance(tool, LLMTool) else LLMTool(
+        name=tool.name, description=getattr(tool, "description", ""),
+        input_schema=getattr(tool, "input_schema", {})) for tool in getattr(prompt, "tools", [])]
+    context = PromptContext(purpose=purpose)
+    from ctx_weft.core.assembler.context import json_value
+    context.references = [dict(position=i, id=f"test-{i}", source="test", kind="reference",
+                               metadata={}, content=json_value(m.content), value_metadata={},
+                               timestamp=None) for i, m in enumerate(prompt.messages)]
+    context._scripted_prompt = prompt
+    prompt.inputs = context
+    return context
+
+
+async def recalled_blocks(request, deps):
+    """Inspect a Source's selected records after the explicit ID-read boundary."""
+    from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
+
+    blocks = [b async for b in AgentRecallSource().fetch(request, deps)]
+    ids = [b.memory_id for b in blocks if b.memory_id is not None]
+    records = {r.id: r for r in await deps.memory.read_records(ids, deps.provider_ctx)} if ids else {}
+    for block in blocks:
+        if block.memory_id is not None:
+            block.value = records[block.memory_id]
+            block.metadata.setdefault("sequence", block.value.metadata.get("seq_no", 0))
+    return blocks

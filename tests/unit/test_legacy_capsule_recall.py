@@ -12,13 +12,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from ctx_weft.core.utils.estimate import estimate_tokens
-
 import pytest
 
-from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
+from ctx_weft.core.utils.estimate import estimate_tokens
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import recalled_blocks
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,7 +51,7 @@ async def _recall_blocks(mem: InMemoryMemoryProvider, agent_scope: MemoryAddress
     """Drive AgentRecallSource.fetch and return blocks sorted by (timestamp, seq_no)."""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)
-    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = await recalled_blocks(req, deps)
     blocks.sort(key=lambda b: (b.value.timestamp, b.metadata.get("sequence", 0)))
     return blocks
 
