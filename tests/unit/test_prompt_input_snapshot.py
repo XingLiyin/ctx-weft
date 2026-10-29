@@ -259,15 +259,6 @@ async def test_assembled_context_is_the_event_data_and_compiles_without_live_sou
     assert compiled.system == prompt.system and compiled.messages == prompt.messages
 
 
-async def test_previous_snapshot_events_use_the_same_compiler(memory):
-    prompt, request, _ = await assembled(memory)
-    payload = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
-    payload["version"] = 1
-    compiled = await compile_event({"prompt_snapshot": payload}, memory=memory,
-                                   ctx=CTX, template=request.template)
-    assert compiled.system == prompt.system and compiled.messages == prompt.messages
-
-
 async def test_task_multimodal_content_already_in_memory_keeps_only_its_id(memory):
     from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 

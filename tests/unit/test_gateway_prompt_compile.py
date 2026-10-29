@@ -135,7 +135,7 @@ async def test_gateway_defers_serialization_and_replays_cumulative_continuations
     async for _ in stream:
         stream.accept_current()
     payload = next(e.payload for e in events if e.type == EventType.LLM_PROMPT_SENT)
-    assert payload["version"] == 2 and payload["turn"] == 2
+    assert payload["version"] == 1 and payload["turn"] == 2
     assert len(payload["appended_messages"]) == 2
     assert "private reasoning" not in json.dumps(payload) and '"signature"' not in json.dumps(payload)
     assert calls[0].prompt_inputs is None

@@ -153,15 +153,12 @@ class PromptContext:
             raise TypeError(f"unsupported prompt source {block.source!r} ({block.kind})")
 
     def to_payload(self):
-        return {"version": 2, **{f.name: json_value(getattr(self, f.name))
+        return {"version": 1, **{f.name: json_value(getattr(self, f.name))
                                 for f in fields(self) if not f.name.startswith("_")}}
 
     @classmethod
     def from_payload(cls, payload):
-        # v1 is the short-lived prompt_snapshot payload. Its explicit fields
-        # match this model; no runtime objects need rebuilding.
-        payload = payload.get("prompt_snapshot", payload)
-        if payload.get("version") not in (1, 2):
+        if payload.get("version") != 1:
             raise ValueError("unsupported prompt input version")
         names = {f.name for f in fields(cls) if not f.name.startswith("_")}
         return cls(**{name: deepcopy(value) for name, value in payload.items() if name in names})
