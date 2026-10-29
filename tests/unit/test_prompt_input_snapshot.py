@@ -26,6 +26,7 @@ from ctx_weft.protocols.knowledge import KnowledgeDoc
 from ctx_weft.protocols.template import IdentityFacet
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.memory.sql import open_sqlite_memory
+from tests.assembler_testkit import ListedCapabilities
 
 ADDRESS = MemoryAddress(session_id="s", task_id="t", agent_id="a")
 CTX = ProviderContext(session_id="s")
@@ -42,8 +43,17 @@ async def memory(request, tmp_path):
             yield provider
 
 
+def prompt_providers():
+    tool = ToolCapability(id="test:read", name="read", description="old tool description",
+                          purposes=["act", "observe", "recognize_intent"],
+                          input_schema={"type": "object", "properties": {"path": {"type": "string"}}})
+    skill = SkillCapability(id="test:skill", name="skill", description="old skill")
+    return {"test": ListedCapabilities([tool, skill], description="old provider", definitions={
+        "skill": SkillDefinition("test:skill", "skill", "old skill instructions")})}
+
+
 async def compile_event(payload, *, memory, ctx, template):
-    assembler = ContextAssembler([], AssemblerDeps(memory, [], ctx))
+    assembler = ContextAssembler([], AssemblerDeps(memory, [], ctx, capability_provider_index=prompt_providers()))
     return await assembler.compile(payload, template=template)
 
 
@@ -99,7 +109,7 @@ async def assembled(memory, purpose="act", *, staged=False, counter=None):
     )
     if counter is not None:
         request.token_counter = counter
-    assembler = ContextAssembler([Source()], AssemblerDeps(memory, [], CTX))
+    assembler = ContextAssembler([Source()], AssemblerDeps(memory, [], CTX, capability_provider_index=prompt_providers()))
     inputs = await assembler.assemble(request)
     prompt = await assembler.compile(inputs, template=request.template, token_counter=request.token_counter)
     return prompt, request, blocks
@@ -108,8 +118,7 @@ async def assembled(memory, purpose="act", *, staged=False, counter=None):
 @pytest.mark.parametrize("purpose", ["act", "observe", "compact", "recognize_intent"])
 async def test_roundtrip_after_fold_and_source_state_changes(memory, purpose):
     prompt, request, blocks = await assembled(memory, purpose)
-    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
-    snapshot["tools"] = [asdict(tool) for tool in prompt.tools]
+    snapshot = prompt_event_inputs(prompt, prompt.messages)
     serialized = json.dumps(snapshot)
     assert BODY not in serialized
     assert "system" not in snapshot and "messages" not in snapshot and "extra" not in snapshot
@@ -135,7 +144,7 @@ async def test_unpersisted_inputs_and_react_messages_are_self_contained(memory):
     await memory.fold(["input"], [], CTX)
     appended = [LLMMessage("assistant", "observer's first attempt"),
                 LLMMessage("user", "submit using the terminal tool")]
-    snapshot = prompt_event_inputs(prompt, prompt.messages + appended, prompt.tools)
+    snapshot = prompt_event_inputs(prompt, prompt.messages + appended)
 
     class NoReads:
         async def read_records(self, ids, ctx):
@@ -155,7 +164,7 @@ async def test_appended_persisted_messages_use_ids_and_keep_actual_calls(memory)
         kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
         metadata={"tool_call_id": "call"}), CTX)
     appended = [LLMMessage("tool", content, tool_call_id="call", memory_id="result")]
-    snapshot = prompt_event_inputs(prompt, prompt.messages + appended, prompt.tools)
+    snapshot = prompt_event_inputs(prompt, prompt.messages + appended)
     assert "content" not in snapshot["appended_messages"][0]
     restored = await compile_event(snapshot, memory=memory, ctx=CTX, template=request.template)
     assert restored.messages[-1].content == content
@@ -164,7 +173,7 @@ async def test_appended_persisted_messages_use_ids_and_keep_actual_calls(memory)
 
 async def test_missing_reference_and_wrong_session_fail_explicitly(memory):
     prompt, request, _ = await assembled(memory)
-    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
+    snapshot = prompt_event_inputs(prompt, prompt.messages)
     missing = deepcopy(snapshot)
     missing["memory_blocks"][0]["memory_id"] = "missing"
     with pytest.raises(ValueError, match="memory records missing"):
@@ -184,8 +193,9 @@ async def test_gateway_emits_inputs_and_freezes_actual_live_tools(memory):
     pinned = LLMTool("pinned", "discovered after assembly", {"type": "object"})
     bus = _RecordingBus()
     ctx, state = _make_ctx(bus), _make_state()
+    refs = [{"provider": "test", "id": "test:pinned"}]
     request = LLMRequest("model", prompt.system, prompt.messages, tools=[pinned],
-                         prompt_inputs=prompt_event_inputs(prompt, prompt.messages, prompt.tools))
+                         prompt_inputs=prompt_event_inputs(prompt, prompt.messages, refs))
     stream = stream_llm_resilient(ctx, state, request)
     async for _ in stream:
         stream.accept_current()
@@ -193,14 +203,15 @@ async def test_gateway_emits_inputs_and_freezes_actual_live_tools(memory):
     assert ctx.llm.last_request.prompt_inputs is None
     assert "system" not in event.payload and "messages" not in event.payload
     assert BODY not in json.dumps(event.payload)
-    assert event.payload["tools"] == [asdict(pinned)]
+    assert event.payload["tools"] == refs
     pinned.description = "mutated later"
-    assert event.payload["tools"][0]["description"] == "discovered after assembly"
+    assert event.payload["tools"] == refs
+    assert "discovered after assembly" not in json.dumps(event.payload)
 
 
 async def test_recompile_uses_current_template_without_collecting_again(memory):
     prompt, request, _ = await assembled(memory)
-    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
+    snapshot = prompt_event_inputs(prompt, prompt.messages)
     assert "role for act" not in json.dumps(snapshot)
     request.template.identity["act"].text = "current identity template"
     restored = await compile_event(snapshot, memory=memory, ctx=CTX, template=request.template)
@@ -209,15 +220,14 @@ async def test_recompile_uses_current_template_without_collecting_again(memory):
 
 async def test_saved_token_counts_and_pins_do_not_change_prefix_budget(memory):
     prompt, request, _ = await assembled(memory, counter=lambda text: len(text) * 3)
-    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
-    snapshot["tools"] = [{"name": "pin", "description": "large pinned tool " * 50_000,
-                          "input_schema": {"type": "object"}}]
+    snapshot = prompt_event_inputs(prompt, prompt.messages)
+    snapshot["tools"] = [{"provider": "test", "id": "test:read"}]
     restored = await compile_event(json.loads(json.dumps(snapshot)), memory=memory,
                                     ctx=CTX, template=request.template)
     assert restored.system == prompt.system
     assert restored.messages == prompt.messages
     assert restored.token_count == prompt.token_count
-    assert restored.tools[0].name == "pin"
+    assert restored.tools[0].name == "test__read"
 
 
 async def test_unpersisted_images_are_externalized_without_mutating_inputs(memory):
@@ -225,7 +235,7 @@ async def test_unpersisted_images_are_externalized_without_mutating_inputs(memor
     from tests.unit.test_event_blob_store import _Stub
 
     prompt, _, _ = await assembled(memory, staged=True)
-    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
+    snapshot = prompt_event_inputs(prompt, prompt.messages)
     inline = {"type": "image", "source_type": "base64", "media_type": "image/png", "data": "ZGF0YQ=="}
     snapshot["memory_blocks"][0]["record"]["content"] = [inline]
     store = _Stub()
@@ -254,7 +264,8 @@ async def test_assembled_context_is_the_event_data_and_compiles_without_live_sou
             raise AssertionError("compile must never query current capabilities")
 
     assembler = ContextAssembler([NoSource()], AssemblerDeps(memory, [], CTX,
-                                                            capability_cache=NoLiveCache()))
+                                                            capability_cache=NoLiveCache(),
+                                                            capability_provider_index=prompt_providers()))
     compiled = await assembler.compile(payload, template=request.template)
     assert compiled.system == prompt.system and compiled.messages == prompt.messages
 
@@ -272,7 +283,7 @@ async def test_task_multimodal_content_already_in_memory_keeps_only_its_id(memor
         task=NS(id="t", title="image task", user_prompt=content, user_prompt_in_memory=True),
         agent=NS(id="a"), session=NS(context_limit=100_000, reserved_output_tokens=0),
         template=None, bound_capabilities=[])
-    assembler = ContextAssembler([AgentRecallSource()], AssemblerDeps(memory, [], CTX))
+    assembler = ContextAssembler([AgentRecallSource()], AssemblerDeps(memory, [], CTX, capability_provider_index=prompt_providers()))
     inputs = await assembler.assemble(request)
     prompt = await assembler.compile(inputs)
     assert inputs.task["user_prompt_memory_id"] == "image-input"
@@ -285,6 +296,6 @@ async def test_task_multimodal_content_already_in_memory_keeps_only_its_id(memor
 async def test_record_cache_cannot_bypass_tenant_scoped_reads(memory):
     prompt, request, _ = await assembled(memory)
     ctx = ProviderContext(session_id=CTX.session_id, tenant_id="another-tenant")
-    assembler = ContextAssembler([], AssemblerDeps(memory, [], ctx))
+    assembler = ContextAssembler([], AssemblerDeps(memory, [], ctx, capability_provider_index=prompt_providers()))
     with pytest.raises(ValueError, match="memory records missing"):
         await assembler.compile(prompt.inputs, template=request.template)

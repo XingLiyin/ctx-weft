@@ -10,6 +10,7 @@ request.bound_capabilities。purpose 模板负责用途过滤、分组、排版�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -19,7 +20,6 @@ from ctx_weft.protocols.capability import (
     AgentCapability,
     Capability,
     SkillCapability,
-    SkillCapabilityProvider,
     ToolCapability,
     qualify,
 )
@@ -30,6 +30,60 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def capability_ref(capability: Capability, provider: str | None = None) -> dict[str, str]:
+    return {"provider": provider or capability.id.rsplit(":", 1)[0], "id": capability.id}
+
+
+async def resolve_capabilities(refs: list[dict], deps: AssemblerDeps):
+    """Resolve fixed references through list(), never repeat relevance retrieval."""
+    provider_names = list(dict.fromkeys(ref["provider"] for ref in refs))
+
+    async def listed(name):
+        provider = deps.capability_provider_index.get(name)
+        if provider is None:
+            return {}, "Provider is not registered"
+        try:
+            return {cap.id: cap for cap in await provider.list(deps.provider_ctx)}, None
+        except Exception as exc:
+            return {}, f"provider.list() failed: {exc}"
+
+    results = await asyncio.gather(*(listed(n) for n in provider_names))
+    listings = dict(zip(provider_names, results, strict=True))
+    resolved, errors = {}, []
+    seen = set()
+    for ref in refs:
+        name, cid = ref["provider"], ref["id"]
+        key = (name, cid)
+        if key in seen:
+            continue
+        seen.add(key)
+        capabilities, error = listings[name]
+        cap = capabilities.get(cid)
+        if cap is not None:
+            resolved[key] = cap
+            continue
+        error = error or "Capability was not returned by provider.list()"
+        logger.warning("capability unavailable: provider=%s capability_id=%s: %s", name, cid, error)
+        errors.append({"provider": name, "id": cid, "error": error})
+    return resolved, errors
+
+
+def capability_blocks(refs, resolved, deps):
+    """Transient rendering facts, excluded from PromptContext's event payload."""
+    from ctx_weft.core.assembler.context import json_value
+
+    blocks = []
+    for ref in refs:
+        cap = resolved.get((ref["provider"], ref["id"]))
+        if cap is not None:
+            provider = deps.capability_provider_index[ref["provider"]]
+            blocks.append({"definition": json_value(cap), "metadata": {
+                "provider_name": ref["provider"],
+                "provider_description": getattr(provider, "description", ""),
+            }})
+    return blocks
 
 
 def build_llm_tools(caps: list[Capability], purpose: str, *, terminal_only: bool = False) -> list[LLMTool]:
@@ -139,41 +193,6 @@ class CapabilitySource:
                 value=cap,
             )
 
-        selected_skill = getattr(
-            getattr(getattr(request, "task", None), "settings", None),
-            "skill_name",
-            "",
-        )
-        if request.purpose == "act" and selected_skill:
-            selected = next(
-                (cap for cap in skills if qualify(cap.id) == selected_skill),
-                None,
-            )
-            if selected is not None:
-                provider_name = selected.id.rsplit(":", 1)[0]
-                provider = provider_index.get(provider_name)
-                if isinstance(provider, SkillCapabilityProvider):
-                    try:
-                        definition = await provider.load_definition(
-                            selected.name,
-                            deps.provider_ctx,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "CapabilitySource: failed to load skill definition for '%s'",
-                            selected_skill,
-                        )
-                    else:
-                        if definition is not None and definition.instructions:
-                            yield ContextBlock(
-                                id=generate_id("blk"),
-                                source="capability:skill-definition",
-                                kind="directive",
-                                metadata={"kind": "skill_instructions"},
-                                value=definition,
-                            )
-
-        # ── kind="agent" → 每个 agent 独立 block，由 composer 聚合成列表 ────────
         for cap in agents:
             provider_name, provider_description = _provider_meta(cap.id)
             yield ContextBlock(

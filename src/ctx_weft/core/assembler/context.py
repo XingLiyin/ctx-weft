@@ -60,7 +60,6 @@ class PromptContext:
     subtasks: list[dict] = field(default_factory=list)
     memory_blocks: list[dict] = field(default_factory=list)
     capabilities: list[dict] = field(default_factory=list)
-    skill_definitions: list[dict] = field(default_factory=list)
     guidance: list[dict] = field(default_factory=list)
     knowledge: list[dict] = field(default_factory=list)
     references: list[dict] = field(default_factory=list)
@@ -79,6 +78,9 @@ class PromptContext:
         self._record_context: tuple[str, str] | None = None
         # Explicitly opt-in, per-input runtime cache. Never part of event data.
         self._compiled_base = None
+        # Raw Source values support standalone builders; never serialized.
+        self._capability_blocks: list[dict] = []
+        self._skill_definition: dict | None = None
 
     @classmethod
     def from_request(cls, request):
@@ -118,7 +120,7 @@ class PromptContext:
             self.skill_name = getattr(getattr(value, "settings", None), "skill_name", "")
             return
         position = sum(len(getattr(self, name)) for name in (
-            "memory_blocks", "capabilities", "skill_definitions", "guidance", "knowledge", "references"))
+            "memory_blocks", "capabilities", "guidance", "knowledge", "references"))
         item = dict(position=position, id=block.id, source=block.source,
                     kind=block.kind, metadata=json_value(block.metadata))
         memory_id = getattr(block, "memory_id", None)
@@ -130,14 +132,14 @@ class PromptContext:
                     item["record"] = json_value(value)
             self.memory_blocks.append(item)
         elif block.kind == "capabilities":
-            item["definition"] = {name: json_value(getattr(value, name)) for name in (
-                "id", "name", "kind", "description", "purposes", "input_schema") if hasattr(value, name)}
-            item["metadata"].pop("input_schema", None)
-            self.capabilities.append(item)
+            from ctx_weft.core.assembler.sources.capability import capability_ref
+
+            self.capabilities.append(capability_ref(value, block.metadata.get("provider_name")))
+            item["definition"] = json_value(value)
+            self._capability_blocks.append(item)
         elif block.kind == "directive":
-            item["definition"] = {name: getattr(value, name, "")
-                                  for name in ("skill_id", "skill_name", "instructions")}
-            self.skill_definitions.append(item)
+            self._skill_definition = {name: getattr(value, name, "") for name in (
+                "skill_id", "skill_name", "instructions")}
         elif block.kind == "guidance":
             item["state"] = json_value(value)
             self.guidance.append(item)
@@ -163,7 +165,10 @@ class PromptContext:
         names = {f.name for f in fields(cls) if not f.name.startswith("_")}
         return cls(**{name: deepcopy(value) for name, value in payload.items() if name in names})
 
-    def for_request(self, appended_messages, tools):
+    def for_request(self, appended_messages, tool_refs):
+        if any(not isinstance(ref, dict) or set(ref) != {"provider", "id"}
+               for ref in tool_refs):
+            raise ValueError("prompt tools must contain only provider/id references")
         messages = []
         for message in appended_messages:
             item = dict(role=message.role, tool_calls=json_value(message.tool_calls),
@@ -173,7 +178,7 @@ class PromptContext:
             else:
                 item["content"] = content_to_jsonable(message.content)
             messages.append(item)
-        return replace(self, appended_messages=messages, tools=json_value(tools))
+        return replace(self, appended_messages=messages, tools=json_value(tool_refs))
 
     def memory_ids(self):
         ids = [item["memory_id"] for item in self.memory_blocks if item.get("memory_id")]

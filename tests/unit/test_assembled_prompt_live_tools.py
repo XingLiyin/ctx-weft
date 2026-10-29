@@ -18,9 +18,10 @@ from ctx_weft.core.assembler.assembler import (
 )
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
 from ctx_weft.core.capabilities.cache import CapabilityCache
-from ctx_weft.core.loop.llm_gateway import resolve_request_tools
+from ctx_weft.core.loop.llm_gateway import select_request_tool_refs
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.llm import LLMMessage, LLMTool
+from tests.assembler_testkit import listed_providers
 
 
 def _llm_tool(name: str) -> LLMTool:
@@ -118,6 +119,7 @@ def _assembler(cache) -> ContextAssembler:
         memory=None, knowledge_providers=[],
         provider_ctx=SimpleNamespace(session_id="s1", task_id="tsk_1", agent_id="agt_1"),
         capability_cache=cache,
+        capability_provider_index=listed_providers(cache.available("agt_1", "tsk_1") if cache else []),
     )
     return ContextAssembler(sources=[CapabilitySource()], deps=deps)
 
@@ -135,7 +137,7 @@ async def test_request_tools_follow_pins_without_mutating_compiled_tools() -> No
 
     cache.pin("agt_1", "tsk_1", [_cap("mcp:b:pinned")])
     assert [t.name for t in prompt.tools] == ["mcp__a__search"]
-    assert [t.name for t in resolve_request_tools(prompt, SimpleNamespace(capability_cache=cache), _req("act"))] == ["mcp__a__search", "mcp__b__pinned"]
+    assert [ref["id"] for ref in select_request_tool_refs(prompt.inputs, SimpleNamespace(capability_cache=cache), _req("act"))] == ["mcp:a:search", "mcp:b:pinned"]
 
 
 async def test_assemble_leaves_compact_tools_empty() -> None:

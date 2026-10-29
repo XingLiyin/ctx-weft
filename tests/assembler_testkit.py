@@ -8,6 +8,28 @@ from ctx_weft.core.assembler.builder import PromptBuilder, _history_facts
 from ctx_weft.core.assembler.context import PromptContext
 
 
+class ListedCapabilities:
+    def __init__(self, capabilities, *, description="", definitions=None):
+        self.capabilities = capabilities
+        self.description = description
+        self.definitions = definitions or {}
+        self.calls = 0
+
+    async def list(self, ctx):
+        self.calls += 1
+        return list(self.capabilities)
+
+    async def load_definition(self, name, ctx):
+        return self.definitions.get(name)
+
+
+def listed_providers(capabilities):
+    groups = {}
+    for cap in capabilities:
+        groups.setdefault(cap.id.rsplit(":", 1)[0], []).append(cap)
+    return {name: ListedCapabilities(caps) for name, caps in groups.items()}
+
+
 def prompt_request(*, task_id: str = "t1", purpose: str = "act", **overrides):
     values = dict(
         purpose=purpose,
