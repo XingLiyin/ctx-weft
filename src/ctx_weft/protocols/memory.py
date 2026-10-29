@@ -395,6 +395,8 @@ class MemoryProvider(Protocol):
         """Read immutable records, including superseded ones, within ctx's tenant/session.
 
         Pending observe requests retain these references until ObserveApplied.
+        Prompt input snapshots retain them for the lifetime of the prompt event,
+        including any associated image blobs, even after folding/supersession.
         Providers that archive folded records must keep them addressable by ID.
         Return each existing requested ID once, ordered by (timestamp, seq_no),
         retaining request order for exact ties.

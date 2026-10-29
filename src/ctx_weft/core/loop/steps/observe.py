@@ -252,6 +252,7 @@ class ObserveStep(Step):
             tools=prompt.tools, max_rounds=state.agent.loop_config.max_turns_per_observe,
             terminal_tool_name=REPORT_OBSERVATION_NAME,
             validate_submission=lambda result: self._submission_error(result, judge_task=judge_task, terminal_only=boundary == "task_switch"),
+            prompt=prompt,
         )
         return self._interpret_submission(state, submitted, last_text,
                                           judge_task=judge_task, background=background, terminal_only=boundary == "task_switch")
@@ -267,6 +268,7 @@ class ObserveStep(Step):
         max_rounds: int,
         terminal_tool_name: str,
         validate_submission: Callable[[Any], str | None] | None = None,
+        prompt: Any = None,
     ) -> "tuple[ControlResult | None, str]":
         """Run observation rounds until a valid terminal submission or the round limit.
 
@@ -297,6 +299,9 @@ class ObserveStep(Step):
                 messages=list(current_messages),
                 tools=tools,
             )
+            from ctx_weft.core.assembler.snapshot import request_snapshot
+
+            llm_request.prompt_snapshot = request_snapshot(prompt, current_messages)
             llm_request.prompt_token_estimate = request_prompt_estimate(
                 ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
             # turn：gateway 从 metadata["turn"] 取（spec §9.4 统一口径：LLM_* 事件一律用 turn，

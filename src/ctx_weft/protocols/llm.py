@@ -113,6 +113,9 @@ class LLMMessage:
     # Request-local continuation data (e.g. signed Anthropic thinking blocks).
     # Not part of front-end events or persistent conversation storage.
     provider_state: dict[str, Any] = field(default_factory=dict)
+    # Debug prompt reconstruction only; adapters never send this field.
+    # Set only when content can be read unchanged from an immutable memory row.
+    memory_id: str | None = None
 
     def __post_init__(self) -> None:
         """把 dict 形态的 content 归一回 ContentPart dataclass（多模态 Phase 3c Task E2）。
@@ -237,6 +240,8 @@ class LLMRequest:
     prompt_token_estimate: int | None = None
     temperature: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)  # trace_id / run_id / 计费标签
+    # Collection-time assembler inputs, not compiled text or provider wire state.
+    prompt_snapshot: dict[str, Any] | None = None
 
 
 @dataclass

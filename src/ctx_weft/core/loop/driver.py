@@ -299,6 +299,8 @@ class LoopContext:
     # blob store：出网前把 ref 还原成 base64 用（Phase 3b）。默认 None → 不 rehydrate，
     # 既有构造点与既有测试行为逐字节不变。
     blob_store: "Any" = None
+    # Debug prompt snapshots externalize unpersisted image inputs separately.
+    event_blob_store: "Any" = None
     steps: "StepDriver | None" = None
     execution: StepExecution = field(default_factory=StepExecution)
 

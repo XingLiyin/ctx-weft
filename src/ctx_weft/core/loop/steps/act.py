@@ -133,7 +133,8 @@ class ActStep(Step):
             state.extra["assistant_record_id"] = persisted_turn.record_id
             current_messages.append(LLMMessage(
                 role="assistant", content=turn.text, tool_calls=asst_tool_dicts,
-                reasoning_content=turn.reasoning or None, provider_state=turn.provider_state))
+                reasoning_content=turn.reasoning or None, provider_state=turn.provider_state,
+                memory_id=persisted_turn.record_id))
             turn_record = TurnRecord(
                 turn=turn_num, messages_sent=list(current_messages),
                 assistant_text=turn.text, tool_calls=turn.tool_calls, usage=turn.usage)
@@ -168,7 +169,8 @@ class ActStep(Step):
             tool_results = await _execute_tool_calls(state, ctx, turn.tool_calls)
             for tr in tool_results:
                 current_messages.append(LLMMessage(
-                    role="tool", content=tr["result"], tool_call_id=tr["tool_call_id"]))
+                    role="tool", content=tr["result"], tool_call_id=tr["tool_call_id"],
+                    memory_id=tr.get("memory_id")))
             turn_record.tool_results = tool_results
             transcript.append(turn_record)
             await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
@@ -426,6 +428,9 @@ async def _run_llm_turn(
 
     llm_request = LLMRequest(
         model=model, system=prompt.system, messages=list(current_messages), tools=prompt.tools)
+    from ctx_weft.core.assembler.snapshot import request_snapshot
+
+    llm_request.prompt_snapshot = request_snapshot(prompt, current_messages)
     llm_request.prompt_token_estimate = request_prompt_estimate(
         ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
     # turn：LLM_REQUEST_STARTED / LLM_PROMPT_SENT 现由 gateway 发射，但 turn_num 是本函数的局部
@@ -754,6 +759,7 @@ async def _execute_tool_calls(
             "name": tc.name,
             "result": result.content,
             "is_error": result.is_error,
+            "memory_id": getattr(result, "memory_id", None),
         })
 
     ctx.run_phase.in_tool_loop = False

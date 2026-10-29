@@ -627,13 +627,28 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
             "request_id": request_id, "model": model, "llm_account": llm_account,
             "turn": turn}))
         owner.request_started = True
-        await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload={
-            "request_id": request_id, "turn": turn, "system": request.system,
-            "messages": [
+        prompt_payload = {
+            "request_id": request_id, "turn": turn,
+            "tool_names": [t.name for t in request.tools],
+        }
+        if request.prompt_snapshot is not None:
+            from ctx_weft.core.assembler.snapshot import externalize_snapshot_images
+
+            snapshot = await externalize_snapshot_images(
+                request.prompt_snapshot, event_blob_store=getattr(ctx, "event_blob_store", None),
+                ctx=ctx.provider_ctx)
+            prompt_payload["prompt_snapshot"] = {
+                **snapshot,
+                # Freeze the actual per-request live/pinned tool surface.
+                "tools": [dataclasses.asdict(tool) for tool in request.tools],
+            }
+        else:
+            # Custom callers without an assembler still use the legacy event.
+            prompt_payload.update(system=request.system, messages=[
                 {"role": m.role, "content": redact_content_for_event(m.content)}
                 for m in request.messages
-            ],
-            "tool_names": [t.name for t in request.tools]}))
+            ])
+        await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload=prompt_payload))
 
     loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
     apply_dynamic_max_tokens(ctx, request, loop_guard)
@@ -648,7 +663,8 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     midstream_deadline = None
     # Adapters/legalization may mutate a request. Every retry receives the same
     # original input, never a previous attempt's mutations or partial response.
-    original_request = copy.deepcopy(request)
+    # The snapshot belongs to the event only; adapters/retries need no copy of it.
+    original_request = copy.deepcopy(dataclasses.replace(request, prompt_snapshot=None))
     tok = getattr(ctx, "cancel_token", None)
     attempt = 0
     last_error = None

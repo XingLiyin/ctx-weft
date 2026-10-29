@@ -172,6 +172,7 @@ class AssembledPrompt:
         self.token_count = token_count
         self.metadata = metadata if metadata is not None else {}
         self.tools_fn = tools_fn
+        self.input_snapshot: dict[str, Any] | None = None
 
     @property
     def tools(self) -> list[LLMTool]:
@@ -260,8 +261,13 @@ class ContextAssembler:
         from ctx_weft.core.assembler.builder import PromptBuilder
 
         context = await self.collect(request)
-        prompt = PromptBuilder(request.token_counter).compile(
+        from ctx_weft.core.assembler.snapshot import capture_prompt, recording_counter
+
+        token_counts: dict[str, int] = {}
+        prompt = PromptBuilder(recording_counter(request.token_counter, token_counts)).compile(
             context, tools=self._tools_snapshot(context))
+        prompt.input_snapshot = capture_prompt(context)
+        prompt.input_snapshot["token_counts"] = token_counts
         self._install_live_tools(prompt, request)
         return prompt
 

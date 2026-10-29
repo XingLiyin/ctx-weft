@@ -89,6 +89,9 @@ class RecognizeIntentStep(Step):
             messages=prompt.messages,
             tools=prompt.tools,
         )
+        from ctx_weft.core.assembler.snapshot import request_snapshot
+
+        llm_request.prompt_snapshot = request_snapshot(prompt, prompt.messages)
 
         await ctx.event_bus.emit(make_event(state, EventType.RECOGNIZE_INTENT_STARTED, payload={
             "task_id": target_task_id,

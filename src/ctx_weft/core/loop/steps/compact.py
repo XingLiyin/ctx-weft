@@ -206,6 +206,9 @@ async def summarize_for_compact(
         messages=compact_prompt.messages,
         tools=[],
     )
+    from ctx_weft.core.assembler.snapshot import request_snapshot
+
+    llm_request.prompt_snapshot = request_snapshot(compact_prompt, compact_prompt.messages)
     # 一次性调用（无循环内基线）→ baseline=None，走 max(整份估算, context_tokens)。
     llm_request.prompt_token_estimate = request_prompt_estimate(
         ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), None)
