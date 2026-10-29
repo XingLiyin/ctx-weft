@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from ctx_weft.protocols import load_records
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.loop.commit import commit_round, defer_until_commit
 from ctx_weft.core.loop.driver import (
@@ -216,7 +217,7 @@ class PrepareStep(Step):
                 # v2 P3a：TASK 视图 + user/assistant 回合谓词（= 旧 USER_PROMPT+LLM_RESPONSE
                 # 口径，与 act._account_tokens 的 context_message_count 对齐）。升序视图：
                 # 基线计数之后的即新增记录。
-                view = await ctx.memory.load_view(
+                view = await load_records(ctx.memory,
                     state.scope, MemoryScope.TASK, ctx.provider_ctx)
                 convo = [
                     r for r in view

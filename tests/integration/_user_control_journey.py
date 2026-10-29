@@ -17,6 +17,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     ToolCall,
+    load_records,
 )
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.authorizer import HumanConfirmationAuthorizer
@@ -234,7 +235,7 @@ async def memory_state(memory, agent_ids):
     result = []
     for agent_id in sorted(agent_ids):
         for scope in (MemoryScope.TASK, MemoryScope.AGENT):
-            records = await memory.load_view(MemoryAddress(session_id=SID, agent_id=agent_id),
+            records = await load_records(memory, MemoryAddress(session_id=SID, agent_id=agent_id),
                                               scope, ProviderContext(session_id=SID))
             result.extend([agent_id, str(scope), r.id, r.role, str(r.content), r.metadata] for r in records)
     return result
@@ -337,10 +338,10 @@ async def prepare(rt, a, store, memory, scenario, variant):
         assert [r for kind, r in a.calls if kind == "compact"], "manual compact did not call its real LLM path"
         after = await memory_state(memory, data["agents"])
         assert before != after
-        summaries = await memory.load_view(MemoryAddress(session_id=SID, agent_id=h.agent_id),
+        summaries = await load_records(memory, MemoryAddress(session_id=SID, agent_id=h.agent_id),
             MemoryScope.AGENT, ProviderContext(session_id=SID), kinds=[MemoryKind.SUMMARY])
         assert any(FACTS[0] in str(r.content) for r in summaries)
-        oldest = await memory.load_view(MemoryAddress(session_id=SID, agent_id=h.agent_id,
+        oldest = await load_records(memory, MemoryAddress(session_id=SID, agent_id=h.agent_id,
             task_id=data["tasks"][1]), MemoryScope.TASK, ProviderContext(session_id=SID))
         assert not oldest, "manual compact did not fold the old task's real body"
         data["compacted_memory"] = after

@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from ctx_weft.core.control.reducers import rebuild_view, reduce_events
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
@@ -26,9 +26,9 @@ async def stored_content(store, memory):
     task, = reduce_events([r.event for r in rows], "").tasks.values()
     root = reduce_events([r.event for r in rows], "").sessions["crash-session"].root_agent_id
     ctx = ProviderContext(session_id="crash-session", tenant_id="default")
-    raw = await memory.load_view(MemoryAddress(session_id="crash-session", agent_id=root, task_id=task.id),
+    raw = await load_records(memory, MemoryAddress(session_id="crash-session", agent_id=root, task_id=task.id),
         MemoryScope.TASK, ctx, kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT])
-    finish = await memory.load_view(MemoryAddress(session_id="crash-session", agent_id=root),
+    finish = await load_records(memory, MemoryAddress(session_id="crash-session", agent_id=root),
         MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     finish = [r for r in finish if r.metadata.get("origin_task_id") == task.id]
     return [[(r.kind, r.role, str(r.content).replace(task.id, "<task>")) for r in records]
@@ -89,7 +89,7 @@ async def test_original_producer_ends_or_is_cancelled(tmp_path, tmp_path_factory
             assert "outputs" not in requests[0]["disposition"]["payload"]
             assert not any("parent_observe_id" in r.event.payload for r in rows)
             ctx = ProviderContext(session_id="crash-session", tenant_id="default")
-            records = await memory.load_view(MemoryAddress(session_id="crash-session", agent_id=root),
+            records = await load_records(memory, MemoryAddress(session_id="crash-session", agent_id=root),
                 MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
             own = [r for r in records if r.metadata.get("origin_task_id") == task.id]
             if scenario == "cancel":
@@ -97,7 +97,7 @@ async def test_original_producer_ends_or_is_cancelled(tmp_path, tmp_path_factory
                 assert not any("reviewed" in str(r.content) for r in own)
             else:
                 assert not own
-            raw = await memory.load_view(MemoryAddress(session_id="crash-session", agent_id=root, task_id=task.id),
+            raw = await load_records(memory, MemoryAddress(session_id="crash-session", agent_id=root, task_id=task.id),
                 MemoryScope.TASK, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
             assert any(r.role == "assistant" for r in raw)
             assert await stored_content(store, memory) == expected

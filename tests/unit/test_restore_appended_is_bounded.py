@@ -32,6 +32,7 @@ from ctx_weft.protocols import (
     AgentCapabilityProvider,
     CapabilityProviderInfo,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.events import InMemoryEventStore
@@ -175,7 +176,7 @@ async def _restore_and_collect(store, session_id="s1"):
     rt, memory = await _runtime_with(store)
     session = SimpleNamespace(id=session_id, tenant_id="default")
     await rt._restore_appended_messages(session)  # type: ignore[arg-type]
-    records = await memory.load_view(
+    records = await load_records(memory,
         MemoryAddress(session_id=session_id, task_id="tsk_1", agent_id="agt_1"),
         MemoryScope.TASK,
         ProviderContext(session_id=session_id, tenant_id="default",

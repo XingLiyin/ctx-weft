@@ -7,7 +7,7 @@ import pytest
 
 from ctx_weft import SessionStartParams
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.protocols import LLMChunk
+from ctx_weft.protocols import LLMChunk, load_records
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests._initialization import initialize_all
@@ -106,7 +106,7 @@ async def test_observe_pause_closes_stream_and_replaces_prompt(tmp_path, short, 
             await wait_until(lambda: tm.get_task(handle.task_id).status == "FINISHED")
             await wait_until(lambda: not tm._dispatch_tasks and not tm._background_asyncio_tasks)
             from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
-            records = await memory.load_view(MemoryAddress(session_id=SID, agent_id=handle.agent_id,
+            records = await load_records(memory, MemoryAddress(session_id=SID, agent_id=handle.agent_id,
                 task_id=handle.task_id), MemoryScope.TASK, ProviderContext(session_id=SID))
             user = [str(r.content) for r in records if r.role == "user"]
             assert any("NEW REQUEST" in text and "OLD REQUEST" in text for text in user)

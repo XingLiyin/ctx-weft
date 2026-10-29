@@ -17,7 +17,7 @@ from ctx_weft.core.utils.ids import mint_call_id
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway, converge_tool_output
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.core.loop.capability_gateway import tool_result_record_id
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -153,7 +153,7 @@ async def test_converged_context_and_full_text_in_the_sink():
     assert READ_TOOL_QUALIFIED_NAME in res.content
     assert "x" * 5_000 not in res.content                   # 全文未直灌
     # memory TOOL_RESULT 同为收敛版。
-    recs = await mem.load_view(scope, MemoryScope.TASK, ctx.provider_ctx)
+    recs = await load_records(mem, scope, MemoryScope.TASK, ctx.provider_ctx)
     assert [r for r in recs if r.role == "tool"][0].content == res.content
     # 全文只在 sink 里，键 = 这次执行的 invocation_id。
     assert await store.get(res.invocation_id) == big
@@ -285,7 +285,7 @@ async def test_reconcile_backfills_from_the_event_without_reconverging():
             state2, ctx2, OP_B, tc, res.content, gateway=gw2,
             attempts=(res.invocation_id,), converge=False, via="event-finished")
 
-    recs = await mem2.load_view(scope2, MemoryScope.TASK, ctx2.provider_ctx)
+    recs = await load_records(mem2, scope2, MemoryScope.TASK, ctx2.provider_ctx)
     tool_recs = [r for r in recs if r.role == "tool"]
     assert len(tool_recs) == 1, "同一确定性 id，补两次只落一条"
     assert tool_recs[0].id == tool_result_record_id(OP_B)

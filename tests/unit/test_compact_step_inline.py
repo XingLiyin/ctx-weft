@@ -49,7 +49,15 @@ class _FakeMemory:
     async def recall_recent_by_agent(self, scope, types, limit, ctx):
         return []  # no cross-task records by default
 
-    async def load_view(self, address, scope, ctx, kinds=None):
+    async def load_view_ids(self, address, scope, ctx, kinds=None, *, end_at=None):
+        records = await self._records(address, scope, ctx, kinds)
+        self._selected = {r.id: r for r in records}
+        return list(self._selected)
+
+    async def read_records(self, ids, ctx):
+        return [self._selected[i] for i in ids]
+
+    async def _records(self, address, scope, ctx, kinds=None):
         # v2：AGENT 视图（root residue 查询）→ 空；TASK 视图 → counts 推升序 user 回合
         from ctx_weft.protocols import MemoryScope
         from ctx_weft.protocols.memory_compat import MemoryKind

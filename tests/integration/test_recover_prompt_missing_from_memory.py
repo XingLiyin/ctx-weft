@@ -19,7 +19,7 @@ import pytest
 
 from ctx_weft import RuntimeConfig
 from ctx_weft.core.utils.content import content_to_text
-from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.providers.llm.adapters.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -90,7 +90,7 @@ async def test_recovery_restores_a_started_tasks_prompt_from_the_event_log(promp
 
     assert PROMPT in _all_request_text(llm.act_requests[0]), (
         "恢复后第一轮 LLM 请求必须带着原始提问")
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
     prompts = [r for r in view if r.role == "user" and PROMPT in content_to_text(r.content)]
     assert len(prompts) == 1, (
         f"提问在 memory 里必须恰好一条（缺了要补、有了不得重复）：{[r.content for r in prompts]}")

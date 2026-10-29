@@ -26,7 +26,6 @@ from ctx_weft.protocols.context import (
     normalize_content_parts,
 )
 
-
 # ── Event types ───────────────────────────────────────────────────────────────
 
 
@@ -48,8 +47,8 @@ class MemoryEventType(StrEnum):
       address: MemoryAddress（原 MemoryAddress 数据类更名——它是坐标不是范围）：全址 = ingest
         归档地址，半址 = 过滤模式（None 字段 = 通配，非法字段抛 ValueError）
       role:  user | assistant | tool —— 回合按 LLM message 模型编码，机制住 metadata（约定注册表）
-      读 = 三种记忆动作：load_view(address, scope, kinds=None) 全量幸存视图、时间正序、无
-        limit/count（22 调用点普查：limit 是伪能力兼丢最老端的潜伏 bug）/ recall_topic /
+      读 = load_view_ids(address, scope, kinds=None) 选择全量幸存 ID、时间正序、无
+        limit/count；read_records(ids) 读取不可变内容；以及 recall_topic /
         recall_semantic；recall_recent_by_agent 消解为半址 MemoryAddress(agent_id=A)。
       写 = ingest + fold(supersede_ids, replacements)：遗忘+补偿原子完成（修徒手 supersede+
         ingest 的崩溃丢摘要窗口）；keep_last/protect_types 策展政策上移框架侧，apply_compact 消亡。
@@ -143,7 +142,7 @@ class MemoryAddress:
     """记忆范围限定。
 
     【目标形态更名 MemoryAddress】它是坐标不是范围：全址 = ingest 归档地址，
-    半址 = load_view 过滤模式（None 字段 = 通配）；"scope" 一名让位给归属范围枚举
+    半址 = load_view_ids 过滤模式（None 字段 = 通配）；"scope" 一名让位给归属范围枚举
     （原 MemoryScope）。见 v2 设计 §3。"""
 
     session_id: str
@@ -239,7 +238,7 @@ class MemoryRecord:
     """recall 返回的统一表示。
 
     过渡形态（v2 P2b）：legacy 行 type 非 None；v2 行 type=None、kind/layer 给定。
-    load_view 返回前经 normalize_view 统一重打 kind/layer/address（来源回显，
+    read_records 返回前经 normalize_view 统一重打 kind/layer/address（来源回显，
     取代 metadata["task_id"] 打标——打标过渡期保留，读侧优先 address）。
     """
 
@@ -326,7 +325,7 @@ class MemoryProvider(Protocol):
     （见 ``start_session``），故「同 session_id、不同 tenant」是可达状态——provider
     **必须**按租户分区，否则就是跨租户数据泄漏（实测发生过）。要求：
     1. ingest 时记录 ``ctx.tenant_id``（归一后）随行落库；
-    2. 所有读接口（``load_view`` / ``recall_topic`` / ``recall_semantic`` /
+    2. 所有读接口（``load_view_ids`` / ``read_records`` / ``recall_topic`` / ``recall_semantic`` /
        ``list_subscriptions``）只返回**本租户**的行——即便 session_id / task_id /
        agent_id / topic 全部撞车；
     3. 归一：``None`` 与空串一律视为 ``"default"``（与 ``ProviderContext.tenant_id``
@@ -343,7 +342,7 @@ class MemoryProvider(Protocol):
     【多模态无损存取契约】
     MemoryEvent.content 可能是 str 或 list[ContentPart]（后者为多模态，含文本与图片）。宿主 provider 必须：
     1. 持久化时保持原样——若 ingest 接收 list[ContentPart]，则无损保存整体结构；
-    2. 召回时原样返回——load_view / recall_topic / recall_semantic 返回的 MemoryRecord.content
+    2. 召回时原样返回——read_records / recall_topic / recall_semantic 返回的 MemoryRecord.content
        形态必与入库时相同（str 返 str，list 返 list，无转换）；
     3. 落库推荐形态：``ctx_weft.core.utils.content.content_to_jsonable`` 用于持久化前的 JSON 序列化
       （ContentPart 是普通 dataclass，需过此转换才能 json.dumps；取回时用 ``content_from_jsonable`` 还原）；
@@ -397,18 +396,29 @@ class MemoryProvider(Protocol):
 
         Pending observe requests retain these references until ObserveApplied.
         Providers that archive folded records must keep them addressable by ID.
+        Return each existing requested ID once, ordered by (timestamp, seq_no),
+        retaining request order for exact ties.
+        Normalize representation without reapplying active-view or legacy-pair
+        visibility: the selected set may intentionally contain half a pair.
         """
         raise NotImplementedError("memory provider must support immutable record reads")
 
     @abstractmethod
-    async def load_view(
+    async def load_view_ids(
         self,
         address: "MemoryAddress",
         scope: MemoryScope,
         ctx: ProviderContext,
         kinds: list[MemoryKind] | None = None,
-    ) -> list[MemoryRecord]:
-        """工作记忆回放（v2 设计 §4）：返回该归属分区**全量幸存**记录，**时间正序**。
+        *,
+        end_at: datetime | None = None,
+    ) -> list[str]:
+        """Select the current visible record IDs without loading their contents.
+
+        Load the selected immutable records with read_records(), even if a fold
+        supersedes them between selection and loading. end_at is inclusive;
+        naive timestamps are interpreted as UTC. Selection applies legacy dispatch
+        visibility before the optional time cutoff, just like the original view.
 
         - 排序键 (timestamp, seq_no) 升序；"最近一条"取 ``[-1]``。无 limit / 无 count——
           视图天然有界（≈一个 LLM context，超了 compact 触发）。
@@ -418,8 +428,8 @@ class MemoryProvider(Protocol):
           TASK → task_id 给定=单 task 视图 / 仅 agent_id=跨 task 聚合 / 二者皆 None=ValueError；
           AGENT → agent_id 必给、task_id 非 None=ValueError；
           SESSION → task_id/agent_id 非 None=ValueError。
-        - 返回前经 memory_compat.normalize_view（legacy dispatch 配对 + kind/layer 重打）；
-          record.address 回显来源归档地址。
+        - Legacy dispatch visibility follows memory_compat normalization; orphan
+          dispatches are hidden. Returned IDs identify stored records.
         - **租户隔离**（见类 docstring）：只返回 ``ctx.tenant_id``（归一后）分区内的行。
           同 session_id 的另一个租户的记录必须不可见；反之本租户的行一条都不能少
           （修过头 → 返空 = 会话失忆）。
@@ -427,7 +437,7 @@ class MemoryProvider(Protocol):
         ...
 
     # v2 P4b-2：recall_recent / recall_recent_by_agent / count_recent 自协议删除——
-    # 读取面收敛为三种记忆动作（load_view / recall_topic / recall_semantic）。
+    # 工作视图拆为 ID 选择和不可变内容读取；topic / semantic 召回保持原接口。
     # in-memory provider 保留同名实例方法仅为存量测试兼容（非协议，见 P4a 范围决策）。
 
     @abstractmethod
@@ -507,6 +517,20 @@ class MemoryProvider(Protocol):
     async def describe(self, ctx: ProviderContext) -> MemoryProviderInfo:
         """返回 provider 能力声明。"""
         ...
+
+
+async def load_records(
+    memory: MemoryProvider,
+    address: MemoryAddress,
+    scope: MemoryScope,
+    ctx: ProviderContext,
+    kinds: list[MemoryKind] | None = None,
+    *,
+    end_at: datetime | None = None,
+) -> list[MemoryRecord]:
+    """Select and immediately load a view; callers may also defer the second step."""
+    record_ids = await memory.load_view_ids(address, scope, ctx, kinds, end_at=end_at)
+    return await memory.read_records(record_ids, ctx)
 
 
 # ── Blob 存储（多模态字节侧）─────────────────────────────────────────────────

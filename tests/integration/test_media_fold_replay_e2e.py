@@ -57,6 +57,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     TextPart,
     ToolCall,
+    load_records,
 )
 from ctx_weft.protocols.capability import (
     CapabilityEvent,
@@ -372,7 +373,7 @@ class _FoldSnapshottingMemory(InMemoryMemoryProvider):
     async def fold(self, supersede_ids, replacements, ctx):
         if self._task_address is not None:
             self.snapshots.append(
-                await self.load_view(self._task_address, MemoryScope.TASK, ctx))
+                await load_records(self, self._task_address, MemoryScope.TASK, ctx))
         return await super().fold(supersede_ids, replacements, ctx)
 
 
@@ -422,7 +423,7 @@ def _pctx(state) -> ProviderContext:
 
 
 async def _view(memory, state) -> list:
-    return await memory.load_view(state.scope, MemoryScope.TASK, _pctx(state))
+    return await load_records(memory, state.scope, MemoryScope.TASK, _pctx(state))
 
 
 async def _l05_events(runtime, state) -> list:

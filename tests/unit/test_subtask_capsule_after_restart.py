@@ -39,7 +39,7 @@ from ctx_weft.core.orchestrator.task.manager import task_payload
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.core.utils.ids import generate_id
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext, load_records
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -207,7 +207,7 @@ def _assert_capsule_present(messages) -> None:
 async def _parent_agent_turns(mem):
     """父分区（agent 层）的全部幸存对话回合。"""
     from ctx_weft.protocols import MemoryKind, MemoryScope
-    return await mem.load_view(
+    return await load_records(mem,
         MemoryAddress(session_id=SESSION, agent_id=AGENT), MemoryScope.AGENT, _pctx(),
         kinds=[MemoryKind.CONVERSATION_TURN])
 

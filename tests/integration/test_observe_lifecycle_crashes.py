@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from ctx_weft.protocols import load_records
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
@@ -84,10 +85,10 @@ async def test_foreground_and_recap_real_crash(tmp_path, mode, snapshot, cut):
             from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
             scope = MemoryAddress(session_id="crash-session", agent_id=root)
             provider_ctx = ProviderContext(session_id="crash-session", tenant_id="default")
-            publications = await memory.load_view(MemoryAddress(session_id="crash-session"), MemoryScope.SESSION, provider_ctx,
+            publications = await load_records(memory, MemoryAddress(session_id="crash-session"), MemoryScope.SESSION, provider_ctx,
                                                   kinds=[MemoryKind.PUBLICATION])
             assert len(publications) == 1
-            turns = await memory.load_view(scope, MemoryScope.AGENT, provider_ctx,
+            turns = await load_records(memory, scope, MemoryScope.AGENT, provider_ctx,
                                            kinds=[MemoryKind.CONVERSATION_TURN])
             assert sum(any(tc.get("name") == "control__finish_task" for tc in
                            (turn.metadata.get("tool_calls") or [])) for turn in turns) == 1

@@ -25,7 +25,7 @@ from ctx_weft.core.loop.steps.compact import (
 )
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.utils.ids import generate_id
-from ctx_weft.protocols import LLMChunk, LLMMessage, MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import LLMChunk, LLMMessage, MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.providers.capability_results import ResultsCapabilityProvider
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -248,7 +248,7 @@ async def test_pipeline_digest_lands_verbatim_with_markers(monkeypatch):
     digest = await summarize_for_compact(state, ctx, scope="task")
     n = await cm.collapse_task_layer(state, ctx, keep_last=0, summary_text=digest)
     assert n >= 2                                    # 折叠了输入材料
-    view = await mem.load_view(scope, MemoryScope.TASK, ctx.provider_ctx)
+    view = await load_records(mem, scope, MemoryScope.TASK, ctx.provider_ctx)
     collapsed = [r for r in view if r.metadata.get("collapsed")][0]
     body = collapsed.content
     assert CONSTRAINT_MARK in body and TODO_MARK in body and FAILURE_MARK in body
@@ -273,7 +273,7 @@ async def test_pipeline_degraded_prose_still_completes(monkeypatch):
     assert digest.degraded is True and digest.text == prose
     n = await cm.collapse_task_layer(state, ctx, keep_last=0, summary_text=digest)
     assert n >= 2
-    view = await mem.load_view(scope, MemoryScope.TASK, ctx.provider_ctx)
+    view = await load_records(mem, scope, MemoryScope.TASK, ctx.provider_ctx)
     collapsed = [r for r in view if r.metadata.get("collapsed")][0]
     assert TODO_MARK in collapsed.content
     assert collapsed.metadata["digest_degraded"] is True

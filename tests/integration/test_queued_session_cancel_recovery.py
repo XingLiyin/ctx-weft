@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ctx_weft.protocols import load_records
 from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view, reduce_events
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
@@ -35,7 +36,7 @@ async def content(memory, tasks):
     scopes.extend((MemoryScope.AGENT, MemoryAddress(session_id=SID, agent_id=aid))
                   for aid in {t.assigned_agent_id for t in tasks})
     for scope, address in scopes:
-        records = await memory.load_view(address, scope, view_ctx)
+        records = await load_records(memory, address, scope, view_ctx)
         result.extend((str(scope), address.task_id or address.agent_id, r.id, str(r.content)) for r in records)
     return sorted(result)
 

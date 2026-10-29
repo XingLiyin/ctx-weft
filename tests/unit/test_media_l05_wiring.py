@@ -40,6 +40,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
     TextPart,
+    load_records,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
@@ -122,7 +123,7 @@ async def _seed(mem, contents, *, role="user", address=_SCOPE):
 
 
 async def _view(mem, address=_SCOPE):
-    return await mem.load_view(address, MemoryScope.TASK, _pctx(),
+    return await load_records(mem, address, MemoryScope.TASK, _pctx(),
                                kinds=cm._TASK_VIEW_KINDS)
 
 
@@ -398,7 +399,7 @@ async def test_l1_summary_declares_a_ref_only_when_it_actually_echoed_one(monkey
     # ① 摘要里逐字抄了折区那个占位 → 必须声明
     ph = encode_image_placeholder(_ref(20), "image/png")
     await cm.fold_root_experience(state, ctx, 1, lambda: _const(f"SUMMARY {ph}"))
-    agent_view = await mem.load_view(_AGENT_HALF, MemoryScope.AGENT, _pctx())
+    agent_view = await load_records(mem, _AGENT_HALF, MemoryScope.AGENT, _pctx())
     summaries = [r for r in agent_view if r.kind is MemoryKind.SUMMARY]
     assert len(summaries) == 1
     assert set(collect_blob_refs(summaries[0])) == {_ref(20)}
@@ -408,7 +409,7 @@ async def test_l1_summary_declares_a_ref_only_when_it_actually_echoed_one(monkey
     await _seed_two_top_units(mem2)
     await cm.fold_root_experience(
         _l1_state(), _ctx(mem2, blobs=_Blobs()), 1, lambda: _const("PLAIN SUMMARY"))
-    agent_view2 = await mem2.load_view(_AGENT_HALF, MemoryScope.AGENT, _pctx())
+    agent_view2 = await load_records(mem2, _AGENT_HALF, MemoryScope.AGENT, _pctx())
     s2 = [r for r in agent_view2 if r.kind is MemoryKind.SUMMARY]
     assert len(s2) == 1 and collect_blob_refs(s2[0]) == []
 
@@ -488,7 +489,7 @@ async def test_fold_root_experience_demotes_its_range_before_folding(monkeypatch
     assert ranges and ranges[0], "折区为空 → 前置降级没被真的调用"
     # 折走的是最老那个单元（old）；它的图在被折之前先变成了占位
     half = MemoryAddress(session_id="s1", agent_id="a1")
-    remaining = await mem.load_view(half, MemoryScope.TASK, _pctx(),
+    remaining = await load_records(mem, half, MemoryScope.TASK, _pctx(),
                                     kinds=cm._TASK_VIEW_KINDS)
     assert [r.address.task_id for r in remaining] == ["new"]
 
@@ -628,8 +629,8 @@ def _l1_state(**kw):
 async def _summary_input_text(mem) -> str:
     """摘要输入的等价物：装配器读的就是这两个视图，每条 content 过 `content_to_text`
     （真图在这一步被静默拍扁，占位则是文本、原样留下）。"""
-    recs = await mem.load_view(_AGENT_HALF, MemoryScope.AGENT, _pctx())
-    recs += await mem.load_view(_AGENT_HALF, MemoryScope.TASK, _pctx(),
+    recs = await load_records(mem, _AGENT_HALF, MemoryScope.AGENT, _pctx())
+    recs += await load_records(mem, _AGENT_HALF, MemoryScope.TASK, _pctx(),
                                 kinds=cm._TASK_VIEW_KINDS)
     return "\n".join(r.content if isinstance(r.content, str) else content_to_text(r.content)
                      for r in recs)
@@ -669,7 +670,7 @@ async def test_l1_summary_input_holds_the_placeholder_not_a_vanished_image(monke
     assert _ref(20) in text, text                              # ← 逐字：ref 还在
     assert find_image_placeholders(text) == [(_ref(20), "image/png")], text
     # 折区那条随后就被 supersede 了，摘要文本是它唯一的痕迹——`ref` 在里面就是全部证据
-    body = await mem.load_view(_AGENT_HALF, MemoryScope.TASK, _pctx(),
+    body = await load_records(mem, _AGENT_HALF, MemoryScope.TASK, _pctx(),
                                kinds=cm._TASK_VIEW_KINDS)
     assert [r.address.task_id for r in body] == ["new"]
     # 折区外那张（`new`，记录并不消失）仍是真图 —— §6.1 只降自己的折区，
@@ -711,7 +712,7 @@ async def test_l1_demotion_runs_before_the_summary_is_generated(monkeypatch):
     assert order == ["demote", "demote", "summarize"], order   # TASK + AGENT 两次降级
     assert seen and _ref(20) in seen[0], seen      # 摘要看到的是占位不是空白
     # 摘要真的落进了新的 AGENT_COMPACT_SUMMARY（证明 `_summary()` 的返回值被用上）
-    agent_recs = await mem.load_view(_AGENT_HALF, MemoryScope.AGENT, _pctx())
+    agent_recs = await load_records(mem, _AGENT_HALF, MemoryScope.AGENT, _pctx())
     assert [r.content for r in agent_recs if r.kind is MemoryKind.SUMMARY] == ["EXP"]
 
 

@@ -8,7 +8,7 @@ from ctx_weft.core.loop.steps.finalize import (
 )
 from ctx_weft.core.models.task import Task
 from ctx_weft.core.utils.clock import now_utc
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
@@ -41,9 +41,9 @@ async def test_cancel_replays_partial_finish_without_duplicate_slots(parent, mon
     task.started_at = None  # cold recovery has no process-local start timestamp
     await synthesize_cancel_closure(memory, "session", task, ctx, "cancel")
     address = MemoryAddress(session_id="session", agent_id="agent")
-    before = await memory.load_view(address, MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    before = await load_records(memory, address, MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     await synthesize_cancel_closure(memory, "session", task, ctx, "cancel")
-    after = await memory.load_view(address, MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    after = await load_records(memory, address, MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     assert [(r.id, r.timestamp, r.content) for r in before] == [(r.id, r.timestamp, r.content) for r in after]
     finish = [r for r in after if r.metadata.get("finish_policy")]
     assert len(finish) == 2

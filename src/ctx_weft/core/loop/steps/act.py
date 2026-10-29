@@ -51,6 +51,7 @@ from ctx_weft.protocols import (
     MemoryKind,
     MemoryScope,
     ToolCall,
+    load_records,
 )
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.protocols.hitl import (
@@ -565,14 +566,14 @@ async def _account_tokens(state: LoopState, ctx: LoopContext, usage: LLMUsage) -
 
             # v2 P3a：len(视图谓词) 取代 count_recent（= 旧 USER_PROMPT+LLM_RESPONSE 口径，
             # 与 prepare._estimate_tokens 对齐）。
-            view = await ctx.memory.load_view(state.scope, MemoryScope.TASK, ctx.provider_ctx)
+            view = await load_records(ctx.memory, state.scope, MemoryScope.TASK, ctx.provider_ctx)
             agent.loop_guard.context_message_count = sum(
                 1 for r in view
                 if r.kind is MemoryKind.CONVERSATION_TURN and r.role in ("user", "assistant")
             )
         except Exception as exc:
             # best-effort 计数：失败不影响主流程，但记 debug 便于排查（不静默吞）。
-            logger.debug("load_view count for loop_guard failed: %s", exc)
+            logger.debug("load_records count for loop_guard failed: %s", exc)
 
     # 累加 session.token_used（供 token_budget 检查使用）
     state.session.token_used += usage.prompt_tokens + usage.completion_tokens

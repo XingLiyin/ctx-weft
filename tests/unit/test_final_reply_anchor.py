@@ -33,6 +33,7 @@ from ctx_weft.protocols import (
     MemoryKind,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.protocols.template import LoopConfig
@@ -106,7 +107,7 @@ async def _close(mem, task, scope, *, has_llm_summary=True):
 
 
 async def _agent_turns(mem, agent_id="ag1") -> list:
-    return await mem.load_view(
+    return await load_records(mem,
         MemoryAddress(session_id="s1", task_id=None, agent_id=agent_id),
         MemoryScope.AGENT, _pctx(), kinds=[MemoryKind.CONVERSATION_TURN])
 
@@ -176,7 +177,7 @@ async def test_task_layer_keeps_no_anchor_record() -> None:
 
     await _close(mem, _task(), scope)
 
-    view = await mem.load_view(scope, MemoryScope.TASK, _pctx(),
+    view = await load_records(mem, scope, MemoryScope.TASK, _pctx(),
                                kinds=[MemoryKind.CONVERSATION_TURN])
     assert [r.role for r in view] == ["user"], \
         f"task 层末段 raw 应被纯遗忘；实得 {[(r.role, str(r.content)[:20]) for r in view]}"
@@ -301,7 +302,7 @@ async def test_closed_capsule_summary_has_no_progress_heading() -> None:
     await mem.ingest(_ev(T.TASK_COMPACT_SUMMARY, scope, "第1段做了啥", 5,
                          role="assistant", task_id="t1"), _pctx())
 
-    view = await mem.load_view(scope, MemoryScope.TASK, _pctx(),
+    view = await load_records(mem, scope, MemoryScope.TASK, _pctx(),
                                kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY])
     summary = next(r for r in view if r.role == "assistant")
     block = record_to_history_block(summary, source="agent_recall", idx=0)

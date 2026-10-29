@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view, reduce_events
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests._snapshot_helpers import seed_snapshot
@@ -30,7 +30,7 @@ async def reports(store, memory):
     names = {t.id: str(t.user_prompt) for t in view.tasks.values()}
     result = []
     for aid in view.agents:
-        records = await memory.load_view(MemoryAddress(session_id="tree-session", agent_id=aid),
+        records = await load_records(memory, MemoryAddress(session_id="tree-session", agent_id=aid),
             MemoryScope.AGENT, ProviderContext(session_id="tree-session", tenant_id="default"),
             kinds=[MemoryKind.CONVERSATION_TURN])
         for record in records:

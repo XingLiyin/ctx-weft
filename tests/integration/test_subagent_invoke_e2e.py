@@ -23,7 +23,7 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import ToolCall
+from ctx_weft.protocols import ToolCall, load_records
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -248,7 +248,7 @@ async def test_subagent_runs_its_own_loop_and_result_flows_back():
     memory = runtime.providers.get_memory()
     pctx = ProviderContext(session_id=session_id)
     parent_addr = MemoryAddress(session_id=session_id, agent_id=root_agent_id)
-    agent_recs = await memory.load_view(parent_addr, MemoryScope.AGENT, pctx)
+    agent_recs = await load_records(memory, parent_addr, MemoryScope.AGENT, pctx)
     child_results = [
         r for r in agent_recs
         if r.role == "tool" and (r.metadata or {}).get("child_task_id") == child_task.id
@@ -263,7 +263,7 @@ async def test_subagent_runs_its_own_loop_and_result_flows_back():
     )
 
     # ── 7. blackboard：子任务结果已按 topic 发布（跨 agent 精确召回通道）──────
-    pubs = await memory.load_view(
+    pubs = await load_records(memory,
         MemoryAddress(session_id=session_id), MemoryScope.SESSION, pctx,
         kinds=[MemoryKind.PUBLICATION],
     )

@@ -837,10 +837,10 @@ async def test_background_observe_origin_pinned_on_refold_guard_early_exit(
     state, ctx = fake_state_ctx
     state.origin = EventOrigin.LOOP_OBSERVE  # 模拟调用方快照带进来的「错误」origin
 
-    async def _empty_view(address, scope, pctx, kinds=None):
+    async def _empty_view(address, scope, pctx, kinds=None, *, end_at=None):
         return []
 
-    monkeypatch.setattr(ctx.memory, "load_view", _empty_view)
+    monkeypatch.setattr(ctx.memory, "load_view_ids", _empty_view)
 
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 

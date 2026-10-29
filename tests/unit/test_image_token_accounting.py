@@ -40,6 +40,7 @@ from ctx_weft.protocols import (
     ProviderContext,
     TextPart,
     LLMMessage,
+    load_records,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.assembler_testkit import compile_prompt, prompt_request
@@ -304,7 +305,7 @@ async def test_self_healing_chain_big_images_trigger_compact_then_fold_drops_the
     addr = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     request = _assembler_request()
 
-    before = await memory.load_view(addr, MemoryScope.TASK, ctxp)
+    before = await load_records(memory, addr, MemoryScope.TASK, ctxp)
     assert len(before) == 4
     blocks_before = _blocks_from(before, request)
     total_before = sum(
@@ -327,7 +328,7 @@ async def test_self_healing_chain_big_images_trigger_compact_then_fold_drops_the
     # ③ fold 掉最老的三条（compact 的既有动作），不写补偿摘要以隔离变量。
     await memory.fold(ids[:3], [], ctxp)
 
-    after = await memory.load_view(addr, MemoryScope.TASK, ctxp)
+    after = await load_records(memory, addr, MemoryScope.TASK, ctxp)
     assert len(after) == 1, "fold 后 load_view 只应返回幸存的一条"
     blocks_after = _blocks_from(after, request)
     total_after = sum(

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from ctx_weft.core.control.reducers import rebuild_view, reduce_events
-from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests._initialization import initialize_all
@@ -50,7 +50,7 @@ async def test_user_cancel_releases_stream_dispatch_and_slots(tmp_path, mode):
             view = assert_order(events)
             if mode in ("before", "arrival", "hot"):
                 for aid in view.agents:
-                    records = await memory.load_view(MemoryAddress(session_id=SID, agent_id=aid),
+                    records = await load_records(memory, MemoryAddress(session_id=SID, agent_id=aid),
                         MemoryScope.AGENT, ProviderContext(session_id=SID, tenant_id="default"))
                     assert not any(RETRACTED in str(r.content) for r in records)
             head = await store.committed_head(SID)
@@ -84,7 +84,7 @@ async def test_user_cancel_process_crash_recovery(tmp_path, mode, cut):
             view = assert_order(events)
             raw = []
             for task in view.tasks.values():
-                raw.extend(await memory.load_view(
+                raw.extend(await load_records(memory,
                     MemoryAddress(session_id=SID, task_id=task.id, agent_id=task.assigned_agent_id),
                     MemoryScope.TASK, ProviderContext(session_id=SID, tenant_id="default")))
             assert any(RETRACTED in str(r.content) for r in raw) == (mode in ("after", "unknown"))

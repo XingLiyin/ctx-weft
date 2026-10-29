@@ -30,18 +30,18 @@ from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryRecord, MemorySc
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextBlock, ContextRequest
 
-# v2（P3a）：召回改 load_view——task 层 body = TASK 视图默认 kinds（CONVERSATION_TURN+SUMMARY，
+# v2（P3a）：召回改 load_records——task 层 body = TASK 视图默认 kinds（CONVERSATION_TURN+SUMMARY，
 # 与旧 _TASK_TYPES 四类型等价）；agent 层 = AGENT 视图默认 kinds（覆盖旧 _AGENT_TYPES，legacy
 # dispatch 配对已在 normalize_view 内完成）。全量幸存、升序——体量边界由 close/compact 的
 # fold + PromptBuilder 负责，不在召回处截断。
 
 
-#: TASK 视图默认召回的 kinds（与 `load_view` 默认口径一致：TOOL_AUDIT 不进装配）。
+#: TASK 视图默认召回的 kinds（与 `load_records` 默认口径一致：TOOL_AUDIT 不进装配）。
 _VIEW_TASK_KINDS = (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY)
 
 
 def _staged_record(ev) -> MemoryRecord:
-    """暂存的 `MemoryEvent` → 与 `load_view` 同形的 `MemoryRecord`（v2 行：type=None）。"""
+    """暂存的 `MemoryEvent` → 与 `load_records` 同形的 `MemoryRecord`（v2 行：type=None）。"""
     return MemoryRecord(
         id=ev.id or "", type=None, content=ev.content, timestamp=ev.timestamp,
         role=ev.role, topic=ev.topic, kind=ev.kind, scope=ev.scope, address=ev.address,
@@ -70,16 +70,18 @@ class AgentRecallSource:
                     yield record_to_history_block(record, source="agent_recall", idx=idx)
             return
         # ── 1) task 层 body：按 agent_id 跨 task 聚合（半址，显式 task_id=None）──
-        task_records = await deps.memory.load_view(
-            MemoryAddress(session_id=request.scope.session_id,
-                          agent_id=request.scope.agent_id),
-            MemoryScope.TASK,
-            deps.provider_ctx,
-        )
+        address = MemoryAddress(session_id=request.scope.session_id,
+                                agent_id=request.scope.agent_id)
         end = (getattr(request, "extra", None) or {}).get("observe_end_at")
-        if end is not None:
-            task_records = [r for r in task_records if r.timestamp <= end]
-        for idx, record in enumerate(task_records):  # load_view 已升序（旧→新）
+        task_ids = await deps.memory.load_view_ids(
+            address, MemoryScope.TASK, deps.provider_ctx, end_at=end)
+        agent_ids = await deps.memory.load_view_ids(
+            address, MemoryScope.AGENT, deps.provider_ctx, end_at=end)
+        records = await deps.memory.read_records(task_ids + agent_ids, deps.provider_ctx)
+        by_id = {r.id: r for r in records}
+        task_records = [by_id[i] for i in task_ids if i in by_id]
+        agent_records = [by_id[i] for i in agent_ids if i in by_id]
+        for idx, record in enumerate(task_records):  # load_records 已升序（旧→新）
             yield record_to_history_block(
                 record, source="agent_recall", idx=idx
             )
@@ -104,16 +106,7 @@ class AgentRecallSource:
             )
 
         # ── 2) agent 层残留 / 经验 ──
-        # legacy dispatch 配对已在 load_view→normalize_view 内完成，此处只面对单一表示。
-        agent_records = await deps.memory.load_view(
-            MemoryAddress(session_id=request.scope.session_id,
-                          agent_id=request.scope.agent_id),
-            MemoryScope.AGENT,
-            deps.provider_ctx,
-        )
-
-        if end is not None:
-            agent_records = [r for r in agent_records if r.timestamp <= end]
+        # legacy dispatch 配对已在 load_records→normalize_view 内完成，此处只面对单一表示。
         summaries: list = []
         conversation: list = []
         for r in agent_records:
@@ -130,5 +123,5 @@ class AgentRecallSource:
         # finish 对 + dispatch 对（均为 agent 层 conversation turn）统一按时序渲染：assistant 携
         # tool_calls、tool 携 tool_call_id（record_to_history_block 据 role 无损重建）。悬空 tool_call
         # （在途 dispatch 尚无 result）由 llm_gateway 的 drop_dangling_tool_calls 兜底。
-        for idx, c in enumerate(conversation):  # load_view 已升序
+        for idx, c in enumerate(conversation):  # load_records 已升序
             yield record_to_history_block(c, source="agent_recall", idx=idx)

@@ -20,7 +20,7 @@ import pytest
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.utils.content import content_to_text
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.llm.adapters.mock import MockResponse
@@ -103,7 +103,7 @@ async def test_answered_reply_is_injected_even_while_another_question_is_pending
 
     scope = MemoryAddress(session_id=SID, task_id=TID, agent_id=AID)
     pctx = ProviderContext(session_id=SID, tenant_id="default", task_id=TID, agent_id=AID)
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx,
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx,
                                kinds=[MemoryKind.CONVERSATION_TURN])
     replies = [r for r in view if r.metadata.get("source") == "hitl_reply"]
     assert [content_to_text(r.content) for r in replies] == ["ANSWERED_EARLIER"], (

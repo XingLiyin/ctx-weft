@@ -160,7 +160,9 @@ def validate_half_address(address: "Any", scope: MemoryScope) -> None:
             raise ValueError("SESSION view forbids task_id/agent_id")
 
 
-def normalize_view(records: "list[MemoryRecord]") -> "list[MemoryRecord]":
+def normalize_view(
+    records: "list[MemoryRecord]", *, include_unpaired_dispatch: bool = False,
+) -> "list[MemoryRecord]":
     """视图返回前的统一归一化（v2 设计 §6）。
 
     1. legacy dispatch 配对：TASK_DISPATCH/RESULT → AGENT_CONVERSATION_TURN 回合，
@@ -171,7 +173,7 @@ def normalize_view(records: "list[MemoryRecord]") -> "list[MemoryRecord]":
     from ctx_weft.protocols._legacy_dispatch import normalize_legacy_dispatch
 
     out: list[MemoryRecord] = []
-    for r in normalize_legacy_dispatch(records):
+    for r in normalize_legacy_dispatch(records, include_unpaired=include_unpaired_dispatch):
         if r.kind is None and r.type is not None:
             triple = LEGACY_TRIPLE.get(r.type)
             if triple is not None:

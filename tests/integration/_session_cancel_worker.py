@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ctx_weft import SessionStartParams
 from ctx_weft.core.models.config import RuntimeConfig
-from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import PersistenceUnavailableError
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
@@ -198,7 +198,7 @@ async def worker(path, mode, cut):
             assert not tm.open_round_task_ids
             assert rt._agent_lifecycle_manager.record_of(h.agent_id).status == "terminated"
             events = await all_events(store, SID)
-            raw = await memory.load_view(
+            raw = await load_records(memory,
                 MemoryAddress(session_id=SID, agent_id=h.agent_id, task_id=target),
                 MemoryScope.TASK,
                 ProviderContext(session_id=SID, tenant_id="default", agent_id=h.agent_id, task_id=target))

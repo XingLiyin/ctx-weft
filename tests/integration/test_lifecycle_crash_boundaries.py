@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ctx_weft.protocols import load_records
 from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view
 from ctx_weft.core.models.discriminators import TaskErrorCode
 from ctx_weft.protocols.events import EventType
@@ -92,10 +93,10 @@ async def test_observe_real_process_crash(tmp_path, snapshot, mode, cut):
                     ProviderContext,
                 )
                 provider_ctx = ProviderContext(session_id="crash-session", tenant_id="default")
-                publications = await memory.load_view(MemoryAddress(session_id="crash-session"),
+                publications = await load_records(memory, MemoryAddress(session_id="crash-session"),
                     MemoryScope.SESSION, provider_ctx, kinds=[MemoryKind.PUBLICATION])
                 assert len(publications) == 1
-                turns = await memory.load_view(MemoryAddress(session_id="crash-session", agent_id=root),
+                turns = await load_records(memory, MemoryAddress(session_id="crash-session", agent_id=root),
                     MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
                 assert sum(any(tc.get("name") == "control__finish_task" for tc in
                     (turn.metadata.get("tool_calls") or [])) for turn in turns) == 1

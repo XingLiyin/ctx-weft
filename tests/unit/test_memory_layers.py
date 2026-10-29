@@ -19,6 +19,7 @@ from ctx_weft.protocols import (
     MemoryScope,
     MemoryAddress,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
@@ -75,7 +76,7 @@ async def test_task_fold_leaves_agent_layer_untouched() -> None:
     await m.ingest(_ev(T.LLM_RESPONSE, sc, "a2", t=2), _ctx())
     await m.ingest(_ev(T.TASK_DISPATCH_RESULT, sc, "agent-exp", t=3), _ctx())  # agent 层
 
-    view = await m.load_view(sc, MemoryScope.TASK, _ctx())
+    view = await load_records(m, sc, MemoryScope.TASK, _ctx())
     fold_ids = [r.id for r in view if r.content in ("u", "a1")]  # 保 a2（策展在框架侧）
     await m.fold(fold_ids, [MemoryEvent(
         kind=MemoryKind.SUMMARY, scope=MemoryScope.TASK, address=sc, content="SUMMARY",

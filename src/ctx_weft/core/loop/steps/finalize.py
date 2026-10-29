@@ -27,7 +27,7 @@ from ctx_weft.core.utils.verdict import (
     VERDICT_FAIL,
     VERDICT_SUCCESS,
 )
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress
+from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress, load_records
 from ctx_weft.protocols.capability import qualify
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ async def _find_dispatch_frame(memory, parent_scope, task, provider_ctx):
     born-cancel 未铸框时整体跳过、不补铸）共用。
     """
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
-    existing = await memory.load_view(
+    existing = await load_records(memory,
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     frame = next(
@@ -214,7 +214,7 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
     共用本函数，字段一路带下去不会在替换时掉。
     """
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
-    recs = await memory.load_view(
+    recs = await load_records(memory,
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     stale = [r.id for r in recs
@@ -293,7 +293,7 @@ async def _is_short_leaf(memory, scope, task, loop_config, ctx, has_descendants:
     from ctx_weft.protocols import MemoryKind, MemoryScope
     # v2 P3a：全 task 层视图（对话+摘要+audit = 旧 _OWN_CONV_TYPES 五类型）一次取回，
     # assistant 轮次与 token 估算共用。
-    records = await memory.load_view(
+    records = await load_records(memory,
         scope, MemoryScope.TASK, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT])
     n_assistant = sum(
@@ -353,7 +353,7 @@ async def _supersede_final_raw_segment(memory, scope, provider_ctx) -> None:
 """
     from ctx_weft.protocols import MemoryKind, MemoryScope
     # v2 P3a：升序视图（对话 + audit，SUMMARY 锚点天然不在），段界 = 末条 role=user 回合。
-    view = await memory.load_view(
+    view = await load_records(memory,
         scope, MemoryScope.TASK, provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT])
     ids: list[str] = []

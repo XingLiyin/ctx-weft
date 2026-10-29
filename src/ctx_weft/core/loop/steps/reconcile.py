@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 
+from ctx_weft.protocols import load_records
 from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome
 from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
@@ -255,7 +256,7 @@ async def _dangling_tool_calls(memory, scope, provider_ctx) -> tuple[list[dict],
     """
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
 
-    view = await memory.load_view(
+    view = await load_records(memory,
         MemoryAddress(session_id=scope.session_id, task_id=scope.task_id,
                       agent_id=scope.agent_id),
         MemoryScope.TASK, provider_ctx,

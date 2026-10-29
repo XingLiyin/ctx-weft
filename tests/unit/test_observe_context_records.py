@@ -1,6 +1,6 @@
 """Pinned observe records remain addressable after fold and preserve isolation."""
 from ctx_weft.core.utils.clock import now_utc
-from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 
@@ -13,7 +13,7 @@ async def exercise(memory):
     await memory.ingest(raw, ctx)
     await memory.fold([raw.id], [MemoryEvent(id="replacement", kind=MemoryKind.SUMMARY,
         scope=MemoryScope.TASK, address=address, content="later summary", timestamp=now_utc())], ctx)
-    assert [r.id for r in await memory.load_view(address, MemoryScope.TASK, ctx)] == ["replacement"]
+    assert [r.id for r in await load_records(memory, address, MemoryScope.TASK, ctx)] == ["replacement"]
     record, = await memory.read_records([raw.id], ctx)
     assert record.content == "original user input" and record.role == "user"
     assert await memory.read_records([raw.id], ProviderContext(session_id="session", tenant_id="other")) == []
@@ -46,7 +46,7 @@ async def test_old_recap_cannot_replace_a_later_fold_owner():
         scope=MemoryScope.TASK, address=address, content="accepted later report", timestamp=now_utc())], ctx)
     await segment_fold(memory, address, MemoryScope.TASK, "obsolete recap", ctx,
                        operation_id="old-observe", context_record_ids=[raw.id])
-    current = await memory.load_view(address, MemoryScope.TASK, ctx)
+    current = await load_records(memory, address, MemoryScope.TASK, ctx)
     assert [(r.id, r.content) for r in current] == [("new-owner", "accepted later report")]
 
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view, reduce_events
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
 from tests._initialization import initialize_all
@@ -35,9 +35,9 @@ async def content(store, memory):
     root = view.sessions["child-session"].root_agent_id
     ctx = ProviderContext(session_id="child-session", tenant_id="default")
     scope = MemoryAddress(session_id="child-session", agent_id=root, task_id=child.id)
-    raw = await memory.load_view(scope, MemoryScope.TASK, ctx,
+    raw = await load_records(memory, scope, MemoryScope.TASK, ctx,
                                 kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY])
-    turns = await memory.load_view(MemoryAddress(session_id="child-session", agent_id=root),
+    turns = await load_records(memory, MemoryAddress(session_id="child-session", agent_id=root),
                                   MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     finish = [r for r in turns if r.metadata.get("origin_task_id") == child.id]
     normalize = lambda value: str(value).replace(child.id, "<child>")

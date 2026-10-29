@@ -24,6 +24,7 @@ from ctx_weft.protocols import (
     MemoryKind,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.context import ImagePart, TextPart
 from ctx_weft.providers.memory.sql import (
@@ -170,7 +171,7 @@ async def test_load_view_restores_blob_refs(tmp_path):
     累积逻辑）。"""
     async with _provider(tmp_path) as m:
         await m.ingest(_event(None, blob_refs=[_REF_A]), _ctx())
-        (rec,) = await m.load_view(
+        (rec,) = await load_records(m,
             _ADDR, MemoryScope.TASK, _ctx(), kinds=[MemoryKind.CONVERSATION_TURN])
         assert rec.blob_refs == [_REF_A]
 
@@ -180,7 +181,7 @@ async def test_structural_refs_are_not_duplicated_in_blob_refs(tmp_path):
     的累积逻辑会把结构化 ref 也滚进补偿记录，一轮轮越滚越多）。"""
     async with _provider(tmp_path) as m:
         await m.ingest(_event(_REF_A), _ctx())
-        (rec,) = await m.load_view(
+        (rec,) = await load_records(m,
             _ADDR, MemoryScope.TASK, _ctx(), kinds=[MemoryKind.CONVERSATION_TURN])
         assert rec.blob_refs == []
         assert collect_blob_refs(rec) == [_REF_A], "仍能从 content 采到"

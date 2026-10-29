@@ -18,6 +18,7 @@ from ctx_weft.protocols import (
     MemoryKind,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 
 _T0 = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
@@ -41,7 +42,7 @@ def _summary(content: str, minute: int) -> MemoryEvent:
 
 
 async def _view(m: InMemoryMemoryProvider) -> list[tuple[str, str]]:
-    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
+    view = await load_records(m, _ADDR, MemoryScope.TASK, _ctx())
     return [(str(r.kind), r.content) for r in view]
 
 
@@ -62,7 +63,7 @@ async def test_folds_only_current_segment_after_last_user_turn() -> None:
     assert "A2" not in contents and "T2" not in contents
     assert "recap" in contents
     # 段摘要 role=assistant（TASK 层自述体）
-    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
+    view = await load_records(m, _ADDR, MemoryScope.TASK, _ctx())
     recap = next(r for r in view if r.content == "recap")
     assert recap.role == "assistant" and recap.kind is MemoryKind.SUMMARY
 
@@ -121,7 +122,7 @@ async def test_summary_declares_surviving_placeholder_refs() -> None:
     summary_text = f"did the thing; {placeholder}"
     await segment_fold(m, _ADDR, MemoryScope.TASK, summary_text, _ctx())
 
-    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
+    view = await load_records(m, _ADDR, MemoryScope.TASK, _ctx())
     summary_rec = next(r for r in view if r.kind is MemoryKind.SUMMARY)
     assert ref in collect_blob_refs(summary_rec), (
         "折叠产出的摘要没有声明幸存占位的 ref，GC 会在宽限期后误删"

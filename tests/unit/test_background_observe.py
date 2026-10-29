@@ -14,7 +14,7 @@ from ctx_weft.core.capabilities.control_tools import (
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop import task_memory_fold as fp
 from ctx_weft.core.loop.driver import StepDriver
-from ctx_weft.protocols import MemoryEventType
+from ctx_weft.protocols import MemoryEventType, load_records
 
 
 # ── helpers shared by new ReAct-based tests ───────────────────────────────────
@@ -62,7 +62,10 @@ def _neutralize_refold_guard(monkeypatch, ctx) -> None:
             address=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         )]
 
-    monkeypatch.setattr(ctx.memory, "load_view", fake_load_view)
+    async def fake_ids(*args, **kwargs):
+        return ["guard"]
+
+    monkeypatch.setattr(ctx.memory, "load_view_ids", fake_ids)
     async def fake_read_records(ids, pctx):
         return await fake_load_view(None, None, pctx) if "guard" in ids else []
     monkeypatch.setattr(ctx.memory, "read_records", fake_read_records)
@@ -679,7 +682,7 @@ async def test_replace_finish_report_declares_surviving_placeholder_refs():
     )
 
     agent_addr = MemoryAddress(session_id="s1", agent_id="a1")
-    view = await mem.load_view(agent_addr, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    view = await load_records(mem, agent_addr, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
     recap_rec = next(r for r in view if r.role == "assistant" and "did the thing" in r.content)
     assert ref in collect_blob_refs(recap_rec), (
         "折叠重写的 finish 对没有声明幸存占位的 ref，GC 会在宽限期后误删"

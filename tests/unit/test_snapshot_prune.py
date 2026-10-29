@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from ctx_weft.protocols import load_records
 from ctx_weft.core.control.reducers import (
     apply_events,
     deserialize_view,
@@ -248,7 +249,7 @@ async def test_pruning_does_not_affect_memory_recall_of_finished_tasks() -> None
             content=f"[{tid}] 结论", role="assistant", timestamp=_T0), ctx)
 
     # AgentRecallSource 的那个半址查询
-    recalled = [r.content for r in await mem.load_view(
+    recalled = [r.content for r in await load_records(mem,
         MemoryAddress(session_id="s1", agent_id="agt_root"), MemoryScope.TASK, ctx)]
 
     assert "[old] 结论" in recalled, "被裁出投影的 task，其对话仍必须可召回"

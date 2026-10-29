@@ -12,6 +12,7 @@ import pathlib
 
 import pytest
 
+from ctx_weft.protocols import load_records
 from ctx_weft.core.loop.capability_gateway import tool_result_record_id
 from ctx_weft.protocols.capability import is_internal_call_id
 
@@ -139,7 +140,7 @@ async def test_bare_wire_ids_get_distinct_records_and_are_not_reconcluded():
     await ReconcileStep().execute(state, ctx)
     await ReconcileStep().execute(state, ctx)      # 第二轮：wire 配对认得出已完成
 
-    tool_recs = [r for r in await mem.load_view(scope, MemoryScope.TASK, pctx)
+    tool_recs = [r for r in await load_records(mem, scope, MemoryScope.TASK, pctx)
                  if r.role == "tool"]
     assert len(tool_recs) == 2, [r.id for r in tool_recs]
     assert len({r.id for r in tool_recs}) == 2, "两条不得撞同一个记录 id"

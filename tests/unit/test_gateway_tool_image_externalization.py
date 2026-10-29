@@ -19,6 +19,7 @@ from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.protocols import (
     ImagePart, MemoryAddress, MemoryScope, ProviderContext, TextPart,
+    load_records,
 )
 from ctx_weft.protocols.capability import (
     CapabilityEvent, CapabilityProviderInfo, ToolCapability, ToolCapabilityProvider,
@@ -95,7 +96,7 @@ async def _run(parts: list, *, store: MemoryBlobStore | None):
         event_bus=bus, memory_blob_store=store,
     )
     res = await gw.invoke("mcp__shot__go", {}, state, ctx)
-    view = await mem.load_view(scope, MemoryScope.TASK, ctxp)
+    view = await load_records(mem, scope, MemoryScope.TASK, ctxp)
     stored = [r for r in view if r.role == "tool"][-1].content
     return res, stored, (seen[0] if seen else {})
 

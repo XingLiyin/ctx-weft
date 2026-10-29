@@ -2,7 +2,7 @@
 import pytest
 
 from ctx_weft.core.control.reducers import rebuild_view, reduce_events
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
@@ -20,9 +20,9 @@ async def memory_result(store, memory):
     root = view.sessions["crash-session"].root_agent_id
     ctx = ProviderContext(session_id="crash-session", tenant_id="default")
     address = MemoryAddress(session_id="crash-session", agent_id=root, task_id=task.id)
-    raw = await memory.load_view(address, MemoryScope.TASK, ctx,
+    raw = await load_records(memory, address, MemoryScope.TASK, ctx,
                                  kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT])
-    finish = await memory.load_view(MemoryAddress(session_id="crash-session", agent_id=root), MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    finish = await load_records(memory, MemoryAddress(session_id="crash-session", agent_id=root), MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     finish = [r for r in finish if r.metadata.get("origin_task_id") == task.id]
     calls = [call["id"] for r in finish for call in r.metadata.get("tool_calls", [])]
     tools = [r.metadata["tool_call_id"] for r in finish if r.role == "tool"]

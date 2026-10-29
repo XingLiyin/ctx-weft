@@ -18,7 +18,7 @@ from ctx_weft.core.utils.content import collect_blob_refs
 from ctx_weft.core.loop.capability_gateway import CapabilityGateway
 from ctx_weft.core.loop.driver import LoopContext, LoopState
 from ctx_weft.core.capabilities.cache import CapabilityCache
-from ctx_weft.protocols import ImagePart, MemoryAddress, MemoryScope, ProviderContext, TextPart
+from ctx_weft.protocols import ImagePart, MemoryAddress, MemoryScope, ProviderContext, TextPart, load_records
 from ctx_weft.protocols.capability import (
     AuthorizationDecision,
     Authorizer,
@@ -105,7 +105,7 @@ async def test_human_note_with_image_reaches_the_model():
     # GC 的 mark 判据（collect_blob_refs）必须能在已入库的那条 tool 记录上看到这个 ref——
     # 否则宽限期一过，字节被回收，模型读到的 get_image 会取不回刚刚贴进来的图。
     scope = MemoryAddress(session_id="s1", task_id="tsk_1", agent_id="agt_1")
-    view = await mem.load_view(scope, MemoryScope.TASK, ProviderContext(
+    view = await load_records(mem, scope, MemoryScope.TASK, ProviderContext(
         session_id="s1", tenant_id="default", task_id="tsk_1", agent_id="agt_1"))
     tool_record = next(r for r in view if r.role == "tool")
     assert NOTE_REF in collect_blob_refs(tool_record)

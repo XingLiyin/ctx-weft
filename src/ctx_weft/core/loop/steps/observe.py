@@ -48,7 +48,7 @@ from ctx_weft.core.utils.verdict import (
     VERDICT_SUCCESS,
     normalize_verdict,
 )
-from ctx_weft.protocols import LLMMessage, LLMRequest, MemoryScope
+from ctx_weft.protocols import LLMMessage, LLMRequest, MemoryScope, load_records
 from ctx_weft.protocols.events import EventType
 
 if TYPE_CHECKING:
@@ -146,7 +146,12 @@ class ObserveStep(Step):
             # Foreground judgement shares act's cooperative stop boundary, including
             # assembler/tool awaits. Background recap keeps its independent lifetime.
             import asyncio
-            from ctx_weft.core.loop.steps.act import _await_tool_or_stop, _interrupt_pending, _park_for_interrupt
+
+            from ctx_weft.core.loop.steps.act import (
+                _await_tool_or_stop,
+                _interrupt_pending,
+                _park_for_interrupt,
+            )
             assessment = asyncio.create_task(self._observe(state, ctx, events, True, boundary))
             try:
                 finished = await _await_tool_or_stop(assessment, ctx)
@@ -524,7 +529,7 @@ class ObserveStep(Step):
             view = [r for r in view if r.scope == MemoryScope.TASK and r.address.task_id == state.task.id
                     and r.kind in (MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT)]
         else:
-            view = await ctx.memory.load_view(
+            view = await load_records(ctx.memory,
                 state.scope, MemoryScope.TASK, ctx.provider_ctx,
                 kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT],
             )
@@ -643,7 +648,7 @@ class ObserveStep(Step):
             # 正常运行时该段刚产生 raw、计数 > 0，护栏为 no-op。
             if not completion and boundary not in CLOSE_BOUNDARIES and boundary != "task_switch":
                 from ctx_weft.protocols import MemoryKind
-                view = await ctx.memory.load_view(
+                view = await load_records(ctx.memory,
                     state.scope, MemoryScope.TASK, ctx.provider_ctx,
                     kinds=[MemoryKind.CONVERSATION_TURN],
                 )
@@ -1077,16 +1082,15 @@ async def capture_context(state, ctx, options):
     if "context_record_ids" in options:
         return
     from ctx_weft.protocols import MemoryAddress, MemoryKind
-    from ctx_weft.core.utils.clock import as_utc
     end = datetime.fromisoformat(options["segment_end_at"])
-    records = []
+    record_ids = []
     for scope in (MemoryScope.TASK, MemoryScope.AGENT):
-        records.extend(await ctx.memory.load_view(
+        record_ids.extend(await ctx.memory.load_view_ids(
             MemoryAddress(session_id=state.session.id, agent_id=state.agent.id),
             scope, ctx.provider_ctx,
             kinds=([MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT]
-                   if scope == MemoryScope.TASK else None)))
-    options["context_record_ids"] = [r.id for r in records if as_utc(r.timestamp) <= as_utc(end)]
+                   if scope == MemoryScope.TASK else None), end_at=end))
+    options["context_record_ids"] = record_ids
     from copy import copy
     state.extra["observe_context_task"] = copy(state.task)
 
@@ -1096,9 +1100,14 @@ async def context_records(state, ctx):
     ids = options.get("context_record_ids")
     if ids is None:
         return None  # Legacy requests retain their bounded live-view fallback.
+    key = (state.extra.get("observe_id"), tuple(ids))
+    cached = state.extra.get("observe_record_cache")
+    if cached is not None and cached[0] == key:
+        return cached[1]
     records = await ctx.memory.read_records(ids, ctx.provider_ctx)
     if set(ids) != {r.id for r in records}:
         raise RuntimeError("observe context contains missing immutable memory records")
+    state.extra["observe_record_cache"] = (key, records)
     return records
 
 

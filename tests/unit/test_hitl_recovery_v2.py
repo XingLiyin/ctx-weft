@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 import pytest
 
 from ctx_weft import RuntimeConfig
-from ctx_weft.protocols import BLOB_REF_PREFIX, ImagePart, ProviderContext
+from ctx_weft.protocols import BLOB_REF_PREFIX, ImagePart, ProviderContext, load_records
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import ToolResultDelivery, UserTurnDelivery
 from tests._event_helpers import append_one
@@ -302,7 +302,7 @@ async def _hitl_reply_prompts(rt, task_id: str = TID, agent_id: str = "agt_root"
     scope = MemoryAddress(session_id=SID, task_id=task_id, agent_id=agent_id)
     pctx = ProviderContext(session_id=SID, tenant_id="default", task_id=task_id,
                            agent_id=agent_id)
-    view = await rt.providers.get_memory().load_view(
+    view = await load_records(rt.providers.get_memory(),
         scope, MemoryScope.TASK, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
     return [r for r in view if r.metadata.get("source") == "hitl_reply"]
 

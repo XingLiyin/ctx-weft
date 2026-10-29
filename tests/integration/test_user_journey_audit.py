@@ -14,7 +14,7 @@ import pytest
 
 from ctx_weft import SessionStartParams
 from ctx_weft.core.control.reducers import rebuild_view
-from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderContext
+from ctx_weft.protocols import LLMChunk, MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory
@@ -117,7 +117,7 @@ async def settled(rt, handle):
 
 
 async def body(memory, task_id):
-    return await memory.load_view(MemoryAddress(session_id=SID, task_id=task_id),
+    return await load_records(memory, MemoryAddress(session_id=SID, task_id=task_id),
                                   MemoryScope.TASK, ProviderContext(session_id=SID))
 
 

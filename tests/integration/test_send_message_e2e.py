@@ -17,7 +17,7 @@ import pytest
 from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import ToolCall
+from ctx_weft.protocols import ToolCall, load_records
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
@@ -219,7 +219,7 @@ async def test_send_message_injects_into_suspended_parent_and_survives_child_wak
     memory = runtime.providers.get_memory()
     scope = MemoryAddress(session_id=session_id, task_id=root_task_id, agent_id=root_agent_id)
     ctx = ProviderContext(session_id=session_id, tenant_id="default")
-    turns = await memory.load_view(scope, MemoryScope.TASK, ctx)
+    turns = await load_records(memory, scope, MemoryScope.TASK, ctx)
     assert any(
         r.role == "user" and MARKER_TEXT in content_to_text(r.content)
         for r in turns

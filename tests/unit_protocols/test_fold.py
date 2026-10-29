@@ -17,6 +17,7 @@ from ctx_weft.protocols import (
     MemoryEventType,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.memory_compat import MemoryKind
 
@@ -44,7 +45,7 @@ def _summary(content: str, minute: int, id: str | None = None) -> MemoryEvent:
 
 
 async def _view(m: InMemoryMemoryProvider) -> list[str]:
-    view = await m.load_view(_ADDR, MemoryScope.TASK, _ctx())
+    view = await load_records(m, _ADDR, MemoryScope.TASK, _ctx())
     return [r.content for r in view]
 
 

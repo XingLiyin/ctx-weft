@@ -27,6 +27,7 @@ from ctx_weft.protocols import (
     MemoryKind,
     MemoryScope,
     ProviderContext,
+    load_records,
 )
 from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.hitl import HitlReply
@@ -122,7 +123,7 @@ async def test_recovery_keeps_exactly_one_prompt(status_event, record_id) -> Non
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
         await asyncio.sleep(0.2)
 
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx,
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx,
                                kinds=[MemoryKind.CONVERSATION_TURN])
     prompts = [r for r in view if r.role == "user" and PROMPT in content_to_text(r.content)]
     assert len(prompts) == 1, f"提问必须恰好一条：{[(r.id, content_to_text(r.content)) for r in prompts]}"
@@ -160,7 +161,7 @@ async def test_requeued_task_with_revised_prompt_still_writes_it() -> None:
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
         await asyncio.sleep(0.2)
 
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx,
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx,
                                kinds=[MemoryKind.CONVERSATION_TURN])
     texts = [content_to_text(r.content) for r in view if r.role == "user"]
     assert any("[revision]" in t for t in texts), f"修订版提问必须写进对话：{texts}"
@@ -250,7 +251,7 @@ async def test_truncated_recorded_result_is_not_backfilled() -> None:
         await _poll(lambda: llm.act_requests or None, timeout=8.0)
         await asyncio.sleep(0.2)
 
-    view = await mem.load_view(scope, MemoryScope.TASK, pctx,
+    view = await load_records(mem, scope, MemoryScope.TASK, pctx,
                                kinds=[MemoryKind.CONVERSATION_TURN])
     results = [content_to_text(r.content) for r in view if r.role == "tool"]
     assert results, "这次调用仍要有一条结果（由 gateway 决定重跑还是作结）"

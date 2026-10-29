@@ -25,7 +25,7 @@ from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope, ProviderContext, load_records
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import HitlAsk, UserTurnDelivery
 from ctx_weft.providers.events import InProcessEventBus
@@ -124,7 +124,7 @@ async def test_the_result_is_published_for_the_parent_to_recall() -> None:
     assert EventType.BLACKBOARD_PUBLISHED in rec.types()
     # SESSION 视图只按 session 取，禁带 task_id/agent_id。
     sess_scope = MemoryAddress(session_id=_SID, task_id=None, agent_id=None)
-    pubs = await mem.load_view(sess_scope, MemoryScope.SESSION, ctx.provider_ctx,
+    pubs = await load_records(mem, sess_scope, MemoryScope.SESSION, ctx.provider_ctx,
                                kinds=[MemoryKind.PUBLICATION])
     mine = [r for r in pubs if (r.metadata or {}).get("task_id") == "t_child"]
     assert mine, "没有发布 = parent 按 topic 召回时读到空"
@@ -142,7 +142,7 @@ async def test_the_parent_scope_gets_the_dispatch_result() -> None:
 
     # AGENT 视图按 agent 取、禁带 task_id（那是 TASK 视图的维度）。
     parent_scope = MemoryAddress(session_id=_SID, task_id=None, agent_id="ag_parent")
-    recs = await mem.load_view(parent_scope, MemoryScope.AGENT, ctx.provider_ctx,
+    recs = await load_records(mem, parent_scope, MemoryScope.AGENT, ctx.provider_ctx,
                                kinds=[MemoryKind.CONVERSATION_TURN])
     blob = " ".join(str(r.content or "") for r in recs)
     assert "甲的资料是这样的" in blob, "parent 那边看不到子任务的产出"
