@@ -93,7 +93,7 @@ async def test_retries_from_clean_state_with_one_request_identity(chunks):
     assert len(discarded) == 1 and discarded[0].payload["will_retry"]
     assert not discarded[0].payload["usage_known"]
     assert len([e for e in events if e.type == EventType.LLM_REQUEST_STARTED]) == 1
-    assert {e.payload["request_id"] for e in events} == {"req_a_0"}
+    assert {e.payload["request_id"] for e in events} == {"req_run_a_0"}
     assert all("attempt_id" not in e.payload for e in events)
     types = [e.type for e in events]
     assert types.index(EventType.LLM_RESPONSE_DISCARDED) < types.index(EventType.LLM_RETRY_TRIGGERED)

@@ -507,6 +507,16 @@ _DEFAULT_BASE_DELAY_SEC = 2.0
 _DEFAULT_MAX_INTERVAL_SEC = 60.0
 
 
+def llm_request_id(state) -> str:
+    """Identify a logical request across runs; call before emitting its events.
+
+    The per-run sequence may restart at zero. Include the run identity so a
+    resumed agent cannot inherit an interrupted request's presentation buffers.
+    Inline retries intentionally retain the same logical request identity.
+    """
+    return f"req_{state.run_id}_{state.agent.id}_{state.sequence_counter}"
+
+
 def _cfg_val(ctx, name: str, default: float) -> float:
     cfg = getattr(ctx, "config", None)
     return getattr(cfg, name, default) if cfg is not None else default
@@ -600,7 +610,7 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     ``ObserveStep._run_react``，Task 5 起也在那里补发）。
 
     request_id：与 act.py 侧 ``_run_llm_turn`` 用同一个确定性公式
-    ``f"req_{agent.id}_{state.sequence_counter}"`` 独立算出——两边都在「本次 LLM
+    ``llm_request_id(state)`` 独立算出——两边都在「本次 LLM
     调用的任何事件被发射之前」求值（act.py 在调用本函数之前；本函数在 while 重试
     循环、也就是第一次 emit 之前），因此 ``state.sequence_counter`` 两处读到的是
     同一个值，算出来天然相等，不需要新增参数或跨函数传值。
@@ -619,8 +629,7 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     emit_stream_events = bus is not None and state is not None
     request_id: str | None = None
     if emit_stream_events:
-        agent = state.agent
-        request_id = f"req_{agent.id}_{state.sequence_counter}"
+        request_id = llm_request_id(state)
         model, llm_account = resolve_llm_identity(state)
         turn = request.metadata.get("turn", 0)
         await bus.emit(make_event(state, EventType.LLM_REQUEST_STARTED, payload={

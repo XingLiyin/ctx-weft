@@ -29,6 +29,7 @@ from ctx_weft.core.loop.driver import (
     make_event,
 )
 from ctx_weft.core.loop.llm_gateway import (
+    llm_request_id,
     request_prompt_estimate,
     resolve_llm_identity,
     stream_llm_resilient,
@@ -283,7 +284,7 @@ class ObserveStep(Step):
             # req_id：与 llm_gateway.stream_llm_resilient 内部同一确定性公式独立算出（同
             # act.py._run_llm_turn 的手法）——两边都在本次 LLM 调用任何事件发射前求值，故
             # state.sequence_counter 两处读到同一个值，天然一致，不需要新增参数或跨函数传值。
-            req_id = f"req_{agent.id}_{state.sequence_counter}"
+            req_id = llm_request_id(state)
 
             sent_msg_count = len(current_messages)  # 本轮发送条数（append 前）→ 下轮增量基线
             llm_request = LLMRequest(

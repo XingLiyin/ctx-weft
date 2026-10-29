@@ -16,6 +16,7 @@ from typing import Any
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepDriver, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
+    llm_request_id,
     request_prompt_estimate,
     resolve_llm_identity,
     stream_llm_resilient,
@@ -99,7 +100,7 @@ class RecognizeIntentStep(Step):
         # 任何事件被发射之前」求值（此处在调用 stream_llm_resilient 之前；gateway 侧在其
         # while 重试循环、也就是第一次 emit 之前），故 state.sequence_counter 两处读到同一个
         # 值，天然一致（同 act.py::_run_llm_turn / compact.py::summarize_for_compact 的手法）。
-        req_id = f"req_{state.agent.id}_{state.sequence_counter}"
+        req_id = llm_request_id(state)
         model, llm_account = resolve_llm_identity(state)
 
         from ctx_weft.protocols import ToolCall

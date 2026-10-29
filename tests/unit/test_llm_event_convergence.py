@@ -159,6 +159,41 @@ async def test_request_started_prompt_sent_response_finished_share_request_id():
     assert all(e.payload["request_id"] == rid for e in tokens)
 
 
+@pytest.mark.asyncio
+async def test_interrupted_and_resumed_runs_do_not_share_request_identity():
+    from ctx_weft.protocols import LLMCallError, LLMChunk
+
+    class TruncatedClient(_FakeLLM):
+        async def complete(self, request, stream=True):
+            yield LLMChunk(kind="reasoning", text="old reasoning")
+            yield LLMChunk(kind="token", text="old text")
+            raise LLMCallError("truncated content", retriable=True, outage=False)
+
+    first, resumed = _make_state(), _make_state()
+    first.run_id, resumed.run_id = "run-old", "run-resumed"
+    assert first.agent.id == resumed.agent.id
+    assert first.sequence_counter == resumed.sequence_counter == 0
+    old_bus, new_bus = _RecordingBus(), _RecordingBus()
+    old_ctx, new_ctx = _make_ctx(old_bus), _make_ctx(new_bus)
+    old_ctx.llm = TruncatedClient()
+    prompt = SimpleNamespace(system="SYS", tools=[])
+
+    with pytest.raises(LLMCallError, match="truncated content"):
+        await _run_llm_turn(first, old_ctx, prompt, [], 1)
+    await _run_llm_turn(resumed, new_ctx, prompt, [], 1)
+
+    old_id = next(e.payload["request_id"] for e in old_bus.events
+                  if e.type == EventType.LLM_REQUEST_STARTED)
+    new_id = next(e.payload["request_id"] for e in new_bus.events
+                  if e.type == EventType.LLM_REQUEST_STARTED)
+    assert old_id != new_id
+    assert not any(e.type in {EventType.LLM_RESPONSE_FINISHED, EventType.LLM_RESPONSE_DISCARDED}
+                   for e in old_bus.events)
+    for bus, request_id in [(old_bus, old_id), (new_bus, new_id)]:
+        assert all(e.payload["request_id"] == request_id for e in bus.events
+                   if "request_id" in e.payload)
+
+
 # ── 复审修复轮：compact 也要放行 + 补收尾事件；_maybe_predispatch_compact 的 origin ──
 #
 # 控制方复审发现：

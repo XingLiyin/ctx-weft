@@ -30,6 +30,7 @@ from ctx_weft.core.loop.driver import (
     make_event,
 )
 from ctx_weft.core.loop.llm_gateway import (
+    llm_request_id,
     PROMPT_EST_BASE_KEY,
     PROMPT_EST_SEG_KEY,
     request_prompt_estimate,
@@ -421,7 +422,7 @@ async def _run_llm_turn(
     # 「本次 LLM 调用的任何事件被发射之前」求值（此处在调用 stream_llm_resilient 之前；gateway
     # 侧在其 while 重试循环、也就是第一次 emit 之前），故 state.sequence_counter 两处读到同一个
     # 值，无需新增参数或跨函数传值即可对齐（详见 llm_gateway.stream_llm_resilient 文档字符串）。
-    req_id = f"req_{agent.id}_{state.sequence_counter}"
+    req_id = llm_request_id(state)
 
     llm_request = LLMRequest(
         model=model, system=prompt.system, messages=list(current_messages), tools=prompt.tools)

@@ -103,7 +103,7 @@ def _state():
     return SimpleNamespace(
         agent=SimpleNamespace(id="a1", loop_guard=None),
         resolved_model=SimpleNamespace(model="m", account="acct"),
-        sequence_counter=0,
+        run_id="run-test", sequence_counter=0,
         origin="",
     )
 

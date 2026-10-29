@@ -30,6 +30,7 @@ from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
+    llm_request_id,
     request_prompt_estimate,
     resolve_llm_identity,
     stream_llm_resilient,
@@ -213,7 +214,7 @@ async def summarize_for_compact(
     bus = getattr(ctx, "event_bus", None)
     # 同 gateway 那 4 个流式事件一个门禁：bus 存在 且 origin==LOOP_COMPACT（见上方 docstring）。
     should_emit_finished = bus is not None and getattr(state, "origin", None) == EventOrigin.LOOP_COMPACT
-    req_id = f"req_{agent.id}_{state.sequence_counter}" if should_emit_finished else None
+    req_id = llm_request_id(state) if should_emit_finished else None
 
     stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request))
     async with aclosing(stream):

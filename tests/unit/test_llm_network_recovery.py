@@ -350,7 +350,7 @@ async def test_act_retries_current_model_turn_without_repeating_completed_tool()
 
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
 @pytest.mark.parametrize("kind", ["token", "reasoning", "tool_call_partial"])
-async def test_midstream_fault_is_not_retried_or_executed(protocol, kind):
+async def test_exhausted_midstream_fault_does_not_execute_incomplete_output(protocol, kind):
     from ctx_weft.core.loop.steps.act import ActStep
     from tests.integration.test_interactive_task import _act_state_ctx
 
@@ -395,9 +395,9 @@ async def test_midstream_fault_is_not_retried_or_executed(protocol, kind):
 
     adapter = _adapter(protocol, respond)
     state, ctx, task, _, _ = _act_state_ctx(True, adapter, gateway=UnexpectedToolGateway())
-    ctx.config = RuntimeConfig(llm_self_heal_base_delay_sec=0)
+    ctx.config = RuntimeConfig(llm_self_heal_max_attempts=1, llm_self_heal_base_delay_sec=0)
     try:
-        with pytest.raises(LLMOutageError, match="mid-stream"):
+        with pytest.raises(LLMOutageError, match="exhausted after 1"):
             await ActStep().execute(state, ctx)
         assert len(calls) == 1
         assert body.closed
