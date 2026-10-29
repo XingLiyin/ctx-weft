@@ -10,11 +10,10 @@ from typing import Any
 import pytest
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.protocols import (
+    MemoryAddress,
     MemoryEvent,
     MemoryEventType,
-    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -22,7 +21,10 @@ from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 def _template_with_role():
     from ctx_weft.protocols.template import (
-        AgentTemplate, IdentityFacet, LoopConfig, MemoryConfig,
+        AgentTemplate,
+        IdentityFacet,
+        LoopConfig,
+        MemoryConfig,
     )
 
     return AgentTemplate(
@@ -147,6 +149,9 @@ async def fake_state_ctx():
 
     # Minimal assembler and LLM (won't be called — summarize_for_compact is monkeypatched)
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, request: Any) -> Any:
             return SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")])
 

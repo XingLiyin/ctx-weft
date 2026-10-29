@@ -111,6 +111,9 @@ def _make_ctx(tool_content: str, event_bus=None, gateway=None):
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, req):
             return SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")])
 
@@ -380,6 +383,9 @@ async def test_run_observe_react_returns_terminal_controlresult(monkeypatch):
     pctx = ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="a1")
 
     class _FakeAssembler2:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, req):
             return SimpleNamespace(system="SYS", messages=[], tools=[SimpleNamespace(name="control__report_observation")])
 

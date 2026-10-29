@@ -10,10 +10,10 @@ from ctx_weft.core.assembler.assembler import (
     ContextRequest,
 )
 from ctx_weft.core.assembler.builder import PromptBuilder
-from ctx_weft.core.assembler.context import PromptContext
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols import ToolCapability
+from tests.assembler_testkit import context_from_blocks
 
 
 def test_prompt_assets_have_only_purpose_and_runtime_surfaces() -> None:
@@ -53,7 +53,7 @@ async def test_jinja_program_places_generic_source_blocks() -> None:
         session=SimpleNamespace(context_limit=10_000, reserved_output_tokens=0),
     )
 
-    prompt = PromptBuilder(len).compile(PromptContext(request, (block,)))
+    prompt = PromptBuilder(len).compile(context_from_blocks(request, (block,)))
 
     assert prompt.messages
     assert "## Shared Context: Child result" in prompt.messages[0].content
@@ -82,7 +82,7 @@ def test_each_purpose_is_an_executable_top_level_template(purpose: str) -> None:
         session=SimpleNamespace(context_limit=20_000, reserved_output_tokens=0),
     )
 
-    prompt = PromptBuilder(len).compile(PromptContext(request, ()))
+    prompt = PromptBuilder(len).compile(context_from_blocks(request, ()))
 
     assert prompt.messages
     assert prompt.metadata["purpose"] == purpose
@@ -130,11 +130,12 @@ async def test_context_assembler_compiles_without_composer_or_budget() -> None:
         deps=AssemblerDeps(
             memory=object(),
             knowledge_providers=[],
-            provider_ctx=SimpleNamespace(task_id="task-1"),
+            provider_ctx=SimpleNamespace(session_id="session-1", task_id="task-1"),
         ),
     )
 
-    prompt = await assembler.assemble(request)
+    inputs = await assembler.assemble(request)
+    prompt = await assembler.compile(inputs, template=request.template, token_counter=request.token_counter)
 
     assert "shared result" in prompt.messages[0].content
 
@@ -171,11 +172,12 @@ async def test_tools_and_capability_prose_share_the_collected_snapshot() -> None
         deps=AssemblerDeps(
             memory=object(),
             knowledge_providers=[],
-            provider_ctx=SimpleNamespace(task_id="task-1"),
+            provider_ctx=SimpleNamespace(session_id="session-1", task_id="task-1"),
         ),
     )
 
-    prompt = await assembler.assemble(request)
+    inputs = await assembler.assemble(request)
+    prompt = await assembler.compile(inputs, template=request.template, token_counter=request.token_counter)
 
     assert [tool.name for tool in prompt.tools] == ["local__search"]
     assert "local__search" in prompt.messages[0].content
@@ -220,17 +222,18 @@ async def test_tools_follow_capabilities_pinned_after_assembly() -> None:
         deps=AssemblerDeps(
             memory=object(),
             knowledge_providers=[],
-            provider_ctx=SimpleNamespace(task_id="task-1"),
+            provider_ctx=SimpleNamespace(session_id="session-1", task_id="task-1"),
             capability_cache=cache,
         ),
     )
 
-    prompt = await assembler.assemble(request)
+    inputs = await assembler.assemble(request)
+    prompt = await assembler.compile(inputs, template=request.template, token_counter=request.token_counter)
     assert [tool.name for tool in prompt.tools] == ["local__search"]
 
     cache.pin("agent-1", "task-1", [pinned])
 
-    assert [tool.name for tool in prompt.tools] == [
-        "local__search",
-        "local__inspect",
-    ]
+    from ctx_weft.core.loop.llm_gateway import resolve_request_tools
+
+    assert [tool.name for tool in prompt.tools] == ["local__search"]
+    assert [tool.name for tool in resolve_request_tools(prompt, SimpleNamespace(capability_cache=cache), request)] == ["local__search", "local__inspect"]

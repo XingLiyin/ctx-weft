@@ -108,6 +108,9 @@ def _make_ctx(event_bus, *, llm=None):
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, req):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 

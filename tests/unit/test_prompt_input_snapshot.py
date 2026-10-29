@@ -9,7 +9,7 @@ import pytest
 
 from ctx_weft.core.assembler import ContextAssembler, ContextBlock, ContextRequest
 from ctx_weft.core.assembler.assembler import AssemblerDeps
-from ctx_weft.core.assembler.snapshot import request_snapshot, restore_prompt
+from ctx_weft.core.loop.llm_gateway import prompt_event_inputs
 from ctx_weft.protocols import (
     ImagePart,
     LLMMessage,
@@ -40,6 +40,11 @@ async def memory(request, tmp_path):
     else:
         async with open_sqlite_memory(tmp_path / "prompts.db") as provider:
             yield provider
+
+
+async def compile_event(payload, *, memory, ctx, template):
+    assembler = ContextAssembler([], AssemblerDeps(memory, [], ctx))
+    return await assembler.compile(payload, template=template)
 
 
 async def assembled(memory, purpose="act", *, staged=False, counter=None):
@@ -95,14 +100,15 @@ async def assembled(memory, purpose="act", *, staged=False, counter=None):
     if counter is not None:
         request.token_counter = counter
     assembler = ContextAssembler([Source()], AssemblerDeps(memory, [], CTX))
-    prompt = await assembler.assemble(request)
+    inputs = await assembler.assemble(request)
+    prompt = await assembler.compile(inputs, template=request.template, token_counter=request.token_counter)
     return prompt, request, blocks
 
 
 @pytest.mark.parametrize("purpose", ["act", "observe", "compact", "recognize_intent"])
 async def test_roundtrip_after_fold_and_source_state_changes(memory, purpose):
     prompt, request, blocks = await assembled(memory, purpose)
-    snapshot = request_snapshot(prompt, prompt.messages)
+    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
     snapshot["tools"] = [asdict(tool) for tool in prompt.tools]
     serialized = json.dumps(snapshot)
     assert BODY not in serialized
@@ -117,7 +123,7 @@ async def test_roundtrip_after_fold_and_source_state_changes(memory, purpose):
     blocks[4].value["guidance"]["review_note"] = "new next step"
     blocks[5].value.content = "new knowledge"
     await memory.fold(["input"], [], CTX)
-    restored = await restore_prompt(json.loads(serialized), memory=memory, ctx=CTX,
+    restored = await compile_event(json.loads(serialized), memory=memory, ctx=CTX,
                                     template=request.template)
     assert restored.system == prompt.system
     assert restored.messages == prompt.messages
@@ -129,13 +135,13 @@ async def test_unpersisted_inputs_and_react_messages_are_self_contained(memory):
     await memory.fold(["input"], [], CTX)
     appended = [LLMMessage("assistant", "observer's first attempt"),
                 LLMMessage("user", "submit using the terminal tool")]
-    snapshot = request_snapshot(prompt, prompt.messages + appended)
+    snapshot = prompt_event_inputs(prompt, prompt.messages + appended, prompt.tools)
 
     class NoReads:
         async def read_records(self, ids, ctx):
             raise AssertionError("staged inputs should not need a persisted row")
 
-    restored = await restore_prompt(json.loads(json.dumps(snapshot)), memory=NoReads(),
+    restored = await compile_event(json.loads(json.dumps(snapshot)), memory=NoReads(),
                                     ctx=CTX, template=request.template)
     assert restored.messages == prompt.messages + appended
 
@@ -149,22 +155,22 @@ async def test_appended_persisted_messages_use_ids_and_keep_actual_calls(memory)
         kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
         metadata={"tool_call_id": "call"}), CTX)
     appended = [LLMMessage("tool", content, tool_call_id="call", memory_id="result")]
-    snapshot = request_snapshot(prompt, prompt.messages + appended)
+    snapshot = prompt_event_inputs(prompt, prompt.messages + appended, prompt.tools)
     assert "content" not in snapshot["appended_messages"][0]
-    restored = await restore_prompt(snapshot, memory=memory, ctx=CTX, template=request.template)
+    restored = await compile_event(snapshot, memory=memory, ctx=CTX, template=request.template)
     assert restored.messages[-1].content == content
     assert restored.messages[-1].tool_call_id == "call"
 
 
 async def test_missing_reference_and_wrong_session_fail_explicitly(memory):
     prompt, request, _ = await assembled(memory)
-    snapshot = request_snapshot(prompt, prompt.messages)
+    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
     missing = deepcopy(snapshot)
     missing["memory_blocks"][0]["memory_id"] = "missing"
     with pytest.raises(ValueError, match="memory records missing"):
-        await restore_prompt(missing, memory=memory, ctx=CTX, template=request.template)
+        await compile_event(missing, memory=memory, ctx=CTX, template=request.template)
     with pytest.raises(ValueError, match="different session"):
-        await restore_prompt(snapshot, memory=memory, ctx=ProviderContext(session_id="other"),
+        await compile_event(snapshot, memory=memory, ctx=ProviderContext(session_id="other"),
                              template=request.template)
 
 
@@ -179,34 +185,34 @@ async def test_gateway_emits_inputs_and_freezes_actual_live_tools(memory):
     bus = _RecordingBus()
     ctx, state = _make_ctx(bus), _make_state()
     request = LLMRequest("model", prompt.system, prompt.messages, tools=[pinned],
-                         prompt_snapshot=request_snapshot(prompt, prompt.messages))
+                         prompt_inputs=prompt_event_inputs(prompt, prompt.messages, prompt.tools))
     stream = stream_llm_resilient(ctx, state, request)
     async for _ in stream:
         stream.accept_current()
     event = next(event for event in bus.events if event.type == EventType.LLM_PROMPT_SENT)
-    assert ctx.llm.last_request.prompt_snapshot is None
+    assert ctx.llm.last_request.prompt_inputs is None
     assert "system" not in event.payload and "messages" not in event.payload
     assert BODY not in json.dumps(event.payload)
-    assert event.payload["prompt_snapshot"]["tools"] == [asdict(pinned)]
+    assert event.payload["tools"] == [asdict(pinned)]
     pinned.description = "mutated later"
-    assert event.payload["prompt_snapshot"]["tools"][0]["description"] == "discovered after assembly"
+    assert event.payload["tools"][0]["description"] == "discovered after assembly"
 
 
 async def test_recompile_uses_current_template_without_collecting_again(memory):
     prompt, request, _ = await assembled(memory)
-    snapshot = request_snapshot(prompt, prompt.messages)
+    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
     assert "role for act" not in json.dumps(snapshot)
     request.template.identity["act"].text = "current identity template"
-    restored = await restore_prompt(snapshot, memory=memory, ctx=CTX, template=request.template)
+    restored = await compile_event(snapshot, memory=memory, ctx=CTX, template=request.template)
     assert "current identity template" in restored.system
 
 
 async def test_saved_token_counts_and_pins_do_not_change_prefix_budget(memory):
     prompt, request, _ = await assembled(memory, counter=lambda text: len(text) * 3)
-    snapshot = request_snapshot(prompt, prompt.messages)
+    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
     snapshot["tools"] = [{"name": "pin", "description": "large pinned tool " * 50_000,
                           "input_schema": {"type": "object"}}]
-    restored = await restore_prompt(json.loads(json.dumps(snapshot)), memory=memory,
+    restored = await compile_event(json.loads(json.dumps(snapshot)), memory=memory,
                                     ctx=CTX, template=request.template)
     assert restored.system == prompt.system
     assert restored.messages == prompt.messages
@@ -215,17 +221,79 @@ async def test_saved_token_counts_and_pins_do_not_change_prefix_budget(memory):
 
 
 async def test_unpersisted_images_are_externalized_without_mutating_inputs(memory):
-    from ctx_weft.core.assembler.snapshot import externalize_snapshot_images
+    from ctx_weft.core.loop.llm_gateway import externalize_prompt_images
     from tests.unit.test_event_blob_store import _Stub
 
     prompt, _, _ = await assembled(memory, staged=True)
-    snapshot = request_snapshot(prompt, prompt.messages)
+    snapshot = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
     inline = {"type": "image", "source_type": "base64", "media_type": "image/png", "data": "ZGF0YQ=="}
     snapshot["memory_blocks"][0]["record"]["content"] = [inline]
     store = _Stub()
-    stored = await externalize_snapshot_images(snapshot, event_blob_store=store, ctx=CTX)
+    stored = await externalize_prompt_images(snapshot, event_blob_store=store, ctx=CTX)
     assert "ZGF0YQ==" not in json.dumps(stored)
     part = stored["memory_blocks"][0]["record"]["content"][0]
     assert part["source_type"] == "ref"
     assert (await store.get(part["data"], CTX))[0] == b"data"
     assert snapshot["memory_blocks"][0]["record"]["content"][0] == inline
+
+
+async def test_assembled_context_is_the_event_data_and_compiles_without_live_sources(memory):
+    prompt, request, _ = await assembled(memory)
+    assert not hasattr(prompt.inputs, "request")
+    assert BODY not in json.dumps(asdict(prompt.inputs))
+    payload = prompt.inputs.to_payload()
+    assert "prompt_snapshot" not in payload
+
+    class NoSource:
+        async def fetch(self, *args):
+            raise AssertionError("compile must never collect sources")
+            yield
+
+    class NoLiveCache:
+        def available(self, *args):
+            raise AssertionError("compile must never query current capabilities")
+
+    assembler = ContextAssembler([NoSource()], AssemblerDeps(memory, [], CTX,
+                                                            capability_cache=NoLiveCache()))
+    compiled = await assembler.compile(payload, template=request.template)
+    assert compiled.system == prompt.system and compiled.messages == prompt.messages
+
+
+async def test_previous_snapshot_events_use_the_same_compiler(memory):
+    prompt, request, _ = await assembled(memory)
+    payload = prompt_event_inputs(prompt, prompt.messages, prompt.tools)
+    payload["version"] = 1
+    compiled = await compile_event({"prompt_snapshot": payload}, memory=memory,
+                                   ctx=CTX, template=request.template)
+    assert compiled.system == prompt.system and compiled.messages == prompt.messages
+
+
+async def test_task_multimodal_content_already_in_memory_keeps_only_its_id(memory):
+    from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
+
+    content = [TextPart(text="look at this image"), ImagePart(
+        data="blob:" + "b" * 64, media_type="image/png", source_type="ref")]
+    await memory.ingest(MemoryEvent(
+        id="image-input", address=ADDRESS, content=content, timestamp=NOW, role="user",
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK), CTX)
+    request = ContextRequest(
+        purpose="act", scope=ADDRESS,
+        task=NS(id="t", title="image task", user_prompt=content, user_prompt_in_memory=True),
+        agent=NS(id="a"), session=NS(context_limit=100_000, reserved_output_tokens=0),
+        template=None, bound_capabilities=[])
+    assembler = ContextAssembler([AgentRecallSource()], AssemblerDeps(memory, [], CTX))
+    inputs = await assembler.assemble(request)
+    prompt = await assembler.compile(inputs)
+    assert inputs.task["user_prompt_memory_id"] == "image-input"
+    assert "user_prompt" not in inputs.task
+    assert "blob:" not in json.dumps(inputs.to_payload())
+    assert any(any(isinstance(part, ImagePart) for part in message.content)
+               for message in prompt.messages if isinstance(message.content, list))
+
+
+async def test_record_cache_cannot_bypass_tenant_scoped_reads(memory):
+    prompt, request, _ = await assembled(memory)
+    ctx = ProviderContext(session_id=CTX.session_id, tenant_id="another-tenant")
+    assembler = ContextAssembler([], AssemblerDeps(memory, [], ctx))
+    with pytest.raises(ValueError, match="memory records missing"):
+        await assembler.compile(prompt.inputs, template=request.template)

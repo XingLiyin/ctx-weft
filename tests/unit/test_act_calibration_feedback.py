@@ -15,10 +15,9 @@ from types import SimpleNamespace
 
 import ctx_weft.core.loop.steps.act as _act_mod
 from ctx_weft.core.loop.llm_gateway import PROMPT_EST_SEG_KEY, _estimate_request_tokens
-from ctx_weft.protocols import LLMUsage, MemoryAddress
 from ctx_weft.core.loop.steps.act import _run_llm_turn
+from ctx_weft.protocols import LLMUsage, MemoryAddress
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-
 
 # ── minimal fakes（与 test_llm_request_identity._make_state/_make_ctx 同构）───────
 
@@ -86,11 +85,14 @@ def _make_state(*, context_tokens: int = 0):
 
 
 def _make_ctx(event_bus, tokenizer: HeuristicTokenizer):
-    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-    from ctx_weft.protocols import ProviderContext
     from ctx_weft.core.loop.driver import LoopContext
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, req):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 

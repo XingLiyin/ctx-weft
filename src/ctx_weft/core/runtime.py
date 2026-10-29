@@ -5045,6 +5045,7 @@ class CtxWeftRuntime:
         deps = AssemblerDeps(
             memory=memory,
             knowledge_providers=self.providers.get_knowledge_providers(),
+            template_lookup=self._template_lookup,
             provider_ctx=provider_ctx,
             capability_cache=self._capability_cache,
             task_manager=task_manager,

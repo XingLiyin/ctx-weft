@@ -232,9 +232,9 @@ class ObserveStep(Step):
         # Session-global control tools survive per-agent cache eviction.
         bound = cache.get(state.agent.id) if cache is not None else []
         extra = {"observe_boundary": boundary}
-        records = await context_records(state, ctx)
-        if records is not None:
-            extra["observe_records"] = records
+        record_ids = execution.options.get("context_record_ids")
+        if record_ids is not None:
+            extra["observe_record_ids"] = list(record_ids)
         else:
             extra["observe_end_at"] = _execution(ctx).started_at
         context_task = state.extra.get("observe_context_task", state.task)
@@ -246,10 +246,19 @@ class ObserveStep(Step):
             bound_capabilities=bound, token_counter=ctx.llm.tokenizer.count,
             extra=extra, intent=ReviewIntent(judge_task=judge_task, terminal_only=boundary == "task_switch"),
         )
-        prompt = await ctx.assembler.assemble(request)
+        inputs = await ctx.assembler.assemble(request)
+        prompt = await ctx.assembler.compile(
+            inputs, template=request.template, token_counter=request.token_counter)
+        if record_ids is not None and getattr(prompt, "inputs", None) is not None:
+            # Reuse the compiler's immutable read for the later observe fold.
+            records = [inputs._records[record_id] for record_id in record_ids]
+            records.sort(key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
+            state.extra["observe_record_cache"] = ((state.extra.get("observe_id"), tuple(record_ids)), records)
+        from ctx_weft.core.loop.llm_gateway import resolve_request_tools
+
         submitted, last_text = await self._run_react(
             state, ctx, system=prompt.system, messages=list(prompt.messages),
-            tools=prompt.tools, max_rounds=state.agent.loop_config.max_turns_per_observe,
+            tools=resolve_request_tools(prompt, ctx, state), max_rounds=state.agent.loop_config.max_turns_per_observe,
             terminal_tool_name=REPORT_OBSERVATION_NAME,
             validate_submission=lambda result: self._submission_error(result, judge_task=judge_task, terminal_only=boundary == "task_switch"),
             prompt=prompt,
@@ -299,9 +308,9 @@ class ObserveStep(Step):
                 messages=list(current_messages),
                 tools=tools,
             )
-            from ctx_weft.core.assembler.snapshot import request_snapshot
+            from ctx_weft.core.loop.llm_gateway import prompt_event_inputs
 
-            llm_request.prompt_snapshot = request_snapshot(prompt, current_messages)
+            llm_request.prompt_inputs = prompt_event_inputs(prompt, current_messages, tools)
             llm_request.prompt_token_estimate = request_prompt_estimate(
                 ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
             # turn：gateway 从 metadata["turn"] 取（spec §9.4 统一口径：LLM_* 事件一律用 turn，

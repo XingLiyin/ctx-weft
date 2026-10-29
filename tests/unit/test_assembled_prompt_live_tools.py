@@ -16,7 +16,9 @@ from ctx_weft.core.assembler.assembler import (
     ContextAssembler,
     ContextRequest,
 )
+from ctx_weft.core.assembler.sources.capability import CapabilitySource
 from ctx_weft.core.capabilities.cache import CapabilityCache
+from ctx_weft.core.loop.llm_gateway import resolve_request_tools
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.llm import LLMMessage, LLMTool
 
@@ -117,28 +119,34 @@ def _assembler(cache) -> ContextAssembler:
         provider_ctx=SimpleNamespace(session_id="s1", task_id="tsk_1", agent_id="agt_1"),
         capability_cache=cache,
     )
-    return ContextAssembler(sources=[], deps=deps)
+    return ContextAssembler(sources=[CapabilitySource()], deps=deps)
 
 
-async def test_assemble_installs_live_tools_fn() -> None:
+async def _compiled(cache, purpose):
+    assembler = _assembler(cache)
+    return await assembler.compile(await assembler.assemble(_req(purpose)))
+
+
+async def test_request_tools_follow_pins_without_mutating_compiled_tools() -> None:
     cache = CapabilityCache()
     cache.put("agt_1", [_cap("mcp:a:search")])
-    prompt = await _assembler(cache).assemble(_req("act"))
+    prompt = await _compiled(cache, "act")
     assert [t.name for t in prompt.tools] == ["mcp__a__search"]
 
     cache.pin("agt_1", "tsk_1", [_cap("mcp:b:pinned")])
-    assert [t.name for t in prompt.tools] == ["mcp__a__search", "mcp__b__pinned"]
+    assert [t.name for t in prompt.tools] == ["mcp__a__search"]
+    assert [t.name for t in resolve_request_tools(prompt, SimpleNamespace(capability_cache=cache), _req("act"))] == ["mcp__a__search", "mcp__b__pinned"]
 
 
 async def test_assemble_leaves_compact_tools_empty() -> None:
     """compact 的工具面恒为空——不装 tools_fn。"""
     cache = CapabilityCache()
     cache.put("agt_1", [_cap("mcp:a:search")])
-    prompt = await _assembler(cache).assemble(_req("compact"))
+    prompt = await _compiled(cache, "compact")
     assert prompt.tools == []
 
 
 async def test_assemble_without_cache_keeps_compiled_tools() -> None:
     cache = None
-    prompt = await _assembler(cache).assemble(_req("act"))
+    prompt = await _compiled(cache, "act")
     assert prompt.tools == []

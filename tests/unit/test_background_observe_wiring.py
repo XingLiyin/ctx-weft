@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver
-from ctx_weft.protocols.events import EventType
 from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.loop.steps.suspend import SuspendStep
@@ -22,6 +21,7 @@ from ctx_weft.protocols import (
     MemoryAddress,
     ProviderContext,
 )
+from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.step_helpers import patch_observe_start
@@ -103,6 +103,9 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
             self.emitted.append(event)
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, request: Any) -> Any:
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 

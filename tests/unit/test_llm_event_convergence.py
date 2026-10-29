@@ -116,6 +116,9 @@ def _make_ctx(event_bus):
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, req):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 
@@ -173,6 +176,9 @@ async def test_request_started_prompt_sent_response_finished_share_request_id():
 
 
 class _FakeCompactAssembler:
+    async def compile(self, inputs, **kwargs):
+        return inputs
+
     async def assemble(self, req):
         return SimpleNamespace(system="SYS-COMPACT", messages=[], tools=[])
 
@@ -534,6 +540,9 @@ def _make_recognize_intent_ctx(event_bus, *, llm=None, config=None):
     from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
     class _FakeRIAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, req):
             return SimpleNamespace(system="SYS-RI", messages=[], tools=[])
 

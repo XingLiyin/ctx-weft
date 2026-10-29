@@ -197,7 +197,9 @@ async def summarize_for_compact(
         extra={"compact_scope": scope},
         intent=CompactIntent(scope="agent" if scope == "agent" else "task"),
     )
-    compact_prompt = await ctx.assembler.assemble(request)
+    inputs = await ctx.assembler.assemble(request)
+    compact_prompt = await ctx.assembler.compile(
+        inputs, template=request.template, token_counter=request.token_counter)
 
     model, llm_account = resolve_llm_identity(state)
     llm_request = LLMRequest(
@@ -206,9 +208,9 @@ async def summarize_for_compact(
         messages=compact_prompt.messages,
         tools=[],
     )
-    from ctx_weft.core.assembler.snapshot import request_snapshot
+    from ctx_weft.core.loop.llm_gateway import prompt_event_inputs
 
-    llm_request.prompt_snapshot = request_snapshot(compact_prompt, compact_prompt.messages)
+    llm_request.prompt_inputs = prompt_event_inputs(compact_prompt, compact_prompt.messages, [])
     # 一次性调用（无循环内基线）→ baseline=None，走 max(整份估算, context_tokens)。
     llm_request.prompt_token_estimate = request_prompt_estimate(
         ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), None)

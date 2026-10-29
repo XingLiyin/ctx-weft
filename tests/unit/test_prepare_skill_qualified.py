@@ -5,7 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.builder import PromptBuilder
-from ctx_weft.core.assembler.context import PromptContext
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
 from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.protocols.capability import (
@@ -15,6 +14,7 @@ from ctx_weft.protocols.capability import (
     SkillDefinition,
 )
 from ctx_weft.protocols.context import ProviderContext
+from tests.assembler_testkit import context_from_blocks
 
 
 class _SkillProvider(SkillCapabilityProvider):
@@ -87,6 +87,6 @@ async def test_loads_by_bare_name_from_qualified_skill_name() -> None:
     assert directive.value.instructions == "BODY"
     assert provider.loaded_with == "pdf"
 
-    prompt = PromptBuilder(len).compile(PromptContext(request, tuple(blocks)))
+    prompt = PromptBuilder(len).compile(context_from_blocks(request, tuple(blocks)), template=request.template)
     assert "BODY" in prompt.messages[0].content
     assert "skill_executor__exec_script" in prompt.messages[0].content

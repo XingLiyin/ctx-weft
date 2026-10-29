@@ -241,7 +241,7 @@ class LLMRequest:
     temperature: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)  # trace_id / run_id / 计费标签
     # Collection-time assembler inputs, not compiled text or provider wire state.
-    prompt_snapshot: dict[str, Any] | None = None
+    prompt_inputs: dict[str, Any] | None = None
 
 
 @dataclass

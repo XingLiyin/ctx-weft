@@ -77,7 +77,9 @@ class RecognizeIntentStep(Step):
             token_counter=ctx.llm.tokenizer.count,
             intent=MetadataIntent(),
         )
-        prompt = await ctx.assembler.assemble(request)
+        inputs = await ctx.assembler.assemble(request)
+        prompt = await ctx.assembler.compile(
+            inputs, template=request.template, token_counter=request.token_counter)
         if token is not None:
             token.raise_if_cancelled()
 
@@ -89,9 +91,9 @@ class RecognizeIntentStep(Step):
             messages=prompt.messages,
             tools=prompt.tools,
         )
-        from ctx_weft.core.assembler.snapshot import request_snapshot
+        from ctx_weft.core.loop.llm_gateway import prompt_event_inputs
 
-        llm_request.prompt_snapshot = request_snapshot(prompt, prompt.messages)
+        llm_request.prompt_inputs = prompt_event_inputs(prompt, prompt.messages, llm_request.tools)
 
         await ctx.event_bus.emit(make_event(state, EventType.RECOGNIZE_INTENT_STARTED, payload={
             "task_id": target_task_id,

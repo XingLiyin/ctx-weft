@@ -426,11 +426,12 @@ async def _run_llm_turn(
     # 值，无需新增参数或跨函数传值即可对齐（详见 llm_gateway.stream_llm_resilient 文档字符串）。
     req_id = f"req_{agent.id}_{state.sequence_counter}"
 
-    llm_request = LLMRequest(
-        model=model, system=prompt.system, messages=list(current_messages), tools=prompt.tools)
-    from ctx_weft.core.assembler.snapshot import request_snapshot
+    from ctx_weft.core.loop.llm_gateway import prompt_event_inputs, resolve_request_tools
 
-    llm_request.prompt_snapshot = request_snapshot(prompt, current_messages)
+    llm_request = LLMRequest(
+        model=model, system=prompt.system, messages=list(current_messages),
+        tools=resolve_request_tools(prompt, ctx, state))
+    llm_request.prompt_inputs = prompt_event_inputs(prompt, current_messages, llm_request.tools)
     llm_request.prompt_token_estimate = request_prompt_estimate(
         ctx.llm.tokenizer, llm_request, getattr(agent, "loop_guard", None), baseline_msg_count)
     # turn：LLM_REQUEST_STARTED / LLM_PROMPT_SENT 现由 gateway 发射，但 turn_num 是本函数的局部

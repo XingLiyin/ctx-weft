@@ -26,24 +26,29 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
+from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
 from ctx_weft.core.control.converters import task_from_projection
 from ctx_weft.core.control.reducers import reduce_events
-from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.core.loop.steps.finalize import (
     ensure_dispatch_frame_at_start,
     finalize_task_memory,
 )
-from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
-from ctx_weft.core.orchestrator.task.manager import task_payload
 from ctx_weft.core.models.task import NormalTaskSettings, Task
+from ctx_weft.core.orchestrator.task.manager import task_payload
 from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.core.utils.ids import generate_id
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext, load_records
+from ctx_weft.protocols import (
+    MemoryAddress,
+    MemoryEvent,
+    MemoryEventType,
+    ProviderContext,
+    load_records,
+)
+from ctx_weft.protocols.events import Event, EventType
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from tests.assembler_testkit import history_messages
+from tests.assembler_testkit import history_messages, recalled_blocks
 
 pytestmark = pytest.mark.asyncio
 
@@ -128,7 +133,7 @@ async def _compose_parent_messages(mem):
     """REAL AgentRecallSource → REAL PromptBuilder：父续跑时装配出的 message 序列。"""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=_task_scope(PARENT), token_counter=estimate_tokens)
-    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = await recalled_blocks(req, deps)
     return history_messages(blocks, task_id=PARENT)
 
 

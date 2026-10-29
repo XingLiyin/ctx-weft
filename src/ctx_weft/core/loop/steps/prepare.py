@@ -110,12 +110,12 @@ class PrepareStep(Step):
         settings = state.task.settings
         purpose = settings.purpose if isinstance(settings, NormalTaskSettings) else "act"
 
-        def _assemble():
+        async def _assemble():
             # 这一轮暂存、还没落盘的对话记录（用户消息 / HITL 答复 / 答复回灌的工具结果，
             # 见 `ingest_or_stage`）。LLM 开口之前这一轮要用的恰恰是它们，所以装配时叠加进
             # 历史。**每次装配现取**：压缩前会先提交，那之后它们已经在 memory 里了。
             staged = _staged_memory(state, ctx)
-            return ctx.assembler.assemble(ContextRequest(
+            request = ContextRequest(
                 purpose=purpose,
                 scope=state.scope,
                 task=state.task,
@@ -127,7 +127,10 @@ class PrepareStep(Step):
                 extra={
                     "staged_memory": staged,
                 },
-            ))
+            )
+            inputs = await ctx.assembler.assemble(request)
+            return await ctx.assembler.compile(
+                inputs, template=template, token_counter=request.token_counter)
 
         prompt = await _assemble()
         if token_estimate == 0:

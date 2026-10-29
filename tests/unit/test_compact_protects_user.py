@@ -18,15 +18,14 @@ from unittest.mock import AsyncMock, patch
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, escalating_compact
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.protocols import (
+    MemoryAddress,
     MemoryEvent,
     MemoryEventType,
     MemoryScope,
-    MemoryAddress,
     ProviderContext,
 )
-from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -113,6 +112,9 @@ class _SpyProvider(InMemoryMemoryProvider):
 
 def _ctx(mem: InMemoryMemoryProvider) -> SimpleNamespace:
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, request):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 

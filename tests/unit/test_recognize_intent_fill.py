@@ -14,6 +14,9 @@ class _FakeAssembler:
     def __init__(self):
         self.calls = []
 
+    async def compile(self, inputs, **kwargs):
+        return inputs
+
     async def assemble(self, request):
         self.calls.append(request)
         return SimpleNamespace(system="SYS", messages=[], tools=[])

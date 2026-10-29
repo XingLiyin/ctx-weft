@@ -5,12 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-import pytest
-
 from ctx_weft.core.loop.steps.compact import CompactStep
-from ctx_weft.protocols import MemoryEventType as T, MemoryAddress
+from ctx_weft.protocols import MemoryAddress
+from ctx_weft.protocols import MemoryEventType as T
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
-
 
 _BASE_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -101,6 +99,9 @@ class _FakeMemory:
 
 
 class _FakeAssembler:
+    async def compile(self, inputs, **kwargs):
+        return inputs
+
     async def assemble(self, request):
         return SimpleNamespace(system="SYS", messages=[], tools=[])
 

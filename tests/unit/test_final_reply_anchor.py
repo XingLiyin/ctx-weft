@@ -20,10 +20,10 @@ import pytest
 
 from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.loop import task_memory_fold as fp
-from ctx_weft.core.loop.task_memory_fold import FINAL_REPLY_NOTE_UNTITLED
 from ctx_weft.core.loop.steps.finalize import (
     finalize_task_memory,
 )
+from ctx_weft.core.loop.task_memory_fold import FINAL_REPLY_NOTE_UNTITLED
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.core.utils.task_ref import task_ref_parts
 from ctx_weft.protocols import (
@@ -39,6 +39,7 @@ from ctx_weft.protocols.capability import qualify
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from tests.assembler_testkit import recalled_blocks
 
 pytestmark = pytest.mark.asyncio
 
@@ -263,7 +264,6 @@ async def test_bg_replacement_does_not_clobber_the_anchor() -> None:
 
 async def test_rendered_messages_put_finish_call_on_the_reply() -> None:
     from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
-    from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
     from tests.assembler_testkit import history_messages
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
@@ -273,7 +273,7 @@ async def test_rendered_messages_put_finish_call_on_the_reply() -> None:
     deps = AssemblerDeps(memory=mem, knowledge_providers=[], provider_ctx=_pctx())
     req = ContextRequest(purpose="act", scope=_sc("t2"), task=None, agent=None, session=None,
                          template=None, bound_capabilities=[])
-    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = await recalled_blocks(req, deps)
     msgs = history_messages(blocks, task_id="t2")
 
     tail = msgs[-3:]

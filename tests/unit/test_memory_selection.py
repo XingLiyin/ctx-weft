@@ -5,6 +5,8 @@ from types import SimpleNamespace as NS
 import pytest
 from sqlalchemy import event
 
+from ctx_weft.core.assembler import ContextAssembler
+from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.observe import capture_context, context_records
 from ctx_weft.protocols import (
@@ -17,6 +19,7 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.providers.memory.sql import open_sqlite_memory
+from tests.assembler_testkit import prompt_request
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 ADDRESS = MemoryAddress(session_id="s", task_id="t", agent_id="a")
@@ -159,8 +162,10 @@ async def test_prompt_loads_both_scopes_in_one_batch(memory, monkeypatch):
         return await original_read(ids, ctx)
 
     monkeypatch.setattr(memory, "read_records", tracked)
-    blocks = [b async for b in AgentRecallSource().fetch(
-        NS(scope=ADDRESS, extra={}), NS(memory=memory, provider_ctx=CTX))]
-    assert len(blocks) == 2
+    assembler = ContextAssembler([AgentRecallSource()], AssemblerDeps(memory, [], CTX))
+    inputs = await assembler.assemble(prompt_request(task_id="t", scope=ADDRESS))
+    assert [item["memory_id"] for item in inputs.memory_blocks] == ["task-turn", "agent-summary"]
+    assert reads == []
+    await assembler.compile(inputs)
     assert reads == [("task-turn", "agent-summary")]
     assert not hasattr(memory, "load_view")

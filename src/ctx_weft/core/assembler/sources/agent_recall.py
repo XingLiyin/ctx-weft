@@ -63,65 +63,42 @@ class AgentRecallSource:
         request: "ContextRequest",
         deps: "AssemblerDeps",
     ) -> AsyncIterator["ContextBlock"]:
-        fixed = (getattr(request, "extra", None) or {}).get("observe_records")
+        from ctx_weft.core.assembler.assembler import ContextBlock
+        from ctx_weft.core.utils.ids import generate_id
+
+        extra = getattr(request, "extra", None) or {}
+        fixed_ids = extra.get("observe_record_ids")
+        if fixed_ids is not None:
+            for record_id in fixed_ids:
+                yield ContextBlock(id=generate_id("blk"), source=self.name, kind="history",
+                                   value=None, memory_id=record_id)
+            return
+        # Compatibility for direct Source consumers; runtime observe passes IDs.
+        fixed = extra.get("observe_records")
         if fixed is not None:
             for idx, record in enumerate(fixed):
-                if record.kind in (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY):
-                    yield record_to_history_block(record, source="agent_recall", idx=idx)
+                if record.kind in _VIEW_TASK_KINDS:
+                    yield record_to_history_block(record, source=self.name, idx=idx)
             return
-        # ── 1) task 层 body：按 agent_id 跨 task 聚合（半址，显式 task_id=None）──
+
         address = MemoryAddress(session_id=request.scope.session_id,
                                 agent_id=request.scope.agent_id)
-        end = (getattr(request, "extra", None) or {}).get("observe_end_at")
-        task_ids = await deps.memory.load_view_ids(
-            address, MemoryScope.TASK, deps.provider_ctx, end_at=end)
-        agent_ids = await deps.memory.load_view_ids(
-            address, MemoryScope.AGENT, deps.provider_ctx, end_at=end)
-        records = await deps.memory.read_records(task_ids + agent_ids, deps.provider_ctx)
-        by_id = {r.id: r for r in records}
-        task_records = [by_id[i] for i in task_ids if i in by_id]
-        agent_records = [by_id[i] for i in agent_ids if i in by_id]
-        for idx, record in enumerate(task_records):  # load_records 已升序（旧→新）
-            yield record_to_history_block(
-                record, source="agent_recall", idx=idx
-            )
-        # 叠加这一轮暂存、还没落盘的 task 层记录（PrepareStep 经 extra 递进来，见
-        # `TaskManager.stage_memory`）。渲染与 memory 里的记录完全同一条路；排序由 composer
-        # 按 (timestamp, seq_no) 归并，暂存的恒是最新的。
+        end = extra.get("observe_end_at")
+        for scope in (MemoryScope.TASK, MemoryScope.AGENT):
+            ids = await deps.memory.load_view_ids(
+                address, scope, deps.provider_ctx, kinds=list(_VIEW_TASK_KINDS), end_at=end)
+            for record_id in ids:
+                yield ContextBlock(id=generate_id("blk"), source=self.name, kind="history",
+                                   value=None, memory_id=record_id)
+
         staged = [
-            ev for ev in ((getattr(request, "extra", None) or {}).get("staged_memory") or [])
+            ev for ev in extra.get("staged_memory", [])
             if ev.scope is MemoryScope.TASK and ev.kind in _VIEW_TASK_KINDS
             and getattr(ev.address, "agent_id", None) == request.scope.agent_id
         ]
-        # 排序键要和落盘之后可比：composer 按 (timestamp, seq_no) 归并，而 provider 给的
-        # seq_no 是 per-scope 递增。暂存的恒是最新的，所以取「视图里见过的最大 seq_no」往后排；
-        # 时间戳撞上时（Windows 时钟 15.6ms 分辨率下并不罕见）提交前后的顺序因此一致。
-        base = max(
-            (r.metadata.get("seq_no", 0) for r in task_records if r.metadata), default=0) + 1
-        # 序号只经 `idx` 传给渲染（`record_to_history_block` 的 seq_no 兜底），**不写进
-        # 暂存事件的 metadata**——那份 metadata 稍后要原样落库，不该掺进装配期算出来的值。
-        for i, ev in enumerate(staged):
-            yield record_to_history_block(
-                _staged_record(ev), source="agent_recall", idx=base + i,
-            )
-
-        # ── 2) agent 层残留 / 经验 ──
-        # legacy dispatch 配对已在 load_records→normalize_view 内完成，此处只面对单一表示。
-        summaries: list = []
-        conversation: list = []
-        for r in agent_records:
-            if r.kind is MemoryKind.SUMMARY:
-                summaries.append(r)
-            elif r.kind is MemoryKind.CONVERSATION_TURN:
-                conversation.append(r)
-
-        for idx, s in enumerate(summaries):
-            yield record_to_history_block(
-                s, source="agent_recall", idx=idx,
-            )
-
-        # finish 对 + dispatch 对（均为 agent 层 conversation turn）统一按时序渲染：assistant 携
-        # tool_calls、tool 携 tool_call_id（record_to_history_block 据 role 无损重建）。悬空 tool_call
-        # （在途 dispatch 尚无 result）由 llm_gateway 的 drop_dangling_tool_calls 兜底。
-        for idx, c in enumerate(conversation):  # load_records 已升序
-            yield record_to_history_block(c, source="agent_recall", idx=idx)
+        for order, event in enumerate(staged):
+            block = record_to_history_block(_staged_record(event), source=self.name, idx=order)
+            # The compiler sees the selected rows' seq_no and places staged rows
+            # after them on timestamp ties, without reading bodies during assembly.
+            block.metadata = {"staged_order": order}
+            yield block

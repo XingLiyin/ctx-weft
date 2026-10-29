@@ -294,7 +294,7 @@ def test_switch_review_prompt_uses_terminal_contract(locale, monkeypatch):
 
     from ctx_weft.core.assembler import prompts
     from ctx_weft.core.assembler.builder import PromptBuilder
-    from ctx_weft.core.assembler.context import PromptContext
+    from tests.assembler_testkit import context_from_blocks
     monkeypatch.setattr(prompts, "render_purpose", partial(prompts.render_purpose, locale=locale))
     request = NS(
         purpose="observe", intent=ReviewIntent(terminal_only=True),
@@ -303,7 +303,7 @@ def test_switch_review_prompt_uses_terminal_contract(locale, monkeypatch):
         agent=NS(id="a1"), template=None, token_counter=len,
         session=NS(context_limit=100_000, reserved_output_tokens=0),
     )
-    prompt = PromptBuilder(len).compile(PromptContext(request, ()), tools=[])
+    prompt = PromptBuilder(len).compile(context_from_blocks(request, ()), tools=[])
     text = prompt.system + "\n" + "\n".join(str(m.content) for m in prompt.messages)
     assert "success" in text and "fail" in text
     assert "task_failure_reason" in text

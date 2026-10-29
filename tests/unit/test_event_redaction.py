@@ -124,6 +124,9 @@ class _FakeLLM:
 
 def _make_ctx(event_bus, *, llm=None):
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, req):
             return SimpleNamespace(system="SYS", messages=[], tools=[])
 
@@ -178,6 +181,9 @@ async def test_recognize_intent_prompt_event_keeps_text_not_empty():
     发射、脱敏走 redact_content_for_event：多模态消息的文本不该被丢空。"""
 
     class _FakeAssembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, request):
             return SimpleNamespace(
                 system="SYS",

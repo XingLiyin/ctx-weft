@@ -566,6 +566,70 @@ async def _emit_retry(
     }))
 
 
+def prompt_event_inputs(prompt, messages, tools):
+    """Use the assembled data directly, adding this request's continuation."""
+    inputs = getattr(prompt, "inputs", None)
+    if inputs is None:
+        return None
+    return inputs.for_request(messages[len(prompt.messages):], tools).to_payload()
+
+
+def resolve_request_tools(prompt, ctx, state):
+    """Runtime pins affect request tools, never the compiled prefix budget."""
+    inputs = getattr(prompt, "inputs", None)
+    cache = getattr(ctx, "capability_cache", None)
+    if inputs is None or cache is None or inputs.purpose == "compact":
+        return prompt.tools
+    from ctx_weft.core.assembler.sources.capability import build_llm_tools
+
+    try:
+        return build_llm_tools(cache.available(state.agent.id, state.task.id), inputs.purpose,
+                               terminal_only=inputs.terminal_only)
+    except Exception:
+        logger.warning("live tool resolution failed; using compiled tools", exc_info=True)
+        return prompt.tools
+
+
+async def externalize_prompt_images(inputs, *, event_blob_store, ctx):
+    """Never introduce inline image bytes into a prompt event.
+
+    Memory references stay references. Only unpersisted input content can still
+    contain inline images; send those through the existing event blob boundary.
+    """
+    from ctx_weft.protocols.context import normalize_content_parts
+    from ctx_weft.core.utils.content import content_to_event_jsonable
+
+    async def content(value):
+        if not isinstance(value, list):
+            return value
+        result = []
+        for part in value:
+            if isinstance(part, dict) and part.get("type") == "image" and part.get("source_type", "base64") != "ref":
+                parts = normalize_content_parts([part])
+                if event_blob_store is not None and event_blob_store.can_externalize:
+                    result.extend(await content_to_event_jsonable(
+                        parts, event_blob_store=event_blob_store, ctx=ctx))
+                else:
+                    result.append({"type": "text", "text": redact_content_for_event(parts)})
+            else:
+                result.append(part)
+        return result
+
+    result = {**inputs, "task": dict(inputs["task"])}
+    for key in ("user_prompt", "outputs"):
+        if key in result["task"]:
+            result["task"][key] = await content(result["task"][key])
+    for group, key in (("appended_messages", "content"), ("references", "content")):
+        result[group] = [{**item, key: await content(item[key])} if key in item else item
+                         for item in inputs.get(group, [])]
+    result["memory_blocks"] = [
+        {**item, "record": {**item["record"], "content": await content(item["record"]["content"])}}
+        if "record" in item else item for item in inputs["memory_blocks"]
+    ]
+    return result
+
+
+
 def stream_llm_resilient(ctx, state, request) -> DelegatingLLMStream:
     """Expose the current attempt's shared result without another collector."""
     return DelegatingLLMStream(lambda owner: _stream_llm_resilient(owner, ctx, state, request))
@@ -631,17 +695,15 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
             "request_id": request_id, "turn": turn,
             "tool_names": [t.name for t in request.tools],
         }
-        if request.prompt_snapshot is not None:
-            from ctx_weft.core.assembler.snapshot import externalize_snapshot_images
-
-            snapshot = await externalize_snapshot_images(
-                request.prompt_snapshot, event_blob_store=getattr(ctx, "event_blob_store", None),
+        if request.prompt_inputs is not None:
+            inputs = await externalize_prompt_images(
+                request.prompt_inputs, event_blob_store=getattr(ctx, "event_blob_store", None),
                 ctx=ctx.provider_ctx)
-            prompt_payload["prompt_snapshot"] = {
-                **snapshot,
+            prompt_payload.update({
+                **inputs,
                 # Freeze the actual per-request live/pinned tool surface.
                 "tools": [dataclasses.asdict(tool) for tool in request.tools],
-            }
+            })
         else:
             # Custom callers without an assembler still use the legacy event.
             prompt_payload.update(system=request.system, messages=[
@@ -663,8 +725,8 @@ async def _stream_llm_resilient(owner, ctx, state, request) -> AsyncIterator["LL
     midstream_deadline = None
     # Adapters/legalization may mutate a request. Every retry receives the same
     # original input, never a previous attempt's mutations or partial response.
-    # The snapshot belongs to the event only; adapters/retries need no copy of it.
-    original_request = copy.deepcopy(dataclasses.replace(request, prompt_snapshot=None))
+    # Assembled inputs belong to the event; adapters/retries need no copy of them.
+    original_request = copy.deepcopy(dataclasses.replace(request, prompt_inputs=None))
     tok = getattr(ctx, "cancel_token", None)
     attempt = 0
     last_error = None

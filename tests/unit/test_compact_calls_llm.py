@@ -6,14 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.protocols import LLMChunk, LLMOutageError
 from ctx_weft.core.loop.steps import compact as compact_mod
+from ctx_weft.protocols import LLMChunk, LLMOutageError
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 
 pytestmark = pytest.mark.asyncio
 
 
 class _Assembler:
+    async def compile(self, inputs, **kwargs):
+        return inputs
+
     async def assemble(self, request):
         return SimpleNamespace(system="sys", messages=[])
 

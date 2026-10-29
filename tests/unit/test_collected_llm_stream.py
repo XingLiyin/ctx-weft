@@ -20,6 +20,7 @@ from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.events import EventOrigin
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter, _serialize_messages
 from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from tests.assembler_testkit import compiled_test_inputs
 from tests.integration.test_interactive_task import _act_state_ctx
 
 
@@ -133,7 +134,7 @@ async def test_all_four_entries_reuse_one_collector_and_preserve_deltas(
         return state.assembled_prompt
 
     ctx.event_bus = SimpleNamespace(emit=emit)
-    ctx.assembler = SimpleNamespace(assemble=assemble)
+    ctx.assembler = SimpleNamespace(assemble=assemble, compile=compiled_test_inputs)
     state.origin = {
         "act": EventOrigin.LOOP_ACT,
         "observe": EventOrigin.LOOP_OBSERVE,

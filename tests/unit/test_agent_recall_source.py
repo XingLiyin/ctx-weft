@@ -9,9 +9,9 @@ import pytest
 from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextRequest
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.protocols import (
+    MemoryAddress,
     MemoryEvent,
     MemoryEventType,
-    MemoryAddress,
     ProviderContext,
 )
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -40,7 +40,11 @@ async def _collect(mem, scope) -> list:
     deps = AssemblerDeps(memory=mem, knowledge_providers=[], provider_ctx=_ctx())
     req = ContextRequest(purpose="act", scope=scope, task=None, agent=None, session=None,
                          template=None, bound_capabilities=[])
-    return [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    records = {r.id: r for r in await mem.read_records([b.memory_id for b in blocks], _ctx())}
+    for block in blocks:
+        block.value = records[block.memory_id]
+    return blocks
 
 
 async def test_open_tasks_of_agent_all_visible() -> None:

@@ -56,6 +56,9 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
     class _Assembler:
         def __init__(self):
             self.calls = 0
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, request):
             self.calls += 1
             return SimpleNamespace(token_count=10, system="", messages=[], tools=[])
@@ -122,6 +125,9 @@ async def test_reason_stashes_bound_capabilities(monkeypatch):
                             run_id="r1", sequence_counter=0)
 
     class _Assembler:
+        async def compile(self, inputs, **kwargs):
+            return inputs
+
         async def assemble(self, request):
             return SimpleNamespace(token_count=10, system="", messages=[], tools=[])
 

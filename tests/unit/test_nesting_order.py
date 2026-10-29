@@ -28,21 +28,19 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from ctx_weft.core.utils.estimate import estimate_tokens
-
 import pytest
 
-from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.loop.steps.finalize import (
     _supersede_final_raw_segment,
     _synthesize_dispatch_pair,
 )
 from ctx_weft.core.models.task import NormalTaskSettings, Task
+from ctx_weft.core.utils.estimate import estimate_tokens
 from ctx_weft.core.utils.ids import generate_id
-from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
 from ctx_weft.protocols.capability import qualify
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
-from tests.assembler_testkit import history_messages
+from tests.assembler_testkit import history_messages, recalled_blocks
 
 pytestmark = pytest.mark.asyncio
 
@@ -123,7 +121,7 @@ async def _compose_messages(mem, agent_scope):
     """REAL AgentRecallSource.fetch → REAL PromptBuilder 排序/投影 → list[LLMMessage]."""
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=agent_scope, token_counter=estimate_tokens)
-    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = await recalled_blocks(req, deps)
     return history_messages(blocks, task_id=agent_scope.task_id or "")
 
 
@@ -291,7 +289,7 @@ async def test_g1_naive_seqno_primary_would_misorder() -> None:
 
     deps = SimpleNamespace(memory=mem, provider_ctx=_pctx())
     req = SimpleNamespace(scope=asc, token_counter=estimate_tokens)
-    blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
+    blocks = await recalled_blocks(req, deps)
 
     # 正确排序（timestamp-primary）：C finish 在 P 续跑(t=9) 之前
     correct = sorted(blocks, key=lambda b: (b.value.timestamp,

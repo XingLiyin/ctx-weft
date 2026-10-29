@@ -1,3 +1,4 @@
+
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
@@ -5,6 +6,7 @@ import pytest
 
 from ctx_weft.core.assembler.sources.guidance import GuidanceSource
 from ctx_weft.core.models.task import NormalTaskSettings, Task
+from tests.assembler_testkit import compiled_test_inputs
 
 
 async def _snapshot(request, manager):
@@ -73,7 +75,7 @@ async def test_prepare_collects_through_assembler_and_consumes_hint_after_reasse
     ctx = NS(
         task_manager=manager,
         llm=NS(tokenizer=NS(count=len)),
-        assembler=NS(assemble=assemble),
+        assembler=NS(assemble=assemble, compile=compiled_test_inputs),
         event_bus=NS(emit=AsyncMock()),
     )
     step = prepare.PrepareStep()
