@@ -45,11 +45,16 @@ def test_public_http_adapters_resolve_to_their_implementations():
         AnthropicAdapter,
         AnthropicMultimodalAdapter,
     )
-    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, OpenAIMultimodalAdapter
+    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+    from ctx_weft.providers.llm.adapters.openai_compatible import (
+        OpenAICompatibleAdapter,
+        OpenAICompatibleMultimodalAdapter,
+    )
 
     for adapter in (
         AnthropicAdapter, AnthropicMultimodalAdapter,
-        OpenAIAdapter, OpenAIMultimodalAdapter,
+        OpenAIAdapter,
+        OpenAICompatibleAdapter, OpenAICompatibleMultimodalAdapter,
     ):
         assert getattr(llm, adapter.__name__) is adapter
         assert getattr(adapters, adapter.__name__) is adapter

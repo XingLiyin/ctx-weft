@@ -5,7 +5,7 @@ import json
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMMessage, LLMRequest, LLMTool
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, _resolve_tc_index, _serialize_messages
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter, _resolve_tc_index, _serialize_messages
 
 
 # ── Fake httpx streaming client ────────────────────────────────────────────────
@@ -53,7 +53,7 @@ def _delta(delta, finish_reason=None):
 
 
 def _adapter(lines):
-    a = OpenAIAdapter(api_key="k")
+    a = OpenAICompatibleAdapter(api_key="k")
     a._client = _FakeClient(lines)
     return a
 
@@ -269,7 +269,7 @@ async def test_empty_stream_raises_retriable():
 
 
 def test_payload_omits_tool_choice_auto_by_default():
-    a = OpenAIAdapter(api_key="k")
+    a = OpenAICompatibleAdapter(api_key="k")
     req = LLMRequest(
         model="m", system="", messages=[LLMMessage(role="user", content="hi")],
         tools=[LLMTool(name="read", description="", input_schema={"type": "object"})],

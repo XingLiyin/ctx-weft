@@ -1,17 +1,9 @@
-"""LLM provider 层：多账号管理器 + Anthropic/OpenAI adapter + Mock。
+"""Default LLM provider implementations, loaded only when explicitly accessed.
 
-host 直接从本模块引入即可：
-
-    from ctx_weft.providers.llm import (
-        LLMProvider, LLMAccount, ModelConfig,      # 多账号管理（实现 LLMClientResolver）
-        AnthropicAdapter, OpenAIAdapter,           # 纯文本 adapter（需 httpx，extras: [llm]）
-        AnthropicMultimodalAdapter, OpenAIMultimodalAdapter,  # 多模态 adapter
-        MockLLMAdapter, MockResponse,              # 测试用 adapter（无额外依赖）
-    )
-
-`AnthropicAdapter` / `OpenAIAdapter` / `AnthropicMultimodalAdapter` / `OpenAIMultimodalAdapter`
-依赖 httpx（`pip install "ctx-weft[llm]"`），因此采用惰性加载（PEP 562）：未安装 httpx 时，
-只要不访问这些名字，本包依然可正常导入。
+``OpenAIAdapter`` uses the official Python SDK for ``openai-official``.
+``OpenAICompatibleAdapter`` and ``OpenAICompatibleMultimodalAdapter`` preserve
+legacy Chat Completions gateway behavior for ``openai-compatible`` and ``openai``.
+Install ``ctx-weft[llm]`` for HTTP/SDK adapters. Mock-only users need neither.
 """
 
 from __future__ import annotations
@@ -36,24 +28,29 @@ if TYPE_CHECKING:  # 让类型检查器/IDE 看得到，但运行时不触发 ht
         AnthropicAdapter,
         AnthropicMultimodalAdapter,
     )
-    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, OpenAIMultimodalAdapter
+    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+    from ctx_weft.providers.llm.adapters.openai_compatible import (
+        OpenAICompatibleAdapter,
+        OpenAICompatibleMultimodalAdapter,
+    )
 
 __all__ = [
-    "LLMProvider",
-    "LLMAccount",
-    "ModelConfig",
     "SUPPORTED_PROTOCOLS",
-    "LLMProtocol",
-    "ModelLimits",
-    "ModelCapabilities",
-    "LLMModelNotFoundError",
-    "LLMAccountStoreProtocol",
-    "MockLLMAdapter",
-    "MockResponse",
     "AnthropicAdapter",
     "AnthropicMultimodalAdapter",
+    "LLMAccount",
+    "LLMAccountStoreProtocol",
+    "LLMModelNotFoundError",
+    "LLMProtocol",
+    "LLMProvider",
+    "MockLLMAdapter",
+    "MockResponse",
+    "ModelCapabilities",
+    "ModelConfig",
+    "ModelLimits",
     "OpenAIAdapter",
-    "OpenAIMultimodalAdapter",
+    "OpenAICompatibleAdapter",
+    "OpenAICompatibleMultimodalAdapter",
 ]
 
 
@@ -61,7 +58,7 @@ def __getattr__(name: str):
     """惰性导出 httpx-dependent adapter（仅在被访问时才 import）。"""
     if name in (
         "AnthropicAdapter", "AnthropicMultimodalAdapter",
-        "OpenAIAdapter", "OpenAIMultimodalAdapter",
+        "OpenAIAdapter", "OpenAICompatibleAdapter", "OpenAICompatibleMultimodalAdapter",
     ):
         from ctx_weft.providers.llm import adapters
 

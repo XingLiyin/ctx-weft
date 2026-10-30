@@ -9,7 +9,7 @@ import asyncio
 from ctx_weft.protocols import ImagePart, LLMMessage, LLMRequest, TextPart
 from ctx_weft.providers.llm.adapters.anthropic import _serialize_messages as anth
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.llm.adapters.openai import _serialize_messages as oai
+from ctx_weft.providers.llm.adapters.openai_compatible import _serialize_messages as oai
 
 
 def _img():

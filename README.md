@@ -2,7 +2,7 @@
 
 **Protocol-based Agent Runtime Core** — 用于构建可控、可观测 AI Agent 应用的 Python SDK。
 
-ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力系统、LLM、模板）通过协议接入，驱动 LLM 完成任务。它不包含任何数据库代码、HTTP 服务或具体 LLM 实现——这些由上层应用（host）提供。
+ctx-weft 只做一件事：把外部系统（知识库、记忆系统、能力系统、LLM、模板）通过协议接入，驱动 LLM 完成任务。核心运行时通过协议解耦具体实现，可选默认实现在 `providers` 中提供，由上层应用（host）配置与装配。
 
 > 本文是**使用参考**。想了解循环引擎、任务编排、崩溃恢复等**内部实现逻辑**，见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
@@ -445,7 +445,8 @@ class MyAgentTemplateProvider(AgentCapabilityProvider):
 
 ## LLM 接入
 
-ctx-weft 只定义 `LLMClient` 协议，不包含任何真实 LLM SDK。协议与全部数据类型都在
+ctx-weft 的运行时依赖 `LLMClient` 协议，并在 `providers.llm` 提供可选的默认 adapter。
+安装 `ctx-weft[llm]` 可使用 OpenAI 官方 Python SDK 实现。协议与全部数据类型都在
 `ctx_weft.protocols`（与 Memory / Capability / Knowledge 同层）：
 
 ```python
@@ -523,11 +524,25 @@ runtime.providers.register_llm_provider(provider)
 > SDK core 不读环境变量。从环境变量自举一个默认账号（`bootstrap_from_env`）由上层应用
 > 在子类中实现（host 的 `LLMProvider` 子类读自己约定前缀的环境变量）。
 
-> 内置 `AnthropicAdapter` / `OpenAIAdapter`（纯文本）与 `AnthropicMultimodalAdapter` /
-> `OpenAIMultimodalAdapter`（收图片）均由 `LLMProvider` 按模型的 `protocol` 与输入能力自动构造。
+> 内置 adapter 由 `LLMProvider` 按模型的 `protocol` 与输入能力自动构造。
+> `OpenAIAdapter` 是组合官方 `openai.AsyncOpenAI` 的独立实现，图片能力由 `image_input` 控制；
+> `OpenAICompatibleAdapter` / `OpenAICompatibleMultimodalAdapter` 保留原有兼容网关实现。
 > `run_single_task` / `SessionStartParams` 里的 `llm_account` / `llm_model` 会透传给 `get_client()`。
 
-`protocol` 取值为 `"anthropic"` / `"openai"`（Chat Completions）。输入能力为
+`protocol` 支持以下值：
+
+| 协议 | 默认实现 | 输出预算字段 |
+| --- | --- | --- |
+| `openai-official` | `OpenAIAdapter`，官方 Python SDK，Chat Completions | `max_completion_tokens` |
+| `openai-compatible` | `OpenAICompatibleAdapter`，兼容网关 | `max_tokens` |
+| `anthropic` | `AnthropicAdapter`，Messages API | `max_tokens` |
+
+历史值 `openai` 继续使用兼容实现，已有账号、模型与默认选择不自动迁移。
+两种 OpenAI 协议均使用 `/v1/chat/completions`；官方 adapter 关闭 SDK 自动重试，
+由 runtime 统一决定恢复，并将 SDK 返回的文本、工具调用与用量转换为 `LLMChunk`。
+直接创建官方 adapter 时，使用后调用 `await adapter.aclose()` 关闭 SDK 客户端。
+
+输入能力为
 `["text"]` 或含 `"image"` 的列表，输出目前支持 `["text"]`。同一账号下的模型可以使用不同协议和能力，
 provider 按账号、协议和图片能力复用 adapter。纯文本 adapter 收到图片时会降级成 `[image ...]` 文本占位
 并记一条 warning，**不中断会话**；core 对模态零判断，全程透传到 `LLMClient` 面前。

@@ -19,7 +19,7 @@ import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMMessage, LLMRequest
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
 pytestmark = pytest.mark.asyncio
 
@@ -93,7 +93,7 @@ async def test_anthropic_midstream_stall_raises_outage():
 async def test_openai_midstream_stall_raises_outage():
     server, port = await _stalling_server(_OPENAI_TOKEN)
     try:
-        adapter = OpenAIAdapter(api_key="k", base_url=f"http://127.0.0.1:{port}", timeout_sec=1)
+        adapter = OpenAICompatibleAdapter(api_key="k", base_url=f"http://127.0.0.1:{port}", timeout_sec=1)
         await _assert_stall_raises_outage(adapter)
     finally:
         server.close()

@@ -19,7 +19,7 @@ from ctx_weft.protocols import EventType, LLMChunk, LLMMessage, LLMRequest
 from ctx_weft.protocols.capability import ToolCapability
 from ctx_weft.protocols.events import EventOrigin
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter, _serialize_messages
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 from tests.integration.test_interactive_task import _act_state_ctx
 
@@ -77,7 +77,7 @@ def body_for(provider):
 
 
 def offline_adapter(provider, body=None, fail_first=False):
-    base = OpenAIAdapter if provider == "openai" else AnthropicAdapter
+    base = OpenAICompatibleAdapter if provider == "openai" else AnthropicAdapter
 
     class BrokenBody(httpx.AsyncByteStream):
         async def __aiter__(self):
@@ -349,7 +349,7 @@ async def test_gateway_retry_discards_hidden_content_from_the_failed_attempt(mon
             yield sse({"choices": [{"delta": {"content": "<think>failed attempt"}}]})
             raise httpx.ReadError("offline disconnect")
 
-    class Offline(OpenAIAdapter):
+    class Offline(OpenAICompatibleAdapter):
         def _make_client(self):
             def respond(request):
                 calls.append(request)

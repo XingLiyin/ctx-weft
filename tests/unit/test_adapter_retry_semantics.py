@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMMessage, LLMRequest
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
 
 
@@ -62,7 +62,7 @@ async def _drive(adapter):
 async def test_openai_midstream_failure_raises_retriable_without_internal_retry():
     line = "data: " + json.dumps({"choices": [{"delta": {"content": "hello"}, "finish_reason": None}]})
     client = _CountingClient([line], httpx.ReadTimeout("boom"))
-    a = OpenAIAdapter(api_key="k")
+    a = OpenAICompatibleAdapter(api_key="k")
     a._client = client
     with pytest.raises(LLMCallError) as exc:
         await _drive(a)
@@ -92,7 +92,7 @@ async def test_openai_midtoolcall_failure_raises_retriable_without_internal_retr
         {"index": 0, "id": "t1", "function": {"name": "read", "arguments": "{\"p\":"}}]},
         "finish_reason": None}]})
     client = _CountingClient([line], httpx.ReadTimeout("boom"))
-    a = OpenAIAdapter(api_key="k")
+    a = OpenAICompatibleAdapter(api_key="k")
     a._client = client
     with pytest.raises(LLMCallError) as exc:
         await _drive(a)

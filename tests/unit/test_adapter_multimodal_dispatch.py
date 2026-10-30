@@ -55,12 +55,12 @@ def test_downgrade_warns_once_with_model_count_and_fix_hint(caplog):
         LLMMessage(role="tool", content=[_img()], tool_call_id="tc1"),
     )
     with caplog.at_level(logging.WARNING):
-        downgrade_for_text_only(req, adapter_hint="OpenAIMultimodalAdapter")
+        downgrade_for_text_only(req, adapter_hint="OpenAICompatibleMultimodalAdapter")
 
     records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(records) == 1, "每次请求最多一条 warning"
     msg = records[0].getMessage()
-    assert "m-1" in msg and "3" in msg and "OpenAIMultimodalAdapter" in msg
+    assert "m-1" in msg and "3" in msg and "OpenAICompatibleMultimodalAdapter" in msg
 
 
 def test_downgrade_emits_no_log_for_text_only(caplog):
@@ -152,9 +152,9 @@ def test_anthropic_plain_text_payload_unchanged_between_classes():
 
 
 def _oai(multimodal: bool):
-    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, OpenAIMultimodalAdapter
+    from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter, OpenAICompatibleMultimodalAdapter
 
-    cls = OpenAIMultimodalAdapter if multimodal else OpenAIAdapter
+    cls = OpenAICompatibleMultimodalAdapter if multimodal else OpenAICompatibleAdapter
     return cls(api_key="k")
 
 
@@ -258,8 +258,8 @@ def _provider_with(style: str):
     [
         ("anthropic", "AnthropicAdapter"),
         ("anthropic-multimodal", "AnthropicMultimodalAdapter"),
-        ("openai", "OpenAIAdapter"),
-        ("openai-multimodal", "OpenAIMultimodalAdapter"),
+        ("openai", "OpenAICompatibleAdapter"),
+        ("openai-multimodal", "OpenAICompatibleMultimodalAdapter"),
     ],
 )
 def test_build_adapter_dispatches_on_style(style, cls_name):
@@ -296,7 +296,7 @@ def test_multimodal_classes_exported_from_package():
     import ctx_weft.providers.llm as pkg
 
     assert pkg.AnthropicMultimodalAdapter.__name__ == "AnthropicMultimodalAdapter"
-    assert pkg.OpenAIMultimodalAdapter.__name__ == "OpenAIMultimodalAdapter"
+    assert pkg.OpenAICompatibleMultimodalAdapter.__name__ == "OpenAICompatibleMultimodalAdapter"
 
 
 @pytest.mark.asyncio

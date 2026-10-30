@@ -6,7 +6,7 @@ import pytest
 
 from ctx_weft.protocols import LLMCallError, LLMRequest
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
 pytestmark = pytest.mark.asyncio
 
@@ -18,7 +18,7 @@ def _anthropic_adapter(handler):
 
 
 def _openai_adapter(handler):
-    a = OpenAIAdapter(api_key="k")
+    a = OpenAICompatibleAdapter(api_key="k")
     a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return a
 
@@ -78,7 +78,7 @@ class _AnthropicMidFlightClient:
 
 
 class _OpenAIMidFlightClient:
-    """Fake _client for OpenAIAdapter that returns a 200 stream then dies."""
+    """Fake _client for OpenAICompatibleAdapter that returns a 200 stream then dies."""
 
     def stream(self, method, url, **kwargs):
         # One choices delta with content — sets produced=True in openai.py
@@ -173,7 +173,7 @@ async def test_openai_401_is_not_outage_and_not_retriable():
 
 async def test_openai_mid_flight_transport_is_outage():
     """OpenAI transport error after first chunk is emitted → retriable outage."""
-    a = OpenAIAdapter(api_key="k")
+    a = OpenAICompatibleAdapter(api_key="k")
     a._client = _OpenAIMidFlightClient()
     got = []
     with pytest.raises(LLMCallError) as ei:

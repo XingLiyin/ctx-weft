@@ -14,7 +14,7 @@ from ctx_weft.core.loop.llm_gateway import stream_llm_resilient
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.protocols import LLMCallError, LLMOutageError, LLMRequest
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
 
 def _sse(event):
@@ -33,7 +33,7 @@ def _success(protocol):
 
 
 def _adapter(protocol, handler):
-    base = OpenAIAdapter if protocol == "openai" else AnthropicAdapter
+    base = OpenAICompatibleAdapter if protocol == "openai" else AnthropicAdapter
 
     class Offline(base):
         def _make_client(self):

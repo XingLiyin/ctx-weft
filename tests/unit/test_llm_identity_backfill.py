@@ -226,13 +226,13 @@ async def test_events_carry_explicit_model():
 
 
 def test_bare_adapters_expose_model():
-    """AnthropicAdapter/OpenAIAdapter 公开 model：host 把 env 模型构造进裸 adapter
+    """AnthropicAdapter/OpenAICompatibleAdapter 公开 model：host 把 env 模型构造进裸 adapter
     直传 llm= 时，回填才有真值可读（实际调用一直用 _model 替换 "mock"，账面须同源）。"""
     from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
-    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+    from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
     assert AnthropicAdapter(api_key="k", model="env-model-a").model == "env-model-a"
-    assert OpenAIAdapter(api_key="k", model="env-model-b").model == "env-model-b"
+    assert OpenAICompatibleAdapter(api_key="k", model="env-model-b").model == "env-model-b"
 
 
 @pytest.mark.asyncio

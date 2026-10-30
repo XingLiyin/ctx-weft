@@ -24,7 +24,7 @@ import pytest
 
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import LLMChunk
+from ctx_weft.protocols import LLMChunk, ToolCall
 from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import HitlReply
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
@@ -73,6 +73,22 @@ class _StallsFirstActLLM(MockLLMAdapter):
             yield LLMChunk(kind="token", text="unreachable")  # pragma: no cover
 
         return _gen()
+
+
+class _NamesTasksLLM(_StallsFirstActLLM):
+    """Fill real metadata without consuming the actor's response script."""
+
+    def complete(self, request, stream=True):
+        if self._is_sidecar(request):
+            self.sidecar_calls += 1
+            return self._stream(MockResponse(tool_calls=[ToolCall(
+                id=f"metadata_{self.sidecar_calls}",
+                name="control__update_task_metadata",
+                arguments={"title": f"Task {self.sidecar_calls}",
+                           "description": f"Goal {self.sidecar_calls}",
+                           "session_goal": f"Session goal {self.sidecar_calls}"},
+            )]), request)
+        return super().complete(request, stream=stream)
 
 
 def _runtime(llm):
@@ -204,26 +220,14 @@ async def test_pause_immediately_after_start_before_the_run_is_dispatched() -> N
     assert EventType.HITL_RESOLVED in types, "续跑没起来"
 
 
-async def test_new_task_branch_does_not_re_run_recognize_intent() -> None:
-    """会话只命名一次：root task 终态之后开的新 task 不再跑 `recognize_intent`。
-
-    ⚠ **本用例只覆盖「新建 task」那一条分支，不是什么普遍不变式。**
-    曾经把它写成「recognize_intent 从不跑在开着未提交窗口的 task 上」——那是**假的**：
-    交互式会话第二句往后走的是「消息注入既有 task」，而那个既有 task 就是 root task，
-    每一轮都开窗；root task 的 title 若还是空的（旁路失败 / 模型没调
-    `update_task_metadata` / 上一轮的旁路还在飞），判据成立，它就**会**在窗口里起飞。
-    那不是缺陷，只是「窗口里跑的东西撤销时要能退回去」——`RoundSnapshot` 因此也存
-    `title` / `description`（见那里）。
-
-    这里真正钉住的是：新建分支的 task 带着 `title="User Message"` 这个**占位字符串**，
-    判据的后半截才不成立。那个占位一旦被改成空（"让 recognize_intent 给每个新话题起名"
-    是个很自然的想法），每条新消息都会多烧一次旁路 LLM 调用，而且不会有任何地方报错。
-    """
+@pytest.mark.parametrize("pause_before_commit", [False, True])
+async def test_new_task_branch_recognizes_intent_after_commit(pause_before_commit) -> None:
+    """Each new user task gets metadata; a discarded turn never launches recognition."""
     # `observer_verdict="success"`：actor 回一段正文就收尾，而 2026-09-28 起纯文本不再被机械
     # 判 success（`_mechanical_verdict` 判 continue）——下面那句「前提：root task 已终态」
     # 需要它真的终结。**只给这一个用例**：本文件另外两条钉的是 park / 暂停的竞态形态，
     # 替它们判 success 会让 task 终结、整条应答路径走去另一支（见 MockLLMAdapter 的 docstring）。
-    llm = _StallsFirstActLLM(
+    llm = _NamesTasksLLM(
         responses=[MockResponse(text=f"answer {i}") for i in range(12)],
         observer_verdict="success",
         context_limit=_MOCK_CONTEXT_LIMIT)
@@ -241,21 +245,49 @@ async def test_new_task_branch_does_not_re_run_recognize_intent() -> None:
     tm = rt._task_managers[sid]
     root_task_id = rt._agent_lifecycle_manager.record_of(aid).current_task_id
     assert tm.get_task(root_task_id).status == "FINISHED", "前提：root task 已终态"
-    after_first_round = llm.sidecar_calls
-    assert after_first_round >= 1, "第一轮该给会话起名"
+    root_task = tm.get_task(root_task_id)
+    assert root_task.title == "Task 1"
+    assert llm.sidecar_calls == 1
 
     # root 已终态 → 这条新消息走「新建 task」那条分支，**会开未提交窗口**。
+    llm.stalling = pause_before_commit
     await initialize_all(rt)
     turn = await rt.send_message(aid, "第二句", session_id=sid)
     new_task = tm.get_task(turn.task_id)
-    assert new_task is not None and new_task.parent_task_id is None, (
-        "新建分支的 task 没有 parent —— 判据的前半截（root task）对它是成立的，"
-        "拦住它的只有 title 那个占位"
-    )
-    assert new_task.title, (
-        "新建分支的 task 必须带一个非空占位标题；为空会让每条新消息都多烧一次旁路调用"
-    )
-    await asyncio.sleep(0.8)
-    assert llm.sidecar_calls == after_first_round, (
-        f"新建分支不该再跑一次 recognize_intent：{after_first_round} → {llm.sidecar_calls}"
-    )
+    assert new_task is not None and new_task.parent_task_id is None
+    assert new_task.user_prompt == "第二句"
+
+    if pause_before_commit:
+        await asyncio.wait_for(llm.stalled.wait(), timeout=5.0)
+        assert new_task.title == ""
+        assert tm.is_round_open(new_task.id)
+        assert llm.sidecar_calls == 1
+        await initialize_all(rt)
+        assert await rt.pause_session(sid) is True
+        async with asyncio.timeout(5.0):
+            while tm.get_task(new_task.id) is not None:
+                await asyncio.sleep(0.02)
+        assert llm.sidecar_calls == 1
+        events = await all_events(rt.event_store, sid)
+        assert not any(e.task_id == new_task.id for e in events)
+
+        # A later accepted message must still get its own metadata.
+        llm.stalling = False
+        await initialize_all(rt)
+        turn = await rt.send_message(aid, "第三句", session_id=sid)
+        new_task = tm.get_task(turn.task_id)
+        assert new_task is not None
+
+    async with asyncio.timeout(5.0):
+        while new_task.title != "Task 2" or new_task.status != "FINISHED":
+            await asyncio.sleep(0.02)
+    assert llm.sidecar_calls == 2
+    assert new_task.description == "Goal 2"
+    assert root_task.title == "Task 1"
+    events = await all_events(rt.event_store, sid)
+    task_events = [e for e in events if e.task_id == new_task.id]
+    created = next(e for e in task_events if e.type == EventType.TASK_CREATED)
+    assert created.payload["task"]["title"] == ""
+    types = [e.type for e in task_events]
+    assert types.index(EventType.TASK_CREATED) < types.index(EventType.RECOGNIZE_INTENT_STARTED)
+    assert types.count(EventType.RECOGNIZE_INTENT_STARTED) == 1

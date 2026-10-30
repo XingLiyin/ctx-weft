@@ -15,7 +15,7 @@ import ctx_weft.providers.llm.adapters._stream_parsing as stream_module
 from ctx_weft.core.loop.steps.act import ActStep, _ingest_assistant_turn, _run_llm_turn
 from ctx_weft.protocols import EventType, MemoryEventType
 from ctx_weft.providers.events import InProcessEventBus
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 from ctx_weft.providers.llm.adapters.text_calls import ContentGate
 from tests.assembler_testkit import scripted_inputs
 from tests.integration.test_interactive_task import _act_state_ctx
@@ -38,7 +38,7 @@ def _event(delta, finish_reason=None):
     return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
 
 
-class _ReplayAdapter(OpenAIAdapter):
+class _ReplayAdapter(OpenAICompatibleAdapter):
     def __init__(self, pieces):
         self.pieces = pieces
         self.token_deltas = []

@@ -1,11 +1,11 @@
 import httpx
 
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
 
 def test_openai_make_client_returns_async_client():
-    a = OpenAIAdapter(api_key="k")
+    a = OpenAICompatibleAdapter(api_key="k")
     assert isinstance(a._make_client(), httpx.AsyncClient)
 
 

@@ -35,7 +35,7 @@ from ctx_weft.protocols import (
     TextPart,
 )
 from ctx_weft.providers.llm.adapters.anthropic import _serialize_messages as anth
-from ctx_weft.providers.llm.adapters.openai import _serialize_messages as oai
+from ctx_weft.providers.llm.adapters.openai_compatible import _serialize_messages as oai
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"tool-shot" * 7
 _PNG_B64 = base64.b64encode(_PNG_BYTES).decode()

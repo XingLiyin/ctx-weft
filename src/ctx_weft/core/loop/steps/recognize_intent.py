@@ -35,7 +35,7 @@ from ctx_weft.protocols.events import EventType
 logger = logging.getLogger(__name__)
 
 def should_recognize_intent(task: Any) -> bool:
-    """True when this is the root task (no parent) and still lacks a title."""
+    """True for any untitled top-level task, including later user-created tasks."""
     return getattr(task, "parent_task_id", None) is None and not getattr(task, "title", "")
 
 

@@ -228,6 +228,15 @@ class LLMProvider:
     def _build_adapter(self, account: LLMAccount, model: ModelConfig) -> LLMClient:
         model.__post_init__()
         image = "image" in model.capabilities.input
+        if model.protocol == "openai-official":
+            from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+
+            return OpenAIAdapter(
+                api_key=account.api_key,
+                base_url=account.base_url,
+                timeout_sec=account.timeout_sec,
+                image_input=image,
+            )
         if model.protocol == "anthropic":
             from ctx_weft.providers.llm.adapters.anthropic import (
                 AnthropicAdapter,
@@ -236,9 +245,12 @@ class LLMProvider:
 
             cls = AnthropicMultimodalAdapter if image else AnthropicAdapter
         else:
-            from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, OpenAIMultimodalAdapter
+            from ctx_weft.providers.llm.adapters.openai_compatible import (
+                OpenAICompatibleAdapter,
+                OpenAICompatibleMultimodalAdapter,
+            )
 
-            cls = OpenAIMultimodalAdapter if image else OpenAIAdapter
+            cls = OpenAICompatibleMultimodalAdapter if image else OpenAICompatibleAdapter
         return cls(
             api_key=account.api_key,
             base_url=account.base_url,
@@ -252,9 +264,7 @@ class LLMProvider:
         try:
             return await adapter.list_models()
         finally:
-            client = getattr(adapter, "_client", None)
-            if client is not None:
-                await client.aclose()
+            await _close_adapter(adapter)
 
     async def fetch_models_for_account(self, name: str, *, protocol: str) -> list[str]:
         account = self.get_account(name)
@@ -308,9 +318,7 @@ class LLMProvider:
         try:
             await self._probe_model(adapter, cfg)
         finally:
-            client = getattr(adapter, "_client", None)
-            if client is not None:
-                await client.aclose()
+            await _close_adapter(adapter)
         return (time.perf_counter() - started) * 1000.0
 
     async def verify_model_for_account(self, name: str, model: str | ModelConfig) -> float:
@@ -340,3 +348,13 @@ class LLMProvider:
             except Exception:
                 logger.exception("LLMProvider: failed to load account '%s'", account.name)
         return count
+
+
+async def _close_adapter(adapter: LLMClient) -> None:
+    close = getattr(adapter, "aclose", None)
+    if close is not None:
+        await close()
+    else:
+        client = getattr(adapter, "_client", None)
+        if client is not None:
+            await client.aclose()

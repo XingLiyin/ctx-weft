@@ -6,7 +6,7 @@ import pytest
 
 from ctx_weft.core.assembler.sources.guidance import GuidanceSource
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from tests.assembler_testkit import compiled_test_inputs
+from tests.assembler_testkit import compile_prompt, compiled_test_inputs, prompt_request
 
 
 async def _snapshot(request, manager):
@@ -49,6 +49,32 @@ async def test_guidance_source_collects_a_detached_task_state_snapshot():
     assert snapshot["guidance"]["review_note"] == "one shot"
     assert snapshot["guidance"]["completed_tasks"][0]["result"] == "Result"
     assert snapshot["resume"]["completed_tasks"] is True
+
+
+@pytest.mark.asyncio
+async def test_plan_renders_user_message_content_before_metadata_is_filled():
+    task = Task(
+        id="t", session_id="s", status="ACTIVE",
+        user_prompt="修复登录问题\n保留现有接口",
+    )
+    other = Task(
+        id="other", session_id="s", status="PENDING",
+        user_prompt="检查权限",
+    )
+    request = prompt_request(task=task)
+    manager = NS(all_tasks=lambda: [task, other])
+    blocks = [
+        block async for block in GuidanceSource().fetch(request, NS(task_manager=manager))
+    ]
+
+    prompt = compile_prompt(blocks, request)
+    text = "\n".join(str(message.content) for message in prompt.messages)
+    plan = text.split("## The overall plan", 1)[1]
+
+    assert "- [ACTIVE] ▶ '修复登录问题' (t)" in plan
+    assert "- [PENDING] '检查权限' (other)" in plan
+    assert "User Message" not in plan
+    assert task.title == ""
 
 
 @pytest.mark.asyncio

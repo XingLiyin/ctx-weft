@@ -69,7 +69,7 @@ from ctx_weft.protocols.events import Event, EventBlobStore, EventType
 from ctx_weft.protocols.memory import MemoryBlobStore
 from ctx_weft.providers.blob.fs import FsBlobStore
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicMultimodalAdapter
-from ctx_weft.providers.llm.adapters.openai import _TOOL_IMAGE_NOTICE, OpenAIMultimodalAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import _TOOL_IMAGE_NOTICE, OpenAICompatibleMultimodalAdapter
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import all_events, append_one
 from tests._initialization import initialize_all
@@ -290,11 +290,11 @@ class _WireCapturingAnthropicLLM(_PlaceholderReadingLLM, AnthropicMultimodalAdap
         return self._emit(*self._decide(payload))
 
 
-class _WireCapturingOpenAILLM(_PlaceholderReadingLLM, OpenAIMultimodalAdapter):
-    """真 `OpenAIAdapter._build_payload` / `_serialize_messages`，不走网络。"""
+class _WireCapturingOpenAILLM(_PlaceholderReadingLLM, OpenAICompatibleMultimodalAdapter):
+    """真 `OpenAICompatibleAdapter._build_payload` / `_serialize_messages`，不走网络。"""
 
     def __init__(self, **kw: Any) -> None:
-        OpenAIMultimodalAdapter.__init__(self, api_key="test-key", **kw)
+        OpenAICompatibleMultimodalAdapter.__init__(self, api_key="test-key", **kw)
         self._init_stub()
 
     def complete(self, request, stream=True):
@@ -809,9 +809,9 @@ class _TextAnthropicLLM(_EchoThenFinishLLM, AnthropicMultimodalAdapter):
         return self._emit(*self._decide(payload))
 
 
-class _TextOpenAILLM(_EchoThenFinishLLM, OpenAIMultimodalAdapter):
+class _TextOpenAILLM(_EchoThenFinishLLM, OpenAICompatibleMultimodalAdapter):
     def __init__(self) -> None:
-        OpenAIMultimodalAdapter.__init__(self, api_key="test-key")
+        OpenAICompatibleMultimodalAdapter.__init__(self, api_key="test-key")
         self._init_stub()
 
     def complete(self, request, stream=True):

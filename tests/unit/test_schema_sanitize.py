@@ -2,7 +2,7 @@
 
 from ctx_weft.protocols import LLMTool
 from ctx_weft.providers.llm.adapters._schema import sanitize_boolean_schemas
-from ctx_weft.providers.llm.adapters.openai import _map_tools as _openai_map_tools
+from ctx_weft.providers.llm.adapters.openai_compatible import _map_tools as _openai_map_tools
 from ctx_weft.providers.llm.adapters.anthropic import _map_tools as _anthropic_map_tools
 
 

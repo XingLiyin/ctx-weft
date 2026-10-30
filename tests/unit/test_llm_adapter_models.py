@@ -6,7 +6,7 @@ import pytest
 
 from ctx_weft.protocols.llm import LLMMessage, LLMRequest
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
 
 def _mock_client(handler) -> httpx.AsyncClient:
@@ -21,7 +21,7 @@ async def test_openai_list_models():
         seen["auth"] = req.headers.get("authorization", "")
         return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]})
 
-    a = OpenAIAdapter(api_key="sk-x", base_url="https://api.openai.com")
+    a = OpenAICompatibleAdapter(api_key="sk-x", base_url="https://api.openai.com")
     a._client = _mock_client(handler)
     assert await a.list_models() == ["gpt-4o", "gpt-4o-mini"]
     assert seen["url"] == "https://api.openai.com/v1/models"
@@ -49,14 +49,14 @@ async def test_list_models_raises_on_http_error():
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "bad key"})
 
-    a = OpenAIAdapter(api_key="bad", base_url="https://api.openai.com")
+    a = OpenAICompatibleAdapter(api_key="bad", base_url="https://api.openai.com")
     a._client = _mock_client(handler)
     with pytest.raises(httpx.HTTPStatusError):
         await a.list_models()
 
 
 @pytest.mark.parametrize("adapter_type,operation", [
-    (OpenAIAdapter, "chat/completions"),
+    (OpenAICompatibleAdapter, "chat/completions"),
     (AnthropicAdapter, "messages"),
 ])
 async def test_subclass_url_policy_applies_to_generation_and_discovery(adapter_type, operation):

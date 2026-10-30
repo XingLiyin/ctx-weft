@@ -15,15 +15,20 @@ if TYPE_CHECKING:
         AnthropicAdapter,
         AnthropicMultimodalAdapter,
     )
-    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter, OpenAIMultimodalAdapter
+    from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+    from ctx_weft.providers.llm.adapters.openai_compatible import (
+        OpenAICompatibleAdapter,
+        OpenAICompatibleMultimodalAdapter,
+    )
 
 __all__ = [
     "AnthropicAdapter",
     "AnthropicMultimodalAdapter",
-    "OpenAIAdapter",
-    "OpenAIMultimodalAdapter",
     "MockLLMAdapter",
     "MockResponse",
+    "OpenAIAdapter",
+    "OpenAICompatibleAdapter",
+    "OpenAICompatibleMultimodalAdapter",
     "ReasoningCandidate",
 ]
 
@@ -33,8 +38,12 @@ def __getattr__(name: str):
         from ctx_weft.providers.llm.adapters import anthropic
 
         return getattr(anthropic, name)
-    if name in ("OpenAIAdapter", "OpenAIMultimodalAdapter"):
-        from ctx_weft.providers.llm.adapters import openai
+    if name == "OpenAIAdapter":
+        from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
 
-        return getattr(openai, name)
+        return OpenAIAdapter
+    if name in ("OpenAICompatibleAdapter", "OpenAICompatibleMultimodalAdapter"):
+        from ctx_weft.providers.llm.adapters import openai_compatible
+
+        return getattr(openai_compatible, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

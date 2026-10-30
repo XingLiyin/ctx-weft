@@ -4,13 +4,13 @@ from __future__ import annotations
 from ctx_weft.protocols.llm import LLMClient, Tokenizer
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 from ctx_weft.providers.llm.provider import _FixedModelClient
 
 
 def test_adapters_expose_tokenizer():
     for client in (
-        OpenAIAdapter(api_key="k", model="m"),
+        OpenAICompatibleAdapter(api_key="k", model="m"),
         AnthropicAdapter(api_key="k", model="m"),
         MockLLMAdapter(responses=[]),
     ):
@@ -18,7 +18,7 @@ def test_adapters_expose_tokenizer():
 
 
 def test_tokenizer_per_model_isolated():
-    adapter = OpenAIAdapter(api_key="k", model="m1")
+    adapter = OpenAICompatibleAdapter(api_key="k", model="m1")
     t1 = adapter.tokenizer_for("m1")
     t2 = adapter.tokenizer_for("m2")
     assert t1 is not t2

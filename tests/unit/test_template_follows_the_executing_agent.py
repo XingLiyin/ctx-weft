@@ -88,7 +88,7 @@ def _user_message_task(agent_id: str) -> Task:
     return Task(
         id="tsk_1", session_id=SID, status="ACTIVE", tenant_id="default",
         assigned_agent_id=agent_id, creator_agent_id=agent_id,
-        title="User Message", settings=NormalTaskSettings(),
+        settings=NormalTaskSettings(),
     )
 
 

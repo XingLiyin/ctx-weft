@@ -37,7 +37,7 @@ from ctx_weft.protocols import (
     load_records,
 )
 from ctx_weft.providers.llm.adapters.anthropic import _serialize_messages as _anthropic_serialize
-from ctx_weft.providers.llm.adapters.openai import _serialize_messages as _openai_serialize
+from ctx_weft.providers.llm.adapters.openai_compatible import _serialize_messages as _openai_serialize
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests.assembler_testkit import history_messages
 

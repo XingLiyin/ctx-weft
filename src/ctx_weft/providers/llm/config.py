@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-LLMProtocol = Literal["openai", "anthropic"]
-SUPPORTED_PROTOCOLS = frozenset({"openai", "anthropic"})
+# ``openai`` is retained for persisted configurations from before the split.
+# It must always resolve to the compatible adapter, never to the official SDK.
+LLMProtocol = Literal["openai", "openai-compatible", "openai-official", "anthropic"]
+SUPPORTED_PROTOCOLS = frozenset({"openai", "openai-compatible", "openai-official", "anthropic"})
 
 
 @dataclass

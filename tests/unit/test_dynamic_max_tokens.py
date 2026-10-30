@@ -297,11 +297,11 @@ def test_apply_hard_ceiling_below_soft_wins():
 
 
 # ── 瞬态字段不进线上 payload ─────────────────────────────────────────────────────
-from ctx_weft.providers.llm.adapters.openai import OpenAIAdapter
+from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
 
 def test_prompt_token_estimate_not_in_payload():
-    adapter = OpenAIAdapter(api_key="k", model="m")
+    adapter = OpenAICompatibleAdapter(api_key="k", model="m")
     req = _req(prompt_token_estimate=12345, max_tokens=100)
     payload = adapter._build_payload(req)
     assert "prompt_token_estimate" not in payload

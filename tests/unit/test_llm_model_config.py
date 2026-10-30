@@ -42,8 +42,12 @@ def provider(*models):
 @pytest.mark.parametrize(
     "protocol,image,expected",
     [
-        ("openai", False, "OpenAIAdapter"),
-        ("openai", True, "OpenAIMultimodalAdapter"),
+        ("openai", False, "OpenAICompatibleAdapter"),
+        ("openai", True, "OpenAICompatibleMultimodalAdapter"),
+        ("openai-compatible", False, "OpenAICompatibleAdapter"),
+        ("openai-compatible", True, "OpenAICompatibleMultimodalAdapter"),
+        ("openai-official", False, "OpenAIAdapter"),
+        ("openai-official", True, "OpenAIAdapter"),
         ("anthropic", False, "AnthropicAdapter"),
         ("anthropic", True, "AnthropicMultimodalAdapter"),
     ],
@@ -81,7 +85,7 @@ def test_update_changes_next_client_and_preserves_previous_client():
     old = p.get_client()
     p.update_model("gateway", model(protocol="anthropic", image=True))
     assert type(p.get_client()._adapter).__name__ == "AnthropicMultimodalAdapter"
-    assert type(old._adapter).__name__ == "OpenAIAdapter"
+    assert type(old._adapter).__name__ == "OpenAICompatibleAdapter"
     assert p._store.saved["models"][0]["limit"]["output"] == 32_000
     p.delete_account("gateway")
     assert not p._adapters and not p._adapter_settings

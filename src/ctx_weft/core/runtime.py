@@ -3982,7 +3982,8 @@ class CtxWeftRuntime:
             tenant_id=rec.tenant_id,
             assigned_agent_id=agent_id,
             creator_agent_id=agent_id,
-            title="User Message",
+            # Leave the title empty so this new top-level task gets its own
+            # recognize_intent pass after the round commits, like the first task.
             description=content_to_text(normalized)[:200],
             user_prompt=normalized,
             # 外部消息 = 用户对话，与 root task 同一口径：纯文本回合的归宿由

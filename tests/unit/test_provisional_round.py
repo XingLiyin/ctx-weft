@@ -186,7 +186,7 @@ def _task(task_id: str = "tsk_1"):
 
     return Task(id=task_id, session_id="s1", status="ACTIVE",
                 assigned_agent_id="agt_1", creator_agent_id="agt_1",
-                title="User Message", description="hi", user_prompt="hi")
+                description="hi", user_prompt="hi")
 
 
 async def test_push_task_provisional_holds_task_created():
