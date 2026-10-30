@@ -65,8 +65,9 @@ _ACT_RECAP_DESC = (
 
 # Keep the annotation expression static so Cython preserves Annotated metadata.
 _NEXT_STEP_HINT_DESC = (
-    "Optional. If there are obvious risks, blockers, or important concerns the next actor turn should be "
-    "aware of, describe them here. Leave empty if nothing notable. "
+    "Optional. Describe only concrete, evidence-backed gaps or blockers directly relevant to the "
+    "user's requested goal. Do not introduce new requirements or turn optional improvements into "
+    "obligations. Leave empty if none. "
     "This is also where you flag a sub-task whose result does not actually achieve its goal: "
     f"name it (title + id, as listed under '{SUBTASKS_HEADING}') and say what is wrong and "
     "what must be different."
@@ -400,14 +401,15 @@ def finish_task(
         str,
         "OPTIONAL. A brief recap of the concrete deliverables of this task (e.g. the key files "
         "changed / artifacts produced), for the observer and whoever delegated this task. This "
-        "is NOT your reply to the user — write your final reply as your normal message text in "
-        "this same turn; that message is what the user sees AND the deliverable handed off. "
+        "does not replace your reply to the user — output the actual final answer as normal "
+        "message text BEFORE this tool call in the same turn, not just an announcement that "
+        "you will summarize. That message is what the user sees AND the deliverable handed off. "
         "Leave this empty when there is nothing concrete to itemize.",
     ] = "",
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Finish the CURRENT task and hand off to review — call ONLY when the task goal is fully achieved; if work remains, keep working instead. Write your final reply to the user as your normal message text in this same turn — that message IS the reply shown to the user and the deliverable handed off; this tool just ends the task. The optional `deliverables_summary` is a brief recap of concrete artifacts for the reviewer, NOT your answer. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that). If the user replaces the current goal, use control__switch_task instead."""
+    """Finish the CURRENT task and hand off to review — call ONLY when the task goal is fully achieved; if work remains, keep working instead. BEFORE calling, output the actual final answer as normal message text in this same turn. If a summary is needed, write the summary itself; 'I'll summarize the results' is only an announcement. This tool closes the task; it does not generate an answer, and there is no turn afterward to provide one. The optional `deliverables_summary` is a brief artifact recap for the reviewer and does not replace your message text. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that). If the user replaces the current goal, use control__switch_task instead."""
     if ctx is not None and ctx.task is not None:
         # task.outputs 由 ActStep 收尾时合成（收尾回合正文 + deliverables_summary，spec 2026-07-01）；
         # 此处不写 outputs。actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe。
@@ -478,14 +480,16 @@ def report_observation(
 @control_tool(purposes=["recognize_intent"])
 def update_task_metadata(
     title: Annotated[str, "Task title (REQUIRED, must be non-empty): ≤20 chars, start with a verb, "
-                          "summarize the core goal. Never pass an empty string — make a best effort even "
-                          "if the instruction is short or vague."],
+                          "summarize the user's expressed goal. For a vague request, use generic wording "
+                          "rather than infer a more specific goal."],
     description: Annotated[str, "Task description (REQUIRED, must be non-empty): ≤80 chars, state the "
-                               "outcome to achieve. Never pass an empty string."],
+                               "user's requested outcome without adding requirements or expanding scope. "
+                               "Preserve uncertainty when the request is vague."],
     session_goal: Annotated[
         str,
-        "Overall session goal: ≤60 chars. The only optional field. Set it on the first fill or when "
-        "the direction changes; leave empty ONLY to keep the existing goal.",
+        "Overall session goal: ≤60 chars. Optional. Set it only when the user expresses a clear aim "
+        "and no goal is recorded yet, or clearly changes direction. Leave empty to keep the existing "
+        "goal, including when the aim is unclear.",
     ] = "",
     *,
     ctx: ControlContext = None,

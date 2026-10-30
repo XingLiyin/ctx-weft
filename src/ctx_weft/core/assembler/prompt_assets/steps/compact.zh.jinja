@@ -18,6 +18,7 @@
 ## Remaining — {% if ctx.scope == "agent" %}先前摘要留下、至今仍未完成的线头{% else %}未完成的线头、仍悬着的问题、以及还需处理的失败原因{% endif %}（确实没有剩余才写 "none"）。
 ## Evidence — 指向关键工具输出的引用，供后续回合回读，每行一条，形如 `- results__read_tool_output(invocation_id='<id>', tail=200): 它里面是什么`；没有大段输出值得留则整节省略。
 除 Evidence 外每一节都必须出现{% if ctx.scope != "agent" %}；每节按材料允许的长度尽量短{% endif %}。
+区分用户要求与执行者自己的建议和假设。Remaining 只记录用户请求范围内未完成的工作；可选改进不属于必须完成的事项。
 {%- endmacro %}
 
 {% macro instruction(ctx) -%}
