@@ -100,10 +100,7 @@ class _RouterLLM(MockLLMAdapter):
         return self._stream(
             MockResponse(
                 text="This looks like a fake image.",
-                tool_calls=[ToolCall(
-                    id=self._id(), name="control__finish_task",
-                    arguments={"deliverables_summary": "described"},
-                )],
+                tool_calls=[],
             ),
             request,
         )
@@ -194,10 +191,7 @@ class _FinishRouterLLM(MockLLMAdapter):
         return self._stream(
             MockResponse(
                 text="ok",
-                tool_calls=[ToolCall(
-                    id=self._id(), name="control__finish_task",
-                    arguments={"deliverables_summary": "d"},
-                )],
+                tool_calls=[],
             ),
             request,
         )
@@ -278,10 +272,7 @@ class _WireCapturingAnthropicAdapter(AnthropicMultimodalAdapter):
             )])
         return self._fake_stream(
             text="ok",
-            tool_calls=[ToolCall(
-                id=self._id(), name="control__finish_task",
-                arguments={"deliverables_summary": "d"},
-            )],
+            tool_calls=[],
         )
 
     async def _fake_stream(self, *, text: str, tool_calls: list[ToolCall]):

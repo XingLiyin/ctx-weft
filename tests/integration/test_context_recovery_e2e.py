@@ -345,8 +345,7 @@ async def test_actor_done_wins_over_the_stop_line(monkeypatch):
     """越线 + **finish_task** 同一轮 → actor_done 胜出：任务已完成，没有可续的跑。"""
     runtime, llm, seen = _wire(monkeypatch, responses=[
         MockResponse(text="all done",
-                     tool_calls=[ToolCall(id="tc_f", name="control__finish_task",
-                                          arguments={"deliverables_summary": ""})]),
+                     tool_calls=[]),
     ], inflate_on={1})
     await initialize_all(runtime)
     handle, state = await runtime.run_single_task(

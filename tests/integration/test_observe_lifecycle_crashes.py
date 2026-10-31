@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from ctx_weft.protocols import load_records
+from ctx_weft.core.assembler.task_memory import task_record_kind
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
@@ -90,8 +91,8 @@ async def test_foreground_and_recap_real_crash(tmp_path, mode, snapshot, cut):
             assert len(publications) == 1
             turns = await load_records(memory, scope, MemoryScope.AGENT, provider_ctx,
                                            kinds=[MemoryKind.CONVERSATION_TURN])
-            assert sum(any(tc.get("name") == "control__finish_task" for tc in
-                           (turn.metadata.get("tool_calls") or [])) for turn in turns) == 1
+            assert sum(task_record_kind(turn) == "finish" for turn in turns) == 1
+
             head = await store.committed_head("crash-session")
             again, _ = make_lifecycle_runtime(store, memory, mode)
             await initialize_all(again)
@@ -102,7 +103,10 @@ async def test_foreground_and_recap_real_crash(tmp_path, mode, snapshot, cut):
 @pytest.mark.parametrize("snapshot", [False, True])
 @pytest.mark.parametrize("cut", ["summary_requested", "summary_started", "summary_completed", "summary_applied"])
 async def test_recap_only_real_crash(tmp_path, snapshot, cut):
-    await test_foreground_and_recap_real_crash(tmp_path, "mechanical", snapshot, cut)
+    from tests.integration.test_lifecycle_crash_boundaries import test_observe_real_process_crash
+    boundary = {"summary_requested": "hitl_opened", "summary_started": "recap_started",
+                "summary_completed": "observe_completed", "summary_applied": "recap_done"}[cut]
+    await test_observe_real_process_crash(tmp_path, snapshot, "interrupt", boundary)
 
 
 @pytest.mark.parametrize("mode", ["foreground", "mechanical"])

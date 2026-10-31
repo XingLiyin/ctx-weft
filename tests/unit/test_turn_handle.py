@@ -7,6 +7,8 @@ agent + task 已经够定位，events() 与 wait_for_finish() 都不需要 run_i
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind
+
 import asyncio
 from datetime import UTC, datetime
 
@@ -277,10 +279,7 @@ class _CloseFoldLLM(MockLLMAdapter):
                          arguments={"task_status": "success", "act_recap": "CLOSE段摘要",
                                     "task_summary": "CLOSE小结"}),
             ]), request)
-        return self._stream(MockResponse(text="done", tool_calls=[
-            ToolCall(id=self._id("fin"), name="control__finish_task",
-                     arguments={"deliverables_summary": "done"}),
-        ]), request)
+        return self._stream(MockResponse(text="done", tool_calls=[]), request)
 
 
 async def test_wait_for_finish_returns_after_deferred_fold_lands():
@@ -325,7 +324,7 @@ async def test_wait_for_finish_returns_after_deferred_fold_lands():
 
     turns = await load_records(memory,
         agent_scope, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
-    recap = [r for r in turns if r.role == "assistant"
+    recap = [r for r in turns if task_record_kind(r) == "recap"
              and r.metadata.get("origin_task_id") == handle.task_id
              and not r.metadata.get("final_reply")]
     assert any("CLOSE段摘要" in r.content for r in recap), \
@@ -346,8 +345,7 @@ async def test_start_session_returns_turn_handle():
     """
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
-    llm = MockLLMAdapter(observer_verdict="success", responses=[MockResponse(text="done", tool_calls=[
-        ToolCall(id="tc1", name="control__finish_task", arguments={})])])
+    llm = MockLLMAdapter(observer_verdict="success", responses=[MockResponse(text="done", tool_calls=[])])
     rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
 

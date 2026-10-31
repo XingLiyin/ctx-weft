@@ -122,7 +122,7 @@ async def test_segment_over_threshold_folds_as_before(fake_state_ctx, monkeypatc
     called = {"react": False}
     async def _react(*a, **k):
         called["react"] = True
-        return ControlResult(content="segment recap", metadata={K.OBSERVER_ACT_RECAP: "segment recap"}), ""
+        return ControlResult(content="segment recap", metadata={K.OBSERVER_ACT_RECAP: "segment recap", K.OBSERVER_OUTCOME: "continue"}), ""
     monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "plain_text"})
@@ -226,7 +226,7 @@ async def test_short_segment_on_plain_text_still_judges(fake_state_ctx, monkeypa
 
     async def _react(*a, **k):
         called["react"] = True
-        return ControlResult(content="话术", metadata={K.OBSERVER_ACT_RECAP: "短段 recap"}), ""
+        return ControlResult(content="话术", metadata={K.OBSERVER_ACT_RECAP: "短段 recap", K.OBSERVER_OUTCOME: "continue"}), ""
 
     monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _react)
 

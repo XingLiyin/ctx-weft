@@ -13,7 +13,6 @@ from ctx_weft.core.capabilities.control_tools import (
     SWITCH_TASK_NAME,
     DELEGATE_PLAN_NAME,
     DELEGATE_TASK_NAME,
-    FINISH_TASK_NAME,
     REPORT_OBSERVATION_NAME,
     UPDATE_TASK_METADATA_NAME,
 )
@@ -32,7 +31,6 @@ __all__ = ["RUNTIME_KEYS", "render_purpose", "runtime_asset_paths", "runtime_pro
 
 
 AUTO_PLACEHOLDERS: dict[str, str] = {
-    "finish_task": FINISH_TASK_NAME,
     "switch_task": SWITCH_TASK_NAME,
     "delegate_task": DELEGATE_TASK_NAME,
     "delegate_plan": DELEGATE_PLAN_NAME,

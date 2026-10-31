@@ -6,7 +6,7 @@ Sub-task {{ ref }} is running now — its execution follows below.
 {%- endmacro %}
 
 {% macro dispatch_closed(failed, ref) -%}
-Sub-task {{ ref }} ran here — outcome: {% if failed %}FAILED{% else %}completed{% endif %}. Its execution is inlined below, ending with its own {{ finish_task }} and the final reply it delivered.
+Sub-task {{ ref }} ran here — outcome: {% if failed %}FAILED{% else %}completed{% endif %}. Its execution is inlined below, including its final reply and task report.
 {%- endmacro %}
 
 {% macro dispatch_cancelled(reason, ref) -%}
@@ -33,3 +33,9 @@ Session failure threshold was hit (N consecutive sub-task failures); terminating
 [Closed by the reviewer: this task was judged complete. Send another message to open a new round.]
 {%- endmacro %}
 
+
+{% macro task_memory_record(record) -%}
+<task_{{ record.kind }} task_id="{{ record.task_id | e }}"{% if record.parent_task_id %} parent_task_id="{{ record.parent_task_id | e }}"{% endif %}{% if record.title %} title="{{ record.title | e }}"{% endif %}{% if record.outcome %} outcome="{{ record.outcome | e }}"{% endif %}>
+{% if record.kind == "start" %}{{ record.description }}{% else %}{{ record.body }}{% endif %}
+</task_{{ record.kind }}>
+{%- endmacro %}

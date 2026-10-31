@@ -55,11 +55,12 @@ from ctx_weft.core.capabilities.control_tools import (
 )
 from ctx_weft.core.hitl.service import UnattendedHitl
 from ctx_weft.protocols.filesystem import SpillSink
-from ctx_weft.protocols.memory import MemoryEvent, MemoryEventType, MemoryScope, MemoryProvider, MemoryAddress
+from ctx_weft.protocols.memory import MemoryEvent, MemoryScope, MemoryProvider, MemoryAddress
 from ctx_weft.protocols.memory_compat import MemoryKind
 
 if TYPE_CHECKING:
     from ctx_weft.core.loop.driver import LoopState, LoopContext
+    from ctx_weft.protocols.context import ProviderContext
     from ctx_weft.protocols.hitl import HitlAsk
     from ctx_weft.protocols.memory import MemoryBlobStore
 
@@ -93,15 +94,9 @@ _PLAN_DISPATCH_TOOLS = frozenset({
 
 # 编排/裁决型控制工具：其结果是状态信号、不入 task 对话——例如 report_observation 的 HITL 回复
 # 改由 finalize 以 role=user 注入。（ask_user 的人类答复是 actor 输入，仍写 task 层。）
-# finish_task 同理：反转契约后它是无参收尾标记，最终答复即助手消息正文、canonical 出口是
-# task.outputs（ActStep 收尾时合成），标记本身不入 task 对话。
-# report_observation 是 observe 的终止工具：result 由 ObserveStep._run_react 取出落
-# close report 槽（→ Process Report），且 background observe 在 task close 后才跑，若入 task 对话
-# 会污染已冻结的对话且不被 supersede（泄漏进后续 task prompt）。
 SILENT_TOOLS = frozenset({
     qualify(f"{CONTROL}:report_observation"),
     qualify(f"{CONTROL}:update_task_metadata"),
-    qualify(f"{CONTROL}:finish_task"),
 })
 
 

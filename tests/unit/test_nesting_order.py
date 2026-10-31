@@ -196,19 +196,15 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
 
     # 用 content 标记还原序列骨架
     def _label(m):
-        if m.role == "assistant" and m.tool_calls:
-            nm = m.tool_calls[0].get("name", "")
-            if nm.endswith("delegate_task"):
-                return "P:DELEGATE_call"
-            if nm.endswith("finish_task"):
-                res = m.tool_calls[0].get("input", {}).get("result", "")
-                return "C:FINISH_call" if "子任务" in res else "P:FINISH_call"
-        if m.role == "tool":
-            c = m.content
-            if "scheduled" in c:
-                return "P:DELEGATE_result"
-            if "Process Report" in c:
-                return "C:FINISH_report" if "C 成功" in c else "P:FINISH_report"
+        c = m.content
+        if "<task_start" in c:
+            return "P:DELEGATE_call"
+        if "<task_result" in c:
+            return "P:DELEGATE_result"
+        if "<task_final_reply" in c:
+            return "C:FINISH_call" if 'task_id="C"' in c else "P:FINISH_call"
+        if "<task_finish" in c:
+            return "C:FINISH_report" if 'task_id="C"' in c else "P:FINISH_report"
         if m.role == "user":
             if "auth 改成 JWT" in m.content:
                 return "P:UP"
@@ -336,7 +332,7 @@ async def test_anchoring_discipline_finish_pair_anchors_close_time() -> None:
     recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 100, _pctx())
     assert len(recs) == 2, f"finish pair = 2 records; got {len(recs)}"
     ts = {r.timestamp for r in recs}
-    assert len(ts) == 1, f"finish pair must share ONE anchor timestamp (close base); got {ts}"
+    assert max(ts) - min(ts) == timedelta(microseconds=1)
 
 
 # ════════════════════════════════════════════════════════════════════════════

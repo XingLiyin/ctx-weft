@@ -1,17 +1,7 @@
-"""End-to-end: actor calls finish_task + delegate_task in the SAME act batch.
+"""Delegation suspends the parent, then normal replies close child and resumed parent.
 
-Locks the cross-layer behavior of ActStep._reconcile_finish_vs_dispatch +
-TaskManager.detach_staged driven through a real session:
-
-1. finish wins  → the current (root) task FINISHES and never SUSPENDS
-   (delegate did NOT hijack it into awaiting a child).
-2. delegate still dispatches → the delegated work runs as an INDEPENDENT task
-   (re-parented to the root's parent = top level), and also reaches FINISHED.
-
-The mock LLM routes by the tools present in each request (recognize_intent /
-observe / background_observe / background_recap / act), so it is robust to call ordering. The first
-act turn (root) returns finish+delegate in one batch; later act turns (the
-detached follow-up) return finish only.
+The actor no longer has a finish tool that can detach work from its task tree.
+Observer and metadata calls use separate mock routes from actor responses.
 """
 from __future__ import annotations
 
@@ -45,8 +35,7 @@ class _RouterLLM(MockLLMAdapter):
     - observe (has report_observation)           → report success.
     - background_observe (has report_observation) → report success.
     - background_recap (has report_observation) → emit a segment report.
-    - act (everything else): 1st call → finish_task + delegate_task batch (the
-      scenario under test); subsequent calls → finish_task only (the follow-up).
+    - act: first delegates; child and resumed parent then reply in prose.
     """
 
     def __init__(self, **kw) -> None:
@@ -78,21 +67,14 @@ class _RouterLLM(MockLLMAdapter):
         # act
         self._act_calls += 1
         if self._act_calls == 1:
-            # Root act: finish + delegate IN THE SAME BATCH (the case under test).
-            # 交付物 = 收尾回合正文（finish_task 不带 result 参数——未声明参数会被
-            # gateway 严格校验拒绝，见 spec: capability-gateway）。
+            # A dispatch keeps the child attached and suspends its parent.
             return self._stream(MockResponse(text="root done", tool_calls=[
-                ToolCall(id=self._id("fin"), name="control__finish_task",
-                         arguments={}),
                 ToolCall(id=self._id("del"), name="control__delegate_task",
                          arguments={"title": _CHILD_TITLE,
                                     "task_prompt": "do the unrelated follow-up"}),
             ]), request)
-        # Detached follow-up act (and any later act): finish only.
-        return self._stream(MockResponse(text="child done", tool_calls=[
-            ToolCall(id=self._id("fin"), name="control__finish_task",
-                     arguments={}),
-        ]), request)
+        # Child and resumed parent both deliver ordinary replies.
+        return self._stream(MockResponse(text="child done"), request)
 
 
 def _make_runtime(llm: _RouterLLM) -> CtxWeftRuntime:
@@ -118,11 +100,11 @@ async def _wait_for_n_finished(runtime, session_id, n, timeout=5.0):
     )
 
 
-async def test_finish_plus_delegate_same_batch_e2e():
+async def test_delegate_same_batch_e2e():
     llm = _RouterLLM()
     runtime = _make_runtime(llm)
 
-    # Spy events to prove the root never suspended (finish won over delegate).
+    # Spy events to check suspension and the number of actual executions.
     seen = []
     orig_emit = runtime._event_bus.emit
 
@@ -141,7 +123,7 @@ async def test_finish_plus_delegate_same_batch_e2e():
     session_id = handle.session_id
     await handle.wait_for_finish(timeout=5.0)
 
-    # Both the root and the detached follow-up must reach FINISHED.
+    # Both parent and child must finish.
     view = await _wait_for_n_finished(runtime, session_id, n=2)
     tasks = list(view.tasks.values())
     assert len(tasks) == 2, f"expected exactly 2 tasks, got {[t.title for t in tasks]}"
@@ -149,12 +131,11 @@ async def test_finish_plus_delegate_same_batch_e2e():
         f"expected both FINISHED, got {[(t.title, t.status) for t in tasks]}"
     )
 
-    # The delegated follow-up was re-parented to the root's parent (= top level),
-    # i.e. dispatched as an INDEPENDENT task, not as a blocking child of the root.
+    # Delegated work remains a blocking child of its parent.
     child = next((t for t in tasks if t.title == _CHILD_TITLE), None)
     assert child is not None, f"delegated task {_CHILD_TITLE!r} not found"
-    assert not child.parent_task_id, (
-        f"detached follow-up must be top-level (no parent), got parent={child.parent_task_id!r}"
+    assert child.parent_task_id == handle.task_id, (
+        f"delegated work must stay attached to its parent, got {child.parent_task_id!r}"
     )
 
     # The non-subagent task must record its real execution agent id at start (run_task),
@@ -167,20 +148,18 @@ async def test_finish_plus_delegate_same_batch_e2e():
         f"assigned={child.assigned_agent_id!r} creator={child.creator_agent_id!r}"
     )
 
-    # 每个 task 的 TaskStarted 恰好一条：防止 _run_task(派发前) 与 run_task(_resolve 后) 双发回归。
-    # 权威那条由 run_task 发（带 resolved agent id，见上 child.assigned_agent_id 断言）。
+    # Parent runs twice (before/after the child); the child runs once.
     from collections import Counter
     started = Counter(
         e.task_id for e in seen if getattr(e, "type", None) == EventType.TASK_STARTED
     )
-    assert started, "expected at least one TaskStarted"
-    assert all(c == 1 for c in started.values()), (
-        f"TaskStarted must fire exactly once per task, got {dict(started)}"
-    )
+    assert started == Counter({handle.task_id: 2, child.id: 1}), dict(started)
 
-    # finish WON: the root must never have been suspended by the delegate.
-    suspended = [e for e in seen if getattr(e, "type", None) == EventType.TASK_SUSPENDED]
-    assert not suspended, (
-        f"finish must win — no task should suspend, got "
+    # Dispatch suspends the parent until its child has returned.
+    from tests._event_helpers import all_events
+    suspended = [e for e in await all_events(runtime.event_store, session_id)
+                 if e.type == EventType.TASK_SUSPENDED]
+    assert any(e.task_id == handle.task_id for e in suspended), (
+        f"parent must suspend while waiting for its child, got "
         f"{[(e.payload or {}).get('task_id') for e in suspended]}"
     )

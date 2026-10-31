@@ -81,10 +81,7 @@ class _FinishEveryTaskLLM(MockLLMAdapter):
                          arguments={"task_status": "success", "act_recap": "segment summary"}),
             ]), request)
         # 交付物 = 收尾回合正文（finish_task 不带未声明参数，spec: capability-gateway）
-        return self._stream(MockResponse(text="done", tool_calls=[
-            ToolCall(id=self._id("fin"), name="control__finish_task",
-                     arguments={}),
-        ]), request)
+        return self._stream(MockResponse(text="done", tool_calls=[]), request)
 
 
 async def _wait_until(predicate, timeout=10.0, interval=0.02):

@@ -59,8 +59,7 @@ class TreeLLM(_FinishEveryTaskLLM):
                 name="control__delegate_task", arguments=arguments)]), request)
         if not unrelated and getattr(self, "finish_grandchild", False):
             self.grandchild_started.set()
-            return self._stream(MockResponse(text="GRAND FINAL ANSWER", tool_calls=[
-                ToolCall(id=self._id("finish"), name="control__finish_task", arguments={})]), request)
+            return self._stream(MockResponse(text="GRAND FINAL ANSWER", tool_calls=[]), request)
         ready = self.unrelated_started if unrelated else self.grandchild_started
         async def hold():
             ready.set()

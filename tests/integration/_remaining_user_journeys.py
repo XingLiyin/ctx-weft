@@ -64,9 +64,9 @@ class JourneyLLM(_FinishEveryTaskLLM):
         self.wire = _WireCapturingAnthropicAdapter()
         self.actor_payloads = []
 
-    def response(self, request, text="", name="control__finish_task", arguments=None):
-        return self._stream(MockResponse(text=text, tool_calls=[ToolCall(
-            id=self._id("journey"), name=name, arguments=arguments or {})]), request)
+    def response(self, request, text="", name=None, arguments=None):
+        return self._stream(MockResponse(text=text, tool_calls=([ToolCall(
+            id=self._id("journey"), name=name, arguments=arguments or {})] if name else [])), request)
 
     def question(self, request, text):
         return self.response(request, name="control__ask_user",

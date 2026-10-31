@@ -16,7 +16,6 @@ import sqlite3
 
 import pytest
 
-from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import ToolCall
@@ -50,9 +49,7 @@ class _FinishLLM(MockLLMAdapter):
                 ToolCall(id=f"bg{self._n}", name="control__report_observation",
                          arguments={"task_status": "success", "act_recap": "done", "task_summary": "done"}),
             ]), request)
-        return self._stream(MockResponse(text="done", tool_calls=[
-            ToolCall(id=f"fin{self._n}", name="control__finish_task", arguments={}),
-        ]), request)
+        return self._stream(MockResponse(text="done", tool_calls=[]), request)
 
 
 class FailingEventStore(InMemoryEventStore):

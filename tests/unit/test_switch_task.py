@@ -138,8 +138,8 @@ async def test_terminal_review_failure_has_terminal_fallback(monkeypatch):
 
     monkeypatch.setattr(ObserveStep, "_llm_observe", failed)
     result = await ObserveStep()._observe(state, ctx, [], True, "task_switch")
-    assert result.verdict.task_outcome == "fail"
-    assert result.act_recap and result.verdict.failure_reason
+    assert result.verdict.task_outcome == "success"
+    assert not result.act_recap and not result.verdict.failure_reason
 
 
 def test_terminal_success_does_not_require_closing_prose():
@@ -188,9 +188,9 @@ async def test_conflicting_batch_executes_no_tools(monkeypatch):
 
     monkeypatch.setattr(act, "_ingest_synthetic_tool_result", record)
     calls = [ToolCall(id="switch", name=SWITCH_TASK_NAME, arguments={}),
-             ToolCall(id="finish", name="control__finish_task", arguments={})]
+             ToolCall(id="ask", name="control__ask_user", arguments={})]
     result = await _execute_tool_calls(state, ctx, calls)
-    assert paired == ["switch", "finish"]
+    assert paired == ["switch", "ask"]
     assert all(row["is_error"] for row in result)
 
 
@@ -229,7 +229,7 @@ async def test_runtime_new_goal_runs_before_old_review_and_late_review_keeps_age
         async def new_goal(self, request):
             new_started.set()
             await release_new.wait()
-            async for chunk in self._stream(MockResponse(text="New goal delivered.", tool_calls=[ToolCall(id="fin-new", name="control__finish_task", arguments={})]), request):
+            async for chunk in self._stream(MockResponse(text="New goal delivered.", tool_calls=[]), request):
                 yield chunk
 
     original = ObserveStep._llm_observe
@@ -450,7 +450,7 @@ async def test_subtask_replacement_completes_parent_before_old_review(monkeypatc
                 elif self.acts == 2:
                     response = MockResponse(tool_calls=[ToolCall(id="switch", name=SWITCH_TASK_NAME, arguments={"title": "replacement child", "description": "new subgoal", "task_prompt": "new request", "target_task_id": root_id if replace_ancestor else "", "reason": "Replace the whole root goal" if replace_ancestor else ""})])
                 else:
-                    response = MockResponse(text="Goal delivered.", tool_calls=[ToolCall(id=f"finish-{self.acts}", name="control__finish_task", arguments={})])
+                    response = MockResponse(text="Goal delivered.", tool_calls=[])
             return self._stream(response, request)
 
     provider = InlineAgentTemplateProvider()

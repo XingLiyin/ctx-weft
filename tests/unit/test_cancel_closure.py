@@ -13,6 +13,9 @@
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+
+
 from ctx_weft.core.utils.task_ref import task_ref
 
 import pytest
@@ -78,10 +81,10 @@ async def test_same_agent_started_task_ack_replaced_and_nested_finish_pair() -> 
 
     parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     recs = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
-    tool_recs = [r for r in recs if r.role == "tool"]
+    tool_recs = [r for r in recs if task_record_kind(r) in {"result", "finish"}]
 
     # ack 终态化：旧 running ack 被 supersede，只剩一条取消文案（配对 tool_call_id=call-1）
-    ack = [r for r in tool_recs if r.metadata.get("tool_call_id") == "call-1"]
+    ack = [r for r in tool_recs if task_record_group(r) == "call-1"]
     assert len(ack) == 1
     assert "Sub-task 'Child c1' (c1) was cancelled before completion (user_cancel)" in ack[0].content
     assert "its partial execution below is incomplete" in ack[0].content
@@ -89,17 +92,17 @@ async def test_same_agent_started_task_ack_replaced_and_nested_finish_pair() -> 
     # 嵌套 finish 对（同 agent 共享 scope）：assistant 槽收尾标记 + tool 槽 [outcome=cancelled]
     finish_tool = [r for r in tool_recs if r.metadata.get("origin_task_id") == "c1"]
     assert len(finish_tool) == 1
-    assert "[outcome=cancelled]" in finish_tool[0].content
+    assert 'outcome="cancelled"' in finish_tool[0].content
     assert "Cancelled (user_cancel) — no final output was produced" in finish_tool[0].content
     assert "the partial execution above is all that ran" in finish_tool[0].content
 
     finish_assistant = [
-        r for r in recs if r.role == "assistant" and r.metadata.get("origin_task_id") == "c1"
+        r for r in recs if task_record_kind(r) == "recap" and r.metadata.get("origin_task_id") == "c1"
     ]
     assert len(finish_assistant) == 1
-    assert finish_assistant[0].content.startswith("Task was cancelled before completion.")
+    assert "Task was cancelled before completion." in finish_assistant[0].content
     tool_calls = finish_assistant[0].metadata.get("tool_calls") or []
-    assert any(tc.get("name", "").endswith("finish_task") for tc in tool_calls)
+    assert tool_calls == []
 
 
 async def test_cross_agent_started_task_ack_and_own_scope_finish_pair() -> None:
@@ -114,20 +117,20 @@ async def test_cross_agent_started_task_ack_and_own_scope_finish_pair() -> None:
 
     parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     parent_recs = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
-    ack = [r for r in parent_recs if r.role == "tool" and r.metadata.get("tool_call_id") == "call-1"]
+    ack = [r for r in parent_recs if task_record_kind(r) in {"result", "finish"} and task_record_group(r) == "call-1"]
     assert len(ack) == 1
     assert "was cancelled before completion (user_cancel)" in ack[0].content
     # 跨 agent：父 scope 只有 ack，没有 finish 对（那在子自己的 scope）
     parent_finish = [
-        r for r in parent_recs if r.role == "assistant" and r.metadata.get("origin_task_id") == "c1"
+        r for r in parent_recs if task_record_kind(r) == "recap" and r.metadata.get("origin_task_id") == "c1"
     ]
     assert parent_finish == []
 
     own_scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="agt_child")
     own_recs = await mem.recall_recent(own_scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
-    tool = [r for r in own_recs if r.role == "tool"]
+    tool = [r for r in own_recs if task_record_kind(r) in {"result", "finish"}]
     assert len(tool) == 1
-    assert "[outcome=cancelled]" in tool[0].content
+    assert 'outcome="cancelled"' in tool[0].content
 
 
 async def test_root_own_scope_finish_pair() -> None:
@@ -143,14 +146,11 @@ async def test_root_own_scope_finish_pair() -> None:
 
     scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     recs = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
-    assistant = [r for r in recs if r.role == "assistant"]
-    tool = [r for r in recs if r.role == "tool"]
+    assistant = [r for r in recs if task_record_kind(r) == "recap"]
+    tool = [r for r in recs if task_record_kind(r) in {"result", "finish"}]
     assert len(assistant) == 1 and len(tool) == 1
-    assert any(
-        tc.get("name", "").endswith("finish_task")
-        for tc in (assistant[0].metadata.get("tool_calls") or [])
-    )
-    assert "[outcome=cancelled]" in tool[0].content
+    assert not assistant[0].metadata.get("tool_calls")
+    assert 'outcome="cancelled"' in tool[0].content
     assert "Cancelled (user_cancel)" in tool[0].content
 
 
@@ -339,9 +339,9 @@ async def test_runtime_finalize_cancel_memory_root_own_scope_finish_pair() -> No
     scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await memory.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
-    tool = [r for r in recs if r.role == "tool"]
+    tool = [r for r in recs if task_record_kind(r) in {"result", "finish"}]
     assert len(tool) == 1
-    assert "[outcome=cancelled]" in tool[0].content
+    assert 'outcome="cancelled"' in tool[0].content
 
 
 async def test_runtime_finalize_cancel_memory_one_bad_task_does_not_block_others() -> None:
@@ -368,6 +368,6 @@ async def test_runtime_finalize_cancel_memory_one_bad_task_does_not_block_others
     parent_scope = MemoryAddress(session_id="s1", task_id="root", agent_id="agt_root")
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await memory.recall_recent(parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
-    good_ack = [r for r in recs if r.role == "tool" and r.metadata.get("tool_call_id") == "call-good"]
+    good_ack = [r for r in recs if task_record_kind(r) in {"result", "finish"} and task_record_group(r) == "call-good"]
     assert len(good_ack) == 1
     assert "was cancelled before completion" in good_ack[0].content

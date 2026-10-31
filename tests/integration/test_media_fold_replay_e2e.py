@@ -263,8 +263,7 @@ class _PlaceholderReadingLLM:
                 calls.append(ToolCall(id=self._tid(), name="probe__echo", arguments={}))
             return "let me look at that image again", calls
         self.calls.append("finish")
-        return "done", [ToolCall(id=self._tid(), name="control__finish_task",
-                                 arguments={"deliverables_summary": "described"})]
+        return "done", []
 
     async def _emit(self, text: str, tool_calls: list[ToolCall]) -> AsyncIterator[LLMChunk]:
         if text:
@@ -794,8 +793,7 @@ class _EchoThenFinishLLM(_PlaceholderReadingLLM):
             return "calling echo", [ToolCall(id=self._tid(), name="probe__echo",
                                              arguments={})]
         self.calls.append("finish")
-        return "done", [ToolCall(id=self._tid(), name="control__finish_task",
-                                 arguments={"deliverables_summary": "d"})]
+        return "done", []
 
 
 class _TextAnthropicLLM(_EchoThenFinishLLM, AnthropicMultimodalAdapter):
@@ -1096,7 +1094,7 @@ async def test_restore_task_prompts_isolates_one_bad_task_and_logs_error(
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert any(bad_tid in r.getMessage() and "user_prompt" in r.getMessage()
                for r in error_records), (
-        f"必须有一条 error 日志点名坏 task 的 id 与字段名，实际记录：" +
+        "必须有一条 error 日志点名坏 task 的 id 与字段名，实际记录：" +
         repr([r.getMessage() for r in error_records]))
 
 

@@ -87,7 +87,10 @@ def _memory_type(record) -> str:
 def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
     from ctx_weft.protocols import MemoryEventType, MemoryKind, MemoryScope
 
+    from ctx_weft.core.assembler.task_memory import project_task_history, task_record_group
+
     records = context._records if records is None else records
+    projected = dict(zip(records, project_task_history(records.values()), strict=True))
     task_id = context.task.get("id", "")
     base = max((r.metadata.get("seq_no", 0) for r in records.values()
                 if r.scope is MemoryScope.TASK), default=0) + 1
@@ -95,7 +98,7 @@ def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[st
     for block in context.memory_blocks:
         if block["kind"] != "history":
             continue
-        record = records[block["memory_id"]]
+        record = projected[block["memory_id"]]
         if record.kind is not None and record.kind not in (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY):
             continue
         metadata = block["metadata"]
@@ -159,6 +162,8 @@ def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[st
             task_id=record.metadata.get("task_id", ""),
             origin_task_id=record.metadata.get("origin_task_id", ""),
             summary_kind=summary_kind,
+            group=("task-memory:" + str(task_record_group(record))
+                   if task_record_group(record) else None),
         ))
 
     candidates = [

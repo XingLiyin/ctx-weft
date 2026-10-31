@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -74,12 +76,12 @@ async def test_synthesize_writes_only_finish_pair_no_body_mirror():
     turns = await _agent_turns(mem, asc)
     # 只有 finish 对（assistant finish_task + tool task_summary）
     roles = [r.role for r in turns]
-    assert roles == ["assistant", "tool"], f"task-resident: only finish pair expected; got roles={roles}"
+    assert roles == ["user", "user"], f"task-resident: only finish pair expected; got roles={roles}"
     assert all(r.type == T.AGENT_CONVERSATION_TURN for r in turns)
-    assert turns[-2].metadata.get("tool_calls", [{}])[0].get("name", "").endswith("finish_task")
+    assert not turns[-2].metadata.get("tool_calls")
     # 反转契约：finish 对 assistant.content = act_recap（过程复述，≠ 答复）；tool.content = task_summary
-    assert turns[-2].content.startswith("PDF转换执行过程：成功转换了文件")
-    assert turns[-1].content == "[task: 'PPTX转PDF' (t1)] PDF成功完成转换"  # tool 槽带归属前缀
+    assert "PDF转换执行过程：成功转换了文件" in turns[-2].content
+    assert "PDF成功完成转换" in turns[-1].content  # tool 槽带归属前缀
     assert all(r.metadata.get("origin_task_id") == "t1" for r in turns)
 
     # body 留 task 层（UP + 段摘要原样保留，未被镜像/supersede）
@@ -97,10 +99,10 @@ async def test_no_task_layer_body_still_writes_finish_pair():
 
     turns = await _agent_turns(mem, asc)
     assert len(turns) == 2
-    assert turns[-2].role == "assistant"
-    assert turns[-1].role == "tool"
+    assert turns[-2].role == "user"
+    assert turns[-1].role == "user"
     # 无 user 镜像（无 body）
-    assert not any(r.role == "user" for r in turns)
+    assert [task_record_kind(r) for r in turns] == ["recap", "finish"]
 
 
 async def test_finish_pair_marker_and_report():
@@ -116,12 +118,10 @@ async def test_finish_pair_marker_and_report():
     await _synthesize_dispatch_pair(mem, asc, task, "PDF转换执行过程摘要", "成功转换", "success", _ctx())
 
     turns = await _agent_turns(mem, asc)
-    assert [r.role for r in turns] == ["assistant", "tool"]
-    tcs = turns[-2].metadata.get("tool_calls", [])
-    assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task")
-    assert tcs[0]["input"] == {}   # finish_task 无参收尾标记
+    assert [r.role for r in turns] == ["user", "user"]
+    assert all(not r.metadata.get("tool_calls") for r in turns)
     # 反转契约：assistant.content = act_recap（过程复述），tool.content = task_summary
-    assert turns[-2].content.startswith("PDF转换执行过程摘要")
-    assert turns[-1].content == "[task: 'PPTX转PDF' (t1)] 成功转换"  # tool 槽带归属前缀
+    assert "PDF转换执行过程摘要" in turns[-2].content
+    assert "成功转换" in turns[-1].content  # tool 槽带归属前缀
     # tool_call 配对
-    assert turns[-1].metadata.get("tool_call_id") == tcs[0]["id"]
+    assert task_record_group(turns[-1]) == task_record_group(turns[-2])

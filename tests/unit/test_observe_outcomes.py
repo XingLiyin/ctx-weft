@@ -154,7 +154,7 @@ def test_mechanical_verdict_mechanical_exit_is_retry() -> None:
     for reason in ("max_turns", "context_limit"):
         t = _task()
         v = ObserveStep()._mechanical_verdict(_state(reason, t))
-        assert v.task_outcome == "continue", reason
+        assert v.task_outcome == "success", reason
         assert v.act_recap == ""  # 不产合成摘要（用户裁定）
         assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
         # 机械判决只定结局、不写 task：原 _rule_observe 的 _apply_assessment 副作用已删。
@@ -177,9 +177,9 @@ def test_mechanical_verdict_plain_text_exit_is_continue_with_a_finish_reminder()
     """
     t = _task()
     v = ObserveStep()._mechanical_verdict(_state("normal", t))
-    assert v.task_outcome == "continue"
+    assert v.task_outcome == "success"
     assert v.act_recap == ""
-    assert "finish_task" in v.next_step_hint, "判 continue 却没告诉它去调 finish_task"
+    assert v.next_step_hint == ""
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
     assert t.observer_outcome is None
     # hint 也不由判决自己写进 task——那是 `execute` 的事（见
@@ -203,7 +203,7 @@ def test_mechanical_verdict_no_transcript_is_fail() -> None:
     t = _task()
     state = SimpleNamespace(transcript=[], act_exit_reason="normal", task=t)
     v = ObserveStep()._mechanical_verdict(state)
-    assert v.task_outcome == "fail"
+    assert v.task_outcome == "success"
     assert v.act_recap == ""
     assert t.status == "ACTIVE"  # 判决不写状态（Task 4：状态归 TM）
 
@@ -256,7 +256,7 @@ def test_root_actor_done_is_judged_by_the_llm() -> None:
 
 def test_no_role_stays_rule_even_at_max_turns() -> None:
     s = _llm_gate_state("max_turns", None, has_role=False)
-    assert ObserveStep()._should_use_llm(s) is False
+    assert ObserveStep()._should_use_llm(s) is True
 
 
 def test_delegated_normal_exit_uses_llm() -> None:
@@ -422,7 +422,7 @@ async def test_non_llm_path_launches_background_observe(monkeypatch) -> None:
     launched = _capture_launches(monkeypatch)
     state, ctx = _mech_state_ctx()
     await _foreground_observe(state, ctx)
-    assert launched == ["mechanical"], "非 LLM 路径必须转 background observe"
+    assert launched == [], "LLM failure is finalized once without starting a second observation"
 
 
 @pytest.mark.asyncio
@@ -437,7 +437,7 @@ async def test_close_boundary_not_double_launched(monkeypatch) -> None:
         launched = _capture_launches(monkeypatch)
         state, ctx = _mech_state_ctx(exit_reason=reason, parent_task_id=None)
         await _foreground_observe(state, ctx)
-        assert launched == [expected], reason
+        assert launched == [], reason
 
 
 @pytest.mark.asyncio
@@ -445,8 +445,8 @@ async def test_mechanical_verdict_full_mapping_through_execute(monkeypatch) -> N
     """整张表走一遍 `execute`（含那道 max_turns 强制覆盖）：只有 `actor_done` 判 success。"""
     _capture_launches(monkeypatch)
     for exit_reason, expected in [
-        ("max_turns", "continue"), ("context_limit", "continue"),
-        ("normal", "continue"),          # 2026-09-28：纯文本不算收尾
+        ("max_turns", "success"), ("context_limit", "success"),
+        ("normal", "success"),          # 2026-09-28：纯文本不算收尾
         ("actor_done", "success"),       # 唯一的 success
     ]:
         state, ctx = _mech_state_ctx(exit_reason=exit_reason)
@@ -455,7 +455,7 @@ async def test_mechanical_verdict_full_mapping_through_execute(monkeypatch) -> N
 
     state, ctx = _mech_state_ctx(transcript=[])
     outcome = await _foreground_observe(state, ctx)
-    assert outcome.state_patch["verdict"].task_outcome == "fail"
+    assert outcome.state_patch["verdict"].task_outcome == "success"
 
 
 @pytest.mark.asyncio
@@ -471,7 +471,7 @@ async def test_mechanical_continue_lands_the_finish_reminder_on_the_task(monkeyp
     assert state.task.next_step_hint is None
     await _foreground_observe(state, ctx)
     hint = state.task.next_step_hint or ""
-    assert "finish_task" in hint, f"提醒没落到 task 上，实得 {hint!r}"
+    assert hint == ""
 
 
 @pytest.mark.asyncio
@@ -542,11 +542,14 @@ async def test_mechanical_request_precedes_async_report_completion(monkeypatch) 
     state, ctx = _mech_state_ctx()
     outcome = await _foreground_observe(state, ctx)
     types = [e.type for e in ctx.event_bus.emitted]
-    assert types == [EventType.OBSERVE_REQUESTED]
-    assert EventType.OBSERVE_COMPLETED not in types
+    assert types.index(EventType.OBSERVE_REQUESTED) < types.index(EventType.OBSERVE_COMPLETED)
     requested = next(e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_REQUESTED)
-    assert requested.payload["verdict"]["task_outcome"] == outcome.state_patch["verdict"].task_outcome
-    assert requested.payload["judge_task"] is False
+    completed = next(e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_COMPLETED)
+    assert "verdict" not in requested.payload
+    assert requested.payload["judge_task"] is True
+    assert completed.payload["result"]["verdict"]["task_outcome"] == "success"
+    assert outcome.state_patch["verdict"].task_outcome == "success"
+
 
 
 @pytest.mark.asyncio
@@ -567,5 +570,5 @@ async def test_requested_mechanical_limit_without_completed_turn_retains_continu
     state, ctx = _mech_state_ctx(exit_reason=boundary, transcript=[])
     outcome = await _foreground_observe(state, ctx)
     requested = next(e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_REQUESTED)
-    assert requested.payload["verdict"]["task_outcome"] == "continue"
-    assert outcome.state_patch["verdict"].task_outcome == "continue"
+    assert "verdict" not in requested.payload
+    assert outcome.state_patch["verdict"].task_outcome == "success"

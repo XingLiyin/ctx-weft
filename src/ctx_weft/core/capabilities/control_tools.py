@@ -47,6 +47,7 @@ _SKIP: frozenset[str] = frozenset({"ctx"})
 
 # Qualified (LLM-facing) names for the built-in control tools. Use these anywhere
 # a control tool is named to the LLM (prompts, docstrings shown as descriptions).
+# Legacy event/recovery name; no callable tool is registered for it.
 FINISH_TASK_NAME = qualify(f"{PROVIDER_NAME}:finish_task")
 SWITCH_TASK_NAME = qualify(f"{PROVIDER_NAME}:switch_task")
 DELEGATE_TASK_NAME = qualify(f"{PROVIDER_NAME}:delegate_task")
@@ -86,7 +87,7 @@ _PLAN_DISPATCH_ACK = ("Plan created. Its sub-tasks will now be started one by on
 ASK_USER_UNATTENDED_RESULT = (
     "[No human available: this task runs unattended in the background, so nobody can "
     "answer your question. Decide for yourself based on the information you already "
-    "have, or call control__finish_task and state clearly what blocked you.]"
+    "have, or state clearly what blocked you and what you attempted.]"
 )
 
 
@@ -163,7 +164,7 @@ def control_tool(*, purposes: list[Purpose], input_schema: dict[str, Any] | None
             # spec: tool-operations「控制工具单独核验」——控制工具的副作用**全在 core
             # 自己手里**，逐个核过都是同身份幂等的状态迁移，所以崩溃后按 idempotent
             # 直接重跑，不必问重跑授权（问也没人答得了：外部系统里根本没有对应物）：
-            #   finish_task / report_observation  同身份幂等的 task 状态迁移
+            #   report_observation  同身份幂等的判决提交
             #   ask_user                           复用既有 HITL 请求（决定缓存门控）
             #   delegate_task / delegate_plan      经 gateway 的 completed 短路防双建
             # 这是**声明**而不是 gateway 里的一条按名字前缀的特判：判据本来就是「这个
@@ -201,7 +202,7 @@ def delegate_task(
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Delegate ONE new sub-task to run separately; the current task suspends until its sub-tasks finish. To finish your OWN task instead, use control__finish_task. To replace the user goal, use control__switch_task."""
+    """Delegate ONE new sub-task to run separately; the current task suspends until its sub-tasks finish. When your own work is complete, provide the actual final answer as normal message text. To replace the user goal, use control__switch_task."""
     from ctx_weft.core.models.task import Task as TaskModel
 
     if ctx is None or ctx.task_manager is None or ctx.task is None:
@@ -334,7 +335,7 @@ def delegate_plan(
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Delegate SEVERAL ordered sub-tasks in one call (each runs after the previous); the current task suspends until they all finish. For a single sub-task use control__delegate_task; to finish your OWN task, use control__finish_task."""
+    """Delegate SEVERAL ordered sub-tasks in one call (each runs after the previous); the current task suspends until they all finish. For a single sub-task use control__delegate_task; when your own work is complete, return the final answer as normal message text."""
     from ctx_weft.core.models.task import Task as TaskModel
 
     if not isinstance(tasks, list):
@@ -395,28 +396,6 @@ def delegate_plan(
     ))
 
 
-@control_tool(purposes=["act"])
-def finish_task(
-    deliverables_summary: Annotated[
-        str,
-        "OPTIONAL. A brief recap of the concrete deliverables of this task (e.g. the key files "
-        "changed / artifacts produced), for the observer and whoever delegated this task. This "
-        "does not replace your reply to the user — output the actual final answer as normal "
-        "message text BEFORE this tool call in the same turn, not just an announcement that "
-        "you will summarize. That message is what the user sees AND the deliverable handed off. "
-        "Leave this empty when there is nothing concrete to itemize.",
-    ] = "",
-    *,
-    ctx: ControlContext = None,
-) -> ControlResult:
-    """Finish the CURRENT task and hand off to review — call ONLY when the task goal is fully achieved; if work remains, keep working instead. BEFORE calling, output the actual final answer as normal message text in this same turn. If a summary is needed, write the summary itself; 'I'll summarize the results' is only an announcement. This tool closes the task; it does not generate an answer, and there is no turn afterward to provide one. The optional `deliverables_summary` is a brief artifact recap for the reviewer and does not replace your message text. Use when YOUR work is done — NOT to create new work (use control__delegate_task / control__delegate_plan for that). If the user replaces the current goal, use control__switch_task instead."""
-    if ctx is not None and ctx.task is not None:
-        # task.outputs 由 ActStep 收尾时合成（收尾回合正文 + deliverables_summary，spec 2026-07-01）；
-        # 此处不写 outputs。actor_done 让 act 循环退出；不置 SUSPENDED → next_step=observe。
-        ctx.task.actor_done = True
-    return ControlResult(content="Task finished.")
-
-
 @control_tool(purposes=["observe"])
 def report_observation(
     act_recap: Annotated[str, _ACT_RECAP_DESC],
@@ -439,8 +418,8 @@ def report_observation(
         "a CONCISE process report of the WHOLE task — "
         "the important steps taken and lessons/experience, incorporating any sub-task results. "
         "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
-        "deliverable shown to the user is the actor's closing message text (the same turn that calls "
-        "finish_task), not any tool argument. Leave empty for 'continue'.",
+        "deliverable shown to the user is the actor's closing message text, "
+        "not any tool argument. Leave empty for 'continue'.",
     ] = "",
     task_failure_reason: Annotated[
         str,

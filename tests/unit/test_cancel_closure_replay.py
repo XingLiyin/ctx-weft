@@ -1,3 +1,4 @@
+from ctx_weft.core.assembler.task_memory import task_record_kind
 """Cancellation memory replays partially committed slots and parent acknowledgements."""
 from datetime import timedelta
 
@@ -49,5 +50,5 @@ async def test_cancel_replays_partial_finish_without_duplicate_slots(parent, mon
     assert len(finish) == 2
     assert min(r.timestamp for r in finish) == task.finished_at
     if parent:
-        ack = [r for r in after if r.role == "tool" and r.metadata.get("child_task_id") == task.id]
+        ack = [r for r in after if task_record_kind(r) in {"result", "finish"} and r.metadata.get("child_task_id") == task.id]
         assert len(ack) == 1 and "running" not in str(ack[0].content)

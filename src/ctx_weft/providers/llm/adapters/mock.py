@@ -52,12 +52,7 @@ def observer_success(
     *, tool_call_id: str = "tc_observer", recap: str = "the actor did the work",
     summary: str = "done", hint: str = "",
 ) -> MockResponse:
-    """一轮判 success 的 observer 回合。测试里给后台 observe 用。
-
-    2026-09-27 起「让位」的两个边界（`plain_text` / `finish_park`）都要 verdict，而
-    **verdict 缺失 ≡ retry**——拿不到判决 task 就维持 park。于是任何想让 root task 真正
-    终结的测试，都得让它的 LLM 替身能应这一轮；`finish_task` 不再自己就是终态转移。
-    """
+    """Return an explicit successful observer submission."""
     return MockResponse(text="", tool_calls=[ToolCall(
         id=tool_call_id, name=OBSERVER_TOOL,
         arguments={"task_status": "success", "act_recap": recap,
@@ -66,29 +61,11 @@ def observer_success(
 
 
 class MockLLMAdapter(LLMClient):
-    """按 responses 队列依次返回；用完后 raise。
+    """Script actor responses without letting observer calls consume the actor queue.
 
-    **例外：observer 回合自带兜底**（2026-09-27）。root 的纯文本与 `finish_task` 收尾如今
-    都 park + 后台判定，于是每个这样的回合都多一次 observer 调用。那是绝大多数用例根本不
-    关心的一次调用，但它有两种坑人的方式：脚本用完时撞 `RuntimeError: exhausted`（被后台
-    那层 `except Exception` 静默吞掉，task 永远停在 park），或者更阴——从通用响应池里吃掉
-    一条**不对形**的（比如一池子 `finish_task`），于是拿不到 verdict，同样永远 park，而且
-    把后面每一条的序号都错开一位。
-
-    规则：**请求里带着判定工具，而下一条脚本不是判定回合 → 回一个空回合，不动脚本指针。**
-
-    **刻意不替它判 success。** 没有 verdict ≡ retry（task 维持 park），那正是改造之前的
-    结果——那时后台 observe 吃掉一条不对形的响应、拿不到判决。一大批用例（暂停 / TTFT /
-    撤销窗口那些竞态）钉的就是这个形态，替它们判 success 会让 task 终结、气泡的 task 变终态，
-    整条应答路径走去另一支。想让这一轮真正终结的用例请**显式排一条判定路由**
-    （`observer_success()` 备好了），别依赖这里。
-
-    所以本兜底只修一件事：别让后台观察**偷吃**一条 act 响应、把后面每条的序号都错开一位。
-
-    想让 root 的回合真正终结的用例，传 ``observer_verdict="success"`` 一行开掉：兜底改成回
-    一个判 success 的判定回合。显式 opt-in 而不是默认——默认必须与改造前同结果，否则一大批
-    钉「保持 park」的用例会被静默改语义（这个坑踩过一轮）。
-    """
+    Unscripted observer calls return an empty response by default, exercising the
+    runtime success fallback. Pass observer_verdict="continue" to keep waiting for
+    the user, or supply a scripted observation to test a particular judgement."""
 
     def __init__(
         self,
@@ -98,8 +75,7 @@ class MockLLMAdapter(LLMClient):
         *,
         observer_verdict: str | None = None,
     ) -> None:
-        #: 兜底判定回合回什么。None = 回空回合（拿不到 verdict ≡ retry，维持 park，与改造前
-        #: 同结果）；给了值就回那个判决。见类 docstring。
+        #: None simulates an unusable observation; a value submits that explicit verdict.
         self._observer_verdict = observer_verdict
         self._responses = list(responses)
         self._idx = 0

@@ -43,7 +43,7 @@ from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import LLMOutageError, ToolCall
+from ctx_weft.protocols import LLMOutageError
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.adapters.mock import (
     MockLLMAdapter,
@@ -71,9 +71,7 @@ def _finish_task_response(text: str = "done") -> MockResponse:
     requires the LLM to call control__finish_task (not plain-text reply).
     交付物 = 收尾回合正文（finish_task 不带未声明参数，spec: capability-gateway）。
     """
-    return MockResponse(text=text, tool_calls=[
-        ToolCall(id="tc1", name="control__finish_task", arguments={}),
-    ])
+    return MockResponse(text=text, tool_calls=[])
 
 
 # ── Test fixtures ─────────────────────────────────────────────────────────────

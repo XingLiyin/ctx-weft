@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
@@ -179,12 +178,11 @@ async def test_context_limit_retry_without_recap_keeps_raw_and_defers_to_backgro
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_actonly", user_prompt="do a long task")
 
-    # 结局逐字不变：机械退出 → retry（非终态）
-    assert state.verdict is not None and state.verdict.task_outcome == "continue"
-    assert state.task.status == "PENDING"
-    assert not getattr(state.task, "process_report", None)  # retry 不写 process_report
-    assert state.verdict.act_recap == "", "机械判决不得产出任何合成摘要"
-    assert launched == ["mechanical"], "摘要须交 background observe 产"
+    assert state.verdict is not None and state.verdict.task_outcome == "success"
+    assert state.task.status == "FINISHED"
+    assert not state.task.process_report
+    assert state.verdict.act_recap == ""
+    assert launched == [], "Failed observation must settle within the same observe request."
 
     mem = runtime.providers.get_memory()
     pctx = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)
@@ -206,7 +204,7 @@ async def test_normal_finish_still_works_e2e():
     # 没有 observer 的 agent 想终结任务，只剩明确调 `finish_task` 这一条路，本例照此排。
     llm = MockLLMAdapter(responses=[MockResponse(
         text="Here is the final answer.",
-        tool_calls=[ToolCall(id="tc_fin", name="control__finish_task", arguments={})],
+        tool_calls=[],
     )])
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())

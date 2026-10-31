@@ -3,7 +3,7 @@
 {% macro continuation(ctx) -%}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}{%- endmacro %}
 
 {% macro boundary(kind) -%}
-{% if kind == "task_switch" %}The user replaced the old goal with a new task. This old task will not resume; the new task runs independently.{% elif kind == "actor_done" %}The actor called `finish_task` to declare this task done.{% elif kind == "context_limit" %}The segment was cut short by the context limit, not by the actor.{% elif kind == "dispatch" %}The actor delegated a sub-task; this task is suspended until the sub-task returns (the dispatch pair above names it).{% elif kind == "finish" %}The actor closed this task out with `finish_task`.{% elif kind == "finish_park" %}The actor called `finish_task` to declare this task done and yielded the floor — the user is waiting.{% elif kind == "interrupt" %}The user interrupted this segment part-way through.{% elif kind == "max_turns" %}The segment was cut short by the per-segment turn limit, not by the actor.{% elif kind == "mechanical" %}This segment was already judged by rule, with no LLM observer — your recap is the only account of it.{% elif kind == "plain_text" %}The actor replied in prose and yielded the floor — the user is waiting.{% else %}The actor ended the segment with its closing message; it did not call `finish_task`.{% endif %}
+{% if kind == "task_switch" %}The user replaced the old goal with a new task. This old task will not resume; the new task runs independently.{% elif kind in ("actor_done", "finish", "finish_park") %}The actor ended this task with a closing reply.{% elif kind == "context_limit" %}The segment reached the context limit.{% elif kind == "dispatch" %}The actor delegated a sub-task; this task is suspended until the sub-task returns.{% elif kind == "interrupt" %}The user interrupted this segment part-way through.{% elif kind == "max_turns" %}The segment reached the per-segment turn limit.{% elif kind == "mechanical" %}An earlier observation failed and the task was closed by fallback. Recap only the actual execution evidence.{% elif kind == "plain_text" %}The actor replied in prose and yielded the floor — the user is waiting.{% else %}The actor ended the segment with its closing message.{% endif %}
 {%- endmacro %}
 
 {% macro review_context(ctx) -%}
@@ -31,7 +31,7 @@ If that message asks the user for anything at all, the task is not over: judge `
 
 A closing message that still asks the user for something is not a completed task: judge `continue` — never `success`, never `fail`.{% endif %}
 
-Judge whether the task is complete, by the standard in your role above, and call `{{ report_observation }}` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.
+Judge whether the task is complete, against the task goal and actual execution evidence, applying any evaluation principles supplied above, and call `{{ report_observation }}` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.
 
 `task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each.{% if ctx.subtasks %}
 

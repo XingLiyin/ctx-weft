@@ -23,6 +23,8 @@
 """
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+
 from ctx_weft.core.utils.task_ref import task_ref
 
 from datetime import UTC, datetime, timedelta
@@ -147,25 +149,12 @@ async def test_A1_single_segment_finish() -> None:
     # 两条即 finish pair（assistant finish_task + tool Process Report）
     finish_asst = caps[-2]
     finish_tool = caps[-1]
-    assert finish_asst.role == "assistant", f"finish pair[0] must be assistant, got {finish_asst.role}"
-    assert finish_tool.role == "tool", f"finish pair[1] must be tool, got {finish_tool.role}"
+    assert task_record_kind(finish_asst) == "recap", f"finish pair[0] must be assistant, got {finish_asst.role}"
+    assert task_record_kind(finish_tool) == "finish", f"finish pair[1] must be tool, got {finish_tool.role}"
 
-    tcs = finish_asst.metadata.get("tool_calls", [])
-    assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task"), (
-        f"finish assistant must have finish_task tool_call, got tool_calls={tcs}"
-    )
-    # 反转契约：finish_task 无参标记（input={}）；答复由内联 body / blackboard 承载，不在 finish 对重复
-    assert tcs[0]["input"] == {}, (
-        f"finish_task must be a no-arg marker (input={{}}); got {tcs[0]['input']!r}"
-    )
-    assert "Process Report:" in finish_tool.content, (
-        f"finish tool must contain 'Process Report:'; got {finish_tool.content!r}"
-    )
-
-    # tool_call_id 配对完整
-    assert finish_tool.metadata.get("tool_call_id") == tcs[0]["id"], (
-        "finish pair tool_call_id must match assistant tool_calls[0].id"
-    )
+    assert task_record_group(finish_asst) == task_record_group(finish_tool)
+    assert all(not r.metadata.get("tool_calls") for r in caps)
+    assert "Process Report:" in finish_tool.content
 
     # all turns have origin_task_id
     assert all(c.metadata.get("origin_task_id") == "t1" for c in caps), (
@@ -243,11 +232,11 @@ async def test_A3_mid_stream_interrupt_annotation() -> None:
 
     # task-resident：agent 层只有 finish 对（2 条）
     assert len(caps) == 2, f"expected only finish pair in agent layer; got {[(c.role, c.content[:40]) for c in caps]}"
-    assert caps[-2].role == "assistant"
-    assert caps[-1].role == "tool"
+    assert task_record_kind(caps[-2]) == "recap"
+    assert task_record_kind(caps[-1]) == "finish"
     assert "Process Report:" in caps[-1].content
-    tcs = caps[-2].metadata.get("tool_calls", [])
-    assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task")
+    assert task_record_kind(caps[-2]) == "recap"
+    assert not caps[-2].metadata.get("tool_calls")
 
     # body 留 task 层：召回 task 层确认段摘要 + 两 user 锚点幸存、无裸 interrupted raw
     body = await mem.recall_recent(
@@ -316,8 +305,8 @@ async def test_A4_edit_interrupt_adjacent_anchors() -> None:
 
     # task-resident：agent 层仅 finish 对（2 条）
     assert len(caps) == 2, f"expected only finish pair in agent layer; got {[(c.role, c.content[:40]) for c in caps]}"
-    assert caps[-2].role == "assistant"
-    assert caps[-1].role == "tool"
+    assert task_record_kind(caps[-2]) == "recap"
+    assert task_record_kind(caps[-1]) == "finish"
     assert "Process Report:" in caps[-1].content
 
     # body 留 task 层：两条 user 锚点相邻保留（原始在前 edit-note 在后），其间无段摘要 assistant
@@ -382,29 +371,15 @@ async def test_A6_fail_outcome() -> None:
     finish_tool = caps[-1]
 
     # finish pair roles
-    assert finish_asst.role == "assistant", f"finish pair[0] must be assistant, got {finish_asst.role}"
-    assert finish_tool.role == "tool", f"finish pair[1] must be tool, got {finish_tool.role}"
+    assert task_record_kind(finish_asst) == "recap", f"finish pair[0] must be assistant, got {finish_asst.role}"
+    assert task_record_kind(finish_tool) == "finish", f"finish pair[1] must be tool, got {finish_tool.role}"
 
     # 反转契约：finish_task 无参标记（答复不在 finish 对；tool 槽承载 [outcome=fail] 过程报告）
-    tcs = finish_asst.metadata.get("tool_calls", [])
-    assert len(tcs) == 1, f"finish assistant must have exactly 1 tool_call; got {tcs}"
-    assert tcs[0]["name"].endswith("finish_task"), f"tool name must end with finish_task; got {tcs[0]['name']}"
-    assert tcs[0]["input"] == {}, (
-        f"finish_task must be a no-arg marker (input={{}}); got {tcs[0]['input']!r}"
-    )
+    assert task_record_kind(finish_asst) == "recap"
+    assert task_record_kind(finish_tool) == "finish"
+    assert 'outcome="fail"' in finish_tool.content
+    assert task_record_group(finish_asst) == task_record_group(finish_tool)
 
-    # tool content: "[outcome=fail] Process Report: ..."
-    assert "[outcome=fail]" in finish_tool.content, (
-        f"fail tool content must have '[outcome=fail]' prefix; got {finish_tool.content!r}"
-    )
-    assert "Process Report:" in finish_tool.content, (
-        f"fail tool content must contain 'Process Report:'; got {finish_tool.content!r}"
-    )
-
-    # 配对完整（tool_call_id 匹配）
-    assert finish_tool.metadata.get("tool_call_id") == tcs[0]["id"], (
-        "fail finish pair: tool_call_id must match assistant tool_calls[0].id"
-    )
 
     # origin_task_id 一致
     assert all(c.metadata.get("origin_task_id") == "t1" for c in caps)
@@ -445,10 +420,10 @@ async def test_A10_short_task_synthesizes_finish_pair_keeps_body() -> None:
         f"short task must synthesize finish pair (2 turns); "
         f"found {[(r.role, r.content[:40]) for r in agent_turns]}"
     )
-    assert agent_turns[-2].role == "assistant"
-    assert agent_turns[-1].role == "tool"
-    tcs = agent_turns[-2].metadata.get("tool_calls", [])
-    assert len(tcs) == 1 and tcs[0]["name"].endswith("finish_task")
+    assert task_record_kind(agent_turns[-2]) == "recap"
+    assert task_record_kind(agent_turns[-1]) == "finish"
+    assert task_record_kind(agent_turns[-2]) == "recap"
+    assert not agent_turns[-2].metadata.get("tool_calls")
     assert "Process Report:" in agent_turns[-1].content
 
     # task 层 raw body 原样留（task-resident：body 即胶囊，不 supersede）
@@ -537,35 +512,16 @@ async def test_H3_recursive_nesting_grandchild() -> None:
     # 每层 finish 对各 2 条（assistant finish_task + tool Process Report），无 body 镜像
     # §2.5: same-agent dispatch acks（配对 start_task 框的 tool 回合）排除后仅剩 finish 对
     # Task 2: also exclude minted start_task frames (dispatch infrastructure, not finish pairs)
-    from ctx_weft.core.loop.steps.finalize import START_TASK_NAME
-    start_task_tcids = {
-        tc.get("id")
-        for r in all_caps if r.role == "assistant"
-        for tc in (r.metadata.get("tool_calls") or [])
-        if tc.get("name") == START_TASK_NAME
-    }
     for origin in (child_id, gc_id):
-        layer_caps = [r for r in all_caps if r.metadata.get("origin_task_id") == origin]
-        finish_pair = [r for r in layer_caps
-                       if not (r.role == "tool" and r.metadata.get("tool_call_id") in start_task_tcids)
-                       and not (r.role == "assistant"
-                                and any(tc.get("name") == START_TASK_NAME
-                                        for tc in (r.metadata.get("tool_calls") or [])))]
-        # 有最终产出的 task → 三槽（recap / 答复+finish_task / 报告），见
-        # finalize.build_finish_slots；无产出才退回两槽。
-        assert len(finish_pair) == 3, (
-            f"task-resident: each task must contribute exactly the finish slots (3 turns); "
-            f"origin={origin} got {[(c.role, (c.content or '')[:40]) for c in finish_pair]}"
-        )
-        ordered = sorted(finish_pair, key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
-        assert [c.role for c in ordered] == ["assistant", "assistant", "tool"]
-        finish_pair = ordered
-        assert finish_pair[1].metadata.get("final_reply") is True, "答复槽在中间"
-        assert any(tc.get("name") == FINISH_TASK_NAME
-                   for tc in (finish_pair[1].metadata.get("tool_calls") or [])), (
-            "finish_task 挂在答复那条")
-        tool_turn = [c for c in finish_pair if c.role == "tool"][0]
-        assert "Process Report:" in tool_turn.content
+        closure = sorted([r for r in all_caps if r.metadata.get("origin_task_id") == origin
+                          and task_record_kind(r) in {"recap", "final_reply", "finish"}],
+                         key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
+        assert len(closure) == 3
+        assert [task_record_kind(r) for r in closure] == ["recap", "final_reply", "finish"]
+        assert closure[1].metadata["final_reply"] is True
+        assert "Process Report:" in closure[-1].content
+        assert len({task_record_group(r) for r in closure}) == 1
+        assert all(not r.metadata.get("tool_calls") for r in closure)
 
     # body 留各自 task 层：child / grandchild 的 user 锚点仍在各自 task 层（未被镜像/supersede）
     gc_body = await mem.recall_recent(gc_scope, [T.USER_PROMPT, T.LLM_RESPONSE], 500, _pctx())
@@ -639,13 +595,13 @@ async def test_H4_cross_agent_isolation() -> None:
         parent_scope_agent, [T.AGENT_CONVERSATION_TURN], 200, _pctx(),
     )
     cross_results = [r for r in parent_results
-                     if r.role == "tool" and r.metadata.get("tool_call_id") == "oc_cross"]
+                     if task_record_kind(r) == "result" and task_record_group(r) == "oc_cross"]
     assert cross_results, "cross-agent child must bubble dispatch result (conversation turn) to parent"
     assert "Process Report:" in cross_results[0].content, (
         f"cross-agent bubble content must be mem_content (with Process Report:); "
         f"got {cross_results[0].content!r}"
     )
-    assert cross_results[0].content == child_mem_content, (
+    assert child_mem_content in cross_results[0].content, (
         f"cross-agent bubble must equal full mem_content; got {cross_results[0].content!r}"
     )
     assert cross_results[0].metadata.get("origin_task_id") == parent_id, (
@@ -677,12 +633,12 @@ async def test_H4_cross_agent_isolation() -> None:
     # finish 槽位（recap / 答复+finish_task / tool Process Report）
     child_turns_by_origin = sorted(child_turns_by_origin,
                                    key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)))
-    assert [r.role for r in child_turns_by_origin] == ["assistant", "assistant", "tool"]
-    child_finish_tool = [r for r in child_turns_by_origin if r.role == "tool"]
+    assert [r.role for r in child_turns_by_origin] == ["user", "assistant", "user"]
+    child_finish_tool = [r for r in child_turns_by_origin if task_record_kind(r) == "finish"]
     assert child_finish_tool and "Process Report:" in child_finish_tool[0].content
 
     # task-resident：子 agent finish 对**不含 body 镜像**（无 user 锚点/段摘要）
-    assert not any(r.role == "user" for r in child_turns_by_origin), (
+    assert all(task_record_kind(r) in {"recap", "final_reply", "finish"} for r in child_turns_by_origin), (
         "cross-agent finish pair must NOT mirror child body (no user anchor)"
     )
 
@@ -747,12 +703,10 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
     # §2.5(2026-07-03)：铸派发框（真名 delegate_task）+ 配对静态 ack，二者同锚 started_at
     from ctx_weft.core.loop.steps.finalize import _dispatch_ack
     parent_caps = await mem.recall_recent(parent_agent_scope, [T.AGENT_CONVERSATION_TURN], 200, _pctx())
-    frame = [r for r in parent_caps if r.role == "assistant"
-             and any(tc.get("id") == tc_short and tc.get("name") == DELEGATE_TASK_NAME
-                     for tc in (r.metadata.get("tool_calls") or []))]
+    frame = [r for r in parent_caps if task_record_kind(r) == "start"]
     assert frame, "finalize 须铸派发框（真名 delegate_task）"
-    ack = [r for r in parent_caps if r.role == "tool" and r.metadata.get("tool_call_id") == tc_short]
-    assert ack and ack[0].content == _dispatch_ack(task_ref(child_task), "success"), (
+    ack = [r for r in parent_caps if task_record_kind(r) == "result" and task_record_group(r) == tc_short]
+    assert ack and _dispatch_ack(task_ref(child_task), "success") in ack[0].content, (
         f"§2.5: static ack must be {_dispatch_ack(task_ref(child_task), 'success')!r}; got {[r.content for r in ack]}"
     )
     assert frame[0].timestamp == started == ack[0].timestamp, (

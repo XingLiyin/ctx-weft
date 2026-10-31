@@ -115,9 +115,9 @@ async def test_step_overrides_success_at_mechanical_limits(monkeypatch, standalo
     monkeypatch.setattr(ObserveStep, "_llm_observe", observe)
     monkeypatch.setattr(ObserveStep, "_fold_retry_segment", fold)
     outcome = await _collect(current, _make_ctx(""), background=standalone)
-    assert outcome.state_patch["verdict"].task_outcome == "continue"
+    assert outcome.state_patch["verdict"].task_outcome == "success"
     assert outcome.state_patch["observation"].act_recap == "recap"
-    assert current.task.observer_outcome == (None if standalone else "continue")
+    assert current.task.observer_outcome == (None if standalone else "success")
 
 
 @pytest.mark.parametrize("boundary", ["plain_text", "finish_park"])
@@ -131,7 +131,7 @@ async def test_background_failure_does_not_close_a_parked_task(monkeypatch, boun
     monkeypatch.setattr(ObserveStep, "_llm_observe", fail)
     outcome = await _collect(current, _make_ctx(""), background=True, boundary=boundary)
     observation = outcome.state_patch["observation"]
-    assert observation.verdict.task_outcome == "continue"
+    assert observation.verdict.task_outcome == "success"
     assert not observation.verdict.reported
     assert observation.act_recap == observation.task_summary == ""
     assert current.task.status == "AWAITING_HUMAN"

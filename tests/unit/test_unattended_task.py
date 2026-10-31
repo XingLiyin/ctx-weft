@@ -395,7 +395,8 @@ async def test_ask_user_yields_a_self_decide_result_when_unattended() -> None:
         timeout=5.0,
     )
     assert _text_of(result.content) == ASK_USER_UNATTENDED_RESULT
-    assert "control__finish_task" in ASK_USER_UNATTENDED_RESULT
+    assert "control__finish_task" not in ASK_USER_UNATTENDED_RESULT
+    assert "state clearly what blocked you" in ASK_USER_UNATTENDED_RESULT
     assert reg.list_pending() == []
 
 

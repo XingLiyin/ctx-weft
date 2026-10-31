@@ -16,7 +16,7 @@ from typing import Any
 
 from ctx_weft.core.assembler.context import PromptContext
 from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME, SWITCH_TASK_NAME
+from ctx_weft.core.capabilities.control_tools import SWITCH_TASK_NAME
 from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
 from ctx_weft.core.loop.commit import commit_round, discard_uncommitted_round
 from ctx_weft.core.loop.driver import (
@@ -40,7 +40,6 @@ from ctx_weft.core.loop.llm_gateway import (
 )
 from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.loop.signals import HitlPark
-from ctx_weft.core.loop.steps.observe import has_observe_role
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.estimate import effective_limit
@@ -177,8 +176,6 @@ class ActStep(Step):
                 "turn": turn_num,
                 "reason": "context_limit" if context_limit_hit else "tool_calls_processed"}))
 
-            # finish_task 与 delegate 同批：finish 胜出（派发改投为独立后继）。
-            _reconcile_finish_vs_dispatch(state, ctx, turn.tool_calls)
 
             # 7) actor 收尾 —— 同样**优先于** context_limit：任务已经做完了，没有可续的跑。
             if state.task.switch_requested:
@@ -249,61 +246,9 @@ class ActStep(Step):
             next_step = "observe"
 
         # ── task.outputs：收尾时合成最终交付物（spec 2026-07-01 反转契约）──
-        # 收尾路径 = 纯文本收尾(normal) 或 finish_task 收尾(actor_done 且未挂起)；答复即消息正文，
-        # finish_task 的 deliverables_summary 为可选产出小结。max_turns / context_limit /
-        # delegate-suspend 不在此列（不产最终输出，维持现状）。
+        # Persist an actual final reply; limit and delegation boundaries are not deliverables.
         if exit_reason in ("normal", "actor_done"):
             _synthesize_final_outputs(state, transcript)
-
-        # ── finish_task 收尾也让位（S-b，2026-09-27）────────────────────────────
-        # `actor_done` 走到这里只有一个来源：`finish_task`（delegate 那条置了
-        # `suspend_requested`，上面已经路由去 suspend 了）。它此前在 root 上是**零复核**的
-        # ——`observe._should_use_llm` 对 `parent_task_id is None` 降级走机械判决，而
-        # `_mechanical_verdict` 把 `actor_done` 无条件映射成 success，那道
-        # success-without-outputs 护栏又长在 `report_observation` 里、不在机械判决的路上。
-        # 于是「说了段话要被判、明确宣布做完了反而不被判」，等于给 LLM 留了一个绕开复核的
-        # 开关。改成与纯文本同一条归宿：park + 后台判定。
-        #
-        # **先只对 root 生效**（`parent_task_id is None`），与 S5 同一个收窄办法：子任务的
-        # `finish_task` 今天走前台 LLM observe，那条路有真复核、`FinalizeStep` 也照常跑，
-        # 先别动。代价是同一个子任务两种收尾走两条路，观察一段之后再决定要不要推广。
-        #
-        # 三条判据与 `_finish_plain_text_turn` 逐字相同（`NormalTaskSettings` / 非 unattended
-        # / hitl 在），只多两条：root，以及**这个 agent 得真有 observer**。park 会抛
-        # `HitlPark`，下面那个 StepOutcome 到不了；不让位则零副作用返回，照旧走 observe。
-        #
-        # `has_observe_role` 那条（2026-09-28，随 default ROLE 兜底一起加）：这个 park 的
-        # 全部意义就是「先别收尾，等 observer 复核」，而 park 之后**前台 ObserveStep 跑不到**
-        # ——`HitlPark` 在 `runtime._run_loop` 那里 unwind 的是 `driver.run` 整个循环。于是
-        # park 之后系统里唯一的判决来源就是后台那次带外判决；模板没有 ROLE 时它降成只摘要
-        # 档（ObserveStep 里 judges 与 has_observe_role 相与），没人再终结这个
-        # task，root 就永远停在 AWAITING_HUMAN。
-        #
-        # 所以没有 observer 时**压根不让位**：走下面那个 `StepOutcome` 回 observe，机械判决
-        # 拿 `actor_done` 判 success，`FinalizeStep` 照常跑，后台照常产 recap
-        # （`boundary="finish"`）——即 S-b 之前那条本来就在的路。
-        #
-        # 位置在 `_synthesize_final_outputs` **之后**：park 的 task 恒 `outputs=None` 会让
-        # 护栏把 success 改判 retry（2026-09-24 那个坑，见该函数 docstring）。`commit_round`
-        # 也已经在本轮第一个 chunk 就跑过了，与纯文本 park 同样是「已提交之后才 park」。
-        if (
-            next_step == "observe"
-            and exit_reason == "actor_done"
-            and state.task.parent_task_id is None
-            and has_observe_role(state)
-            and isinstance(state.task.settings, NormalTaskSettings)
-            and not state.task.unattended
-            and ctx.hitl is not None
-        ):
-            # 这一回合会发出**第二条** `ACT_TURN_COMPLETED`（先 `tool_calls_processed`、
-            # 再 `await_user`）。刻意的：两者不矛盾——工具确实处理完了，然后这一回合以让位
-            # 收尾。别为了「一回合一条」把哪一条删掉，那条纪律来自纯文本路径（那里
-            # `await_user` 与 `stop` 是互斥的两个结局），不适用于这里。
-            # 轮号取 `state.extra` 而不是循环变量：这里在 for 之外，靠 `turn_num` 泄漏出来
-            # 虽然眼下不会 unbound（循环一次都没跑意味着 `exit_reason == "max_turns"`，走不到
-            # 这条分支），但那是两处代码的巧合，不是这一行自己成立。
-            await _park_await_user(
-                state, ctx, state.extra.get(ACT_TURNS_USED_KEY, 0), boundary="finish_park")
 
         return StepOutcome(
             next_step=next_step,
@@ -315,15 +260,7 @@ class ActStep(Step):
 
 
 def _compose_final_outputs(transcript: list[TurnRecord]) -> tuple[str, str]:
-    """拆出收尾交付物的两段 `(body, summary)`（spec 2026-07-01）。
-
-    body = 收尾回合(transcript[-1])正文；空则回溯本段最近一段非空 assistant_text（兼容模型把
-    答复写在上一回合、收尾回合只调 finish_task 的情况）。summary = 收尾回合 finish_task 调用的
-    deliverables_summary（可空）。两段都空 → `("", "")`，交给 observer 护栏。
-
-    **只拆不拼**：拼接是调用方的事。两段语义不同（body 是答复本身，summary 是给 reviewer 的
-    交付物清单），下游有需要分开的消费者（TASK_FINALIZED 事件），在这里拼死就再也分不开了。
-    """
+    """Extract the last actual assistant answer and any legacy completion summary."""
     last = transcript[-1]
     body = (last.assistant_text or "").strip()
     if not body:
@@ -332,13 +269,16 @@ def _compose_final_outputs(transcript: list[TurnRecord]) -> tuple[str, str]:
              if (t.assistant_text or "").strip()),
             "",
         )
+    # Historical response events can still carry the former completion summary.
+    # New actors cannot call that tool, but recovery must retain old deliverables.
     summary = ""
-    for tc in last.tool_calls:
-        if tc.name == FINISH_TASK_NAME:
-            val = (tc.arguments or {}).get("deliverables_summary", "")
-            summary = val.strip() if isinstance(val, str) else ""
+    for call in last.tool_calls:
+        if call.name == "control__finish_task":
+            value = (call.arguments or {}).get("deliverables_summary", "")
+            summary = value.strip() if isinstance(value, str) else ""
             break
     return body, summary
+
 
 
 async def _stream_until_stop(agen: Any, ctx: LoopContext) -> "AsyncIterator[Any]":
@@ -764,53 +704,8 @@ async def _execute_tool_calls(
     return tool_results
 
 
-def _reconcile_finish_vs_dispatch(
-    state: LoopState, ctx: LoopContext, tool_calls: list[ToolCall],
-) -> None:
-    """finish_task 与 delegate_task / delegate_plan 同批出现时仲裁：finish 胜出。
-
-    两类工具语义互斥——一个要当前 task 收尾(→observe)，一个要它挂起等子任务(→suspend)。
-    用户意图是「我做完了，顺手派生独立后续」：故 finish 胜出，被派发任务从「当前 task 的
-    阻塞子任务」改投为「当前 task 的 parent 名下的独立后继」(当前是 root 则为顶层)，自行调度。
-
-    - detach_staged：把本轮 staged 子任务改挂到 parent，切断与收尾 task 的阻塞链。
-    - 清 suspend_requested：撤销 delegate 置的挂起意图，使路由走 observe(task.outputs
-      已由 finish_task 写好)。
-    - 清 spawn_titles：避免 SuspendStep 误报(虽已不路由到 suspend，仍清掉防脏状态)。
-
-    顺序无关：只看本批最终是否两类工具都出现。
-    """
-    from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS
-    if ctx.task_manager is None:
-        return
-    names = {tc.name for tc in tool_calls}
-    if FINISH_TASK_NAME not in names or not any(n in DISPATCH_TOOLS for n in names):
-        return
-    ctx.task_manager.detach_staged(state.task.id, state.task.parent_task_id)
-    state.task.suspend_requested = False
-    if isinstance(state.task.settings, NormalTaskSettings):
-        state.task.settings.spawn_titles = []
-    logger.info(
-        "act: finish_task + dispatch in same batch on task %s — finishing it; "
-        "detaching delegated work to parent %s",
-        state.task.id, state.task.parent_task_id,
-    )
-
-
 def _synthesize_final_outputs(state: LoopState, transcript: list) -> None:
-    """把收尾回合的正文合成 `task.outputs`（幂等，可重复调用）。
-
-    收尾路径 = 纯文本收尾(normal) 或 finish_task 收尾(actor_done 且未挂起)；答复即消息
-    正文，finish_task 的 deliverables_summary 为可选产出小结。max_turns / context_limit /
-    delegate-suspend 不在此列（不产最终输出）。
-
-    **必须能在 park 之前被调到**（2026-09-24 修）：park 走 `_cold_park` 抛 `HitlPark`
-    释放协程，`ActStep.execute` 就地中断——循环之后那次合成永远执行不到。于是 park 的
-    task 恒 `outputs=None`，而 `report_observation` 的 success-without-outputs 护栏据它
-    把 success 改判 retry，**park 的 task 因此永远不会被判成功终结、DAG 后继永远放不行**。
-    日志里的形态是 `arguments={'task_status':'success'}` 而
-    `result="Assessment recorded: outcome=retry."`。
-    """
+    """Persist the actual closing assistant body before foreground observation or park."""
     # getattr 防御：手构的替身 task 未必带这个字段（本函数现在也从 park 路径被调，
     # 而那条路上的单测惯用 SimpleNamespace）。
     if getattr(state.task, "suspend_requested", False) or not transcript:
@@ -1020,7 +915,7 @@ async def _cold_park(
         from ctx_weft.core.loop.steps.observe import capture_context, make_observe_request
         observe_request = make_observe_request(
             state, observe_boundary,
-            observe_boundary in {"plain_text", "finish_park", "task_switch"} and has_observe_role(state))
+            observe_boundary in {"plain_text", "finish_park", "task_switch"})
         await capture_context(state, ctx, observe_request)
     req = await ctx.hitl.open(
         HitlAsk(
@@ -1068,35 +963,10 @@ async def _park_for_interrupt(
 async def _park_await_user(
     state: LoopState, ctx: LoopContext, turn_num: int, *, boundary: str = "plain_text",
 ) -> None:
-    """agent 想让位给用户 → 发 await_user + 起后台判定 + 冷 park。
+    """Yield a prose reply for background judgement when a user is present.
 
-    ``boundary`` 区分让位的**方式**，它一路传到装配层决定两件事（见
-    `composer._BOUNDARY_FACTS` / `_OUTPUTS_BEARING_BOUNDARIES`）：
-
-    - ``plain_text``：说了段话就停下。那段文本本身在重建的对话里看得见，不注入 outputs。
-    - ``finish_park``：调了 `finish_task` 宣布完成（S-b，2026-09-27）。`finish_task` 是
-      SILENT 工具、产出不写任务层对话，**必须**把 `task.outputs` 注入，否则观察者会虚构
-      一段完成叙述。
-
-    两者都产 verdict，都 park，归宿完全一样——这正是 S-b 要的：root 上「说了段话」与
-    「宣布做完了」不该一个被复核、一个不被。
-
-    与 `_park_for_interrupt` 相反，这条**没有人保证会回来**：让位是 agent 自己提的，
-    无人值守的 task 里根本没人会发下一条消息，park 即永久挂起。所以守卫在这里生效。
-
-    **判断前置于一切副作用**，这是本函数存在的全部意义：`hitl.open()` 里的守卫抛
-    `UnattendedHitl` 时，`await_user` 事件早已发出、background observe 早已起飞，
-    两个结局都坏——异常逸出打挂整个 run，或就地 catch 继续走、同一回合发出两条
-    `ACT_TURN_COMPLETED`（`await_user` 一条、`stop` 一条），前端看到的是「agent 说
-    它在等用户，紧接着又说它停了」。
-
-    这里**刻意不包 `try/except UnattendedHitl` 兜底**：判断读的和守卫查的是同一个
-    `Task.unattended`，只有一个真相源，不存在漂移。守卫仍留在 `open()` 里，所以将来
-    若有人加了新路径又忘了前置判断，行为是当场抛异常而不是静默挂死——那正是我们要的。
-
-    让位与不让位严格互斥：让位则抛 `HitlPark`，调用方那条 `stop` 根本到不了；不让位
-    则零副作用返回，`stop` 是这个回合唯一的收尾事件。
-    """
+    Unattended tasks stop normally for foreground observation. Historical
+    finish_park boundaries remain readable by recovery."""
     if state.task.unattended:
         logger.warning(
             "act: task %s is unattended — not yielding to the user after a plain-text turn; "

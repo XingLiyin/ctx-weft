@@ -7,6 +7,9 @@ TASK_DISPATCH_RESULT + 自己的 finish 对。short 不再 gate 合成/supersede
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+
+
 from ctx_weft.core.utils.task_ref import task_ref
 
 from datetime import UTC, datetime, timedelta
@@ -83,7 +86,7 @@ def _root_task(task_id="t1", agent="ag1") -> Task:
 async def _finish_tools(mem, scope, origin: str) -> list:
     """召回 agent 层属于 origin 的 finish-pair tool 回合（content 含 Process Report）。"""
     caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    return [r for r in caps if r.role == "tool" and r.metadata.get("origin_task_id") == origin]
+    return [r for r in caps if task_record_kind(r) in {"result", "finish"} and r.metadata.get("origin_task_id") == origin]
 
 
 async def _seed_delegate(mem, scope, origin: str, tcid: str, parent=None,
@@ -104,7 +107,7 @@ async def _delegate_turns(mem, scope, tcid: str) -> list:
 async def _dispatch_results(mem, scope, tcid: str) -> list:
     """召回 agent 层 dispatch result tool 回合（tool_call_id==tcid，新表示）。"""
     caps = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 200, _ctx())
-    return [r for r in caps if r.role == "tool" and r.metadata.get("tool_call_id") == tcid]
+    return [r for r in caps if (task_record_kind(r) == "result" or r.role == "tool") and task_record_group(r) == tcid]
 
 
 async def test_short_root_leaf_keeps_body_and_synthesizes_finish_pair() -> None:
@@ -196,7 +199,7 @@ async def test_cross_agent_child_bubbles_unconditionally_even_when_short() -> No
     # origin=delegating task(p1) → folds with that unit (§2.3)
     parent_scope = _sc("p1", "ag1")
     res = await _dispatch_results(mem, parent_scope, "oc1")
-    assert any(r.content == "child out" and r.metadata.get("origin_task_id") == "p1" for r in res)
+    assert any("child out" in r.content and r.metadata.get("origin_task_id") == "p1" for r in res)
     assert await mem.recall_recent(parent_scope, [T.TASK_DISPATCH_RESULT], 100, _ctx()) == []
     # child's own conversation preserved (task-resident: body stays)
     own = await mem.recall_recent(child_scope, [T.LLM_RESPONSE], 100, _ctx())
@@ -224,7 +227,7 @@ async def test_same_agent_short_leaf_no_bubble_supersedes_orphan_dispatch() -> N
     # same-agent: static dispatch ack written (not bubbled dispatch result with outcome)
     results = await _dispatch_results(mem, _sc("t1", "ag1"), "oc2")
     assert len(results) == 1, f"expected 1 dispatch ack result; got {results}"
-    assert results[0].content == _dispatch_ack(task_ref(child), "success"), (
+    assert _dispatch_ack(task_ref(child), "success") in results[0].content, (
         f"same-agent dispatch result must be _dispatch_ack(title); got {results[0].content!r}"
     )
     # delegate turn KEPT (not superseded, spec 2026-06-30 §2.5)
@@ -256,7 +259,7 @@ async def test_same_agent_nonshort_child_no_bubble_supersedes_final_raw_and_orph
 
     # (a) same-agent: dispatch ack written + delegate turn KEPT (not superseded)
     results = await _dispatch_results(mem, _sc("t1", "ag1"), "oc2")
-    assert len(results) == 1 and results[0].content == _dispatch_ack(task_ref(child), "success"), (
+    assert len(results) == 1 and _dispatch_ack(task_ref(child), "success") in results[0].content, (
         f"expected _dispatch_ack(title); got {[r.content for r in results]}"
     )
     delegates = await _delegate_turns(mem, _sc("t1", "ag1"), "oc2")
@@ -326,7 +329,7 @@ async def test_intermediate_close_keeps_grandchild_body() -> None:
     assert any(r.metadata.get("task_id") == "A1" for r in convs), "grandchild body must stay"
     # §2.5: A (same-agent) writes dispatch ack result + keeps delegate turn (not superseded)
     results_ocA = await _dispatch_results(mem, _sc("t1", "ag1"), "ocA")
-    assert len(results_ocA) == 1 and results_ocA[0].content == _dispatch_ack(task_ref(A), "success"), (
+    assert len(results_ocA) == 1 and _dispatch_ack(task_ref(A), "success") in results_ocA[0].content, (
         f"same-agent A must write _dispatch_ack(title); got {[r.content for r in results_ocA]}"
     )
     delegates_ocA = await _delegate_turns(mem, _sc("t1", "ag1"), "ocA")

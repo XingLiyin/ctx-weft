@@ -14,10 +14,11 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from ctx_weft.core.assembler.prompts import runtime_prompt
+from ctx_weft.core.assembler.task_memory import (
+    project_task_history, render_task_record, task_record_group, task_record_kind, task_record_metadata,
+)
 from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.utils.clock import now_utc
-from ctx_weft.core.utils.task_ref import task_ref_parts
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
@@ -44,7 +45,8 @@ class SegmentFoldResult:
 
 
 def _is_user_turn(r) -> bool:
-    return r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user"
+    return (r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user"
+            and not task_record_kind(r))
 
 
 def _protected(r) -> bool:
@@ -137,139 +139,29 @@ async def segment_fold(
     )
 
 
-def _finish_report_prefix(ref: str, outcome: str) -> str:
-    """finish 对 tool 槽的前缀：`[task: '<title>' (<id>)] ` 标明归属（+ fail 标记）。
-
-    归属标记的必要性：finish 对的 assistant 槽是**无参**收尾标记（`finish_task{}`，反转契约），
-    自身不带任何归属信息。派发侧不存在这个问题——框带 `input:{title, description}` 自描述；
-    收尾侧此前没有对称物，于是同 agent 嵌套（孙→子相继 close）时，父重建出的对话里会出现两组
-    完全同形的 `[assistant finish_task{}][tool …]`，只能靠正文猜是哪个 task 收的尾。
-
-    标记落 tool 槽而非 `input`：`input` 受 finish_task 的 schema 约束，而
-    ControlCapabilityProvider._handle 会过滤 schema 未声明的 key（见 control_capability.py），
-    塞进去只会被静默丢弃；且历史里出现未声明参数会诱导模型照此形状调用。tool 槽是自由文本，
-    与既有 `[outcome=fail]` 前缀同一惯例。归属在前、outcome 标记在后；title 为空则不产空标记。
-
-    `outcome == "cancelled"`（统一取消胶囊闭合，见 synthesize_cancel_closure）→ `[outcome=cancelled]`，
-    与既有 `[outcome=fail]` 同一惯例，标明这条 finish 对是取消收尾而非正常/失败终态。
-    """
-    parts: list[str] = []
-    ref = (ref or "").strip()
-    if ref:
-        # 带 id 才真的消歧：本前缀存在的理由就是「同 agent 嵌套时两组同形的 finish 对
-        # 只能靠正文猜归属」，而同名兄弟任务恰好让只印标题的版本原地失效。
-        parts.append(f"[task: {ref}]")
-    if outcome == "fail":
-        parts.append("[outcome=fail]")
-    elif outcome == "cancelled":
-        parts.append("[outcome=cancelled]")
-    return "".join(f"{p} " for p in parts)
-
-
-# 最终回复锚点（close 折末段 raw 时补位）：反转契约下答复正文是收尾回合的普通消息，
-# 随末段 raw 一起被删；锚点把它留在 task 层胶囊里。提示词用 assistant 第一人称，与
-# 「以上为系统压缩摘要」的尾注互不交叉（各自只描述自己那条消息的正文）。
-FINAL_REPLY_NOTE_UNTITLED = runtime_prompt('final_reply_note')
-# 收束尾注：锚点是**真回复**，比段摘要更容易被读成「我刚刚就是这么答的」——紧随其后的往往是
-# 新的用户消息或另一个 task，没有收束就会照抄/续写它。作用与段摘要的 ASSISTANT_SUMMARY_NOTE
-# 对称，措辞同为方括号系统注解。
-FINAL_REPLY_CLOSING_NOTE = runtime_prompt('final_reply_closing_note')
-
-
-def _finish_tool_text(task_summary: str, act_recap: str, outcome: str) -> str:
-    """finish 对 tool 槽内容 = task_summary（process report）。R2 兜底：空则退 act_recap，
-    再空给占位。**不掺 outputs**——最终输出由 task 层的最终回复锚点承载
-    （见 _supersede_final_raw_segment），tool 槽只讲过程、不重复它。
-    绝不返回空串（避免空 tool 回合 / 400）。"""
-    for cand in (task_summary, act_recap):
-        if cand and cand.strip():
-            return cand
-    return (runtime_prompt('no_final_output') if outcome == "fail"
-            else runtime_prompt('report_placeholder'))
-
-
-# recap 槽的收束尾注：它是 agent 层普通 assistant 回合，拿不到段摘要那条尾注
-# （_history.annotate_assistant_summary 只贴 TASK_COMPACT_SUMMARY），而形态上同样像
-# 「我上一轮就是这么答的」，同样会被模仿。与 FINAL_REPLY_CLOSING_NOTE 一并夹住胶囊：
-# 前者说「这段是过程」，后者说「那段答复已经交付过了」。
-PROCESS_RECAP_NOTE = runtime_prompt('process_recap_note')
-
-_RECAP_PLACEHOLDER = runtime_prompt('recap_placeholder')
-
-
-def _recap_block(act_recap: str) -> str:
-    """recap 槽正文 = 过程复述 + 收束尾注（正文为空时用占位，注解照贴）。"""
-    body = (act_recap or "").strip() or _RECAP_PLACEHOLDER
-    return f"{body}\n\n{PROCESS_RECAP_NOTE}"
-
-
-def _final_reply_block(ref: str, reply: str) -> str:
-    """锚点正文 = 前置提示 + 答复原文 + 收束尾注。"""
-    note = (runtime_prompt("final_reply_note", ref=ref.strip()) if (ref or "").strip()
-            else FINAL_REPLY_NOTE_UNTITLED)
-    return f"{note}\n\n{reply.strip()}\n\n{FINAL_REPLY_CLOSING_NOTE}"
-
-
 def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outcome: str,
                        act_recap: str, task_summary: str, final_reply: str,
                        base, tool_call_id: str, switched: bool = False) -> list[MemoryEvent]:
-    """finish 对的槽位事件。close 合成与 bg 事后重写共用，保证两处形态永远一致。
-
-    `final_reply` 非空 → **三槽**：
-
-        assistant  act_recap                      过程复述，不挂 tool_calls
-        assistant  提示 + 答复 + 收束尾注           锚点，finish_task{} 挂这条（metadata.final_reply）
-        tool       process report                 与锚点配对
-
-    finish_task 挂在答复那条、而不是 recap 那条：重建出的历史因此示范了 finish_task 的真实
-    用法——答复正文与收尾调用同一轮（见 control_capability.finish_task 的说明）。挂在 recap
-    上等于反过来教模型「收尾时正文写过程复述」。
-
-    `final_reply` 空 → **两槽**（旧形态，finish_task 挂 recap）。用于末段 raw 没被折的场景：
-    short leaf 原文即胶囊、observer 护栏兜底导致 outputs 为空、以及占位 close（raw 还在，
-    等 bg 真报告落地时再由 _replace_finish_report 升三槽）。
-
-    时间戳按槽位递增 1µs：顺序由写入点定死，不依赖后续记录的时刻。
-    """
-    # 任务的规范称呼（标题 + id）在此合成：本函数本来就同时持有两者，调用方无需改动。
-    ref = task_ref_parts(task_id, title)
-    md = {"origin_task_id": task_id, "parent_task_id": parent_task_id}
-    call = [{"id": tool_call_id, "name": qualify("control:finish_task"), "input": {}}]
-    report = f"{_finish_report_prefix(ref, outcome)}"              f"{_finish_tool_text(task_summary, act_recap, outcome)}"
-    reply = (final_reply or "").strip()
-
-    def turn(content, ts, role, extra):
-        # act_recap / task_summary / final_reply 都可能是折叠产物，逐字带着 L0.5 占位向前走
-        # （见 `placeholder_refs` docstring）。这三槽既经 `_replace_finish_report` 的 fold
-        # 写入（旧记录被 supersede），也经 `_synthesize_dispatch_pair` 的裸 ingest 写入
-        # （无 supersede，但 mark 判据一视同仁、同样只看结构化字段）——两条路都要声明，
-        # 故放在两个调用方共用的这一层，而不是分别在各自的调用点补。
-        return MemoryEvent(
+    """Write ordinary, Jinja-rendered task records with stable closure metadata."""
+    parts = [("recap", act_recap)]
+    if final_reply.strip():
+        parts.append(("final_reply", final_reply.strip()))
+    parts.append(("finish", task_summary or act_recap))
+    events = []
+    for index, (kind, body) in enumerate(parts):
+        content = render_task_record(kind, task_id=task_id, parent_task_id=parent_task_id or "",
+                                    title=title, outcome=outcome if kind == "finish" else "", body=body)
+        events.append(MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
-            content=content, timestamp=ts, role=role, metadata={**md, **extra},
+            content=content, timestamp=base + timedelta(microseconds=index),
+            role="assistant" if kind == "final_reply" else "user",
+            metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
+                      "task_memory": task_record_metadata(kind, tool_call_id),
+                      **({"final_reply": True} if kind == "final_reply" else {})},
             blob_refs=placeholder_refs(content),
-        )
+        ))
+    return events
 
-    if switched:
-        return [
-            turn(_recap_block(act_recap), base, "assistant", {}),
-            turn("[Task switched; terminal review] " + report,
-                 base + timedelta(microseconds=1), "assistant", {}),
-        ]
-    if reply:
-        return [
-            turn(_recap_block(act_recap), base, "assistant", {}),
-            turn(_final_reply_block(ref, reply), base + timedelta(microseconds=1),
-                 "assistant", {"tool_calls": call, "final_reply": True}),
-            turn(report, base + timedelta(microseconds=2), "tool", {"tool_call_id": tool_call_id}),
-        ]
-    return [
-        turn(_recap_block(act_recap), base, "assistant", {"tool_calls": call}),
-        turn(report, base, "tool", {"tool_call_id": tool_call_id}),
-    ]
-
-
-# ── 占位替换 ──────────────────────────────────────────────────────────────────
 
 async def find_finish_target(memory, provider_ctx, scope, task_id, *, legacy_outcome="success"):
     """Read a complete persisted finish pair; partial writes are not ready."""
@@ -278,6 +170,15 @@ async def find_finish_target(memory, provider_ctx, scope, task_id, *, legacy_out
         MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     own = [r for r in turns if r.metadata.get("origin_task_id") == task_id]
+    for record in reversed(own):
+        if task_record_kind(record) != "finish" or not record.metadata.get("task_memory"):
+            continue
+        group = task_record_group(record)
+        members = [r for r in own if task_record_group(r) == group]
+        policy = record.metadata.get("finish_policy") or {
+            "preserve_raw": True, "outcome": legacy_outcome, "slot_count": 2}
+        if len(members) >= policy["slot_count"]:
+            return record.address, group, dict(policy)
     for assistant in reversed(own):
         if assistant.role != "assistant":
             continue
@@ -301,16 +202,10 @@ async def find_finish_target(memory, provider_ctx, scope, task_id, *, legacy_out
 async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
                                  tool_call_id: str, act_recap: str, task_summary: str,
                                  outcome: str, title: str, *, final_reply: str = "", operation_id: str = "") -> None:
-    """supersede 本 task 的 finish 对占位，按新 act_recap / task_summary 整体重写。
-    按 (tool_call_id + origin_task_id) 定位，不再靠 'Process Report:' 文本（spec 2026-06-30 §2.4）。
+    """Atomically replace a complete legacy or tagged closure with labeled records.
 
-    title：归属 task 的标题，用于重建 tool 槽的 `[task: …]` 前缀（与 finalize 合成占位时同源，
-    见 `_finish_report_prefix`）。本函数整条重写 tool 槽，不传就会把占位里的归属标记抹掉。
-
-    final_reply：延迟折叠路径下末段 raw 此刻才被折，答复要随之补进锚点槽——占位是两槽，
-    重写后升成三槽（recap / 答复+finish_task / 报告，见 `build_finish_slots`）。空则
-    保持原形态；若占位已是三槽（close 即折路径），沿用已有锚点正文，**不得**被 act_recap 冲掉
-    ——按 tool_call_id 找 assistant 命中的正是锚点那条。"""
+    Preserve an existing delivered answer if the new report supplies none. Stable
+    operation IDs make repeated recovery applications idempotent."""
     from datetime import timedelta
 
     from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope
@@ -319,16 +214,21 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
         MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN],
     )
+    tagged = [r for r in turns if r.metadata.get("origin_task_id") == task_id
+              and r.metadata.get("task_memory") and task_record_group(r) == tool_call_id]
     asst = [r for r in turns
             if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id
             and any(tc.get("id") == tool_call_id for tc in (r.metadata.get("tool_calls") or []))]
     tool = [r for r in turns
             if r.role == "tool" and r.metadata.get("origin_task_id") == task_id
             and r.metadata.get("tool_call_id") == tool_call_id]
-    # 三槽占位里 recap 是**不挂 tool_calls** 的那条 assistant（挂着的是锚点）。
     recap_slot = [r for r in turns
                   if r.role == "assistant" and r.metadata.get("origin_task_id") == task_id
-                  and not r.metadata.get("tool_calls")]
+                  and not r.metadata.get("tool_calls") and not r.metadata.get("task_memory")]
+    if tagged:
+        asst = [r for r in tagged if task_record_kind(r) in {"recap", "final_reply"}]
+        tool = [r for r in tagged if task_record_kind(r) == "finish"]
+        recap_slot = []
     if not asst or not tool:
         raise RuntimeError(f"Incomplete finish pair for task={task_id} call={tool_call_id}")
 
@@ -350,10 +250,13 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
         events = [e for e in events if not e.metadata.get("final_reply")]
         events.insert(1, MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
-            content=existing_anchor.content, timestamp=ts + timedelta(microseconds=1),
+            content=project_task_history([existing_anchor])[0].content,
+            timestamp=ts + timedelta(microseconds=1),
+            blob_refs=list(dict.fromkeys([*existing_anchor.blob_refs,
+                                          *placeholder_refs(existing_anchor.content)])),
             role="assistant",
             metadata={"origin_task_id": task_id, "parent_task_id": parent_task_id,
-                      "tool_calls": existing_anchor.metadata.get("tool_calls"),
+                      "task_memory": task_record_metadata("final_reply", tool_call_id),
                       "final_reply": True},
         ))
     policy = first.metadata.get("finish_policy")
@@ -363,7 +266,7 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
     if operation_id:
         from ctx_weft.core.loop.steps.observe import record_id
         for index, event in enumerate(events):
-            event.id = record_id(operation_id, "replace_finish", scope, task_id, index)
+            event.id = record_id(operation_id, "replace_finish_v1", scope, task_id, index)
         if any(r.id == events[0].id for r in (*recap_slot, *asst, *tool)):
             return
     await memory.fold([r.id for r in (*recap_slot, *asst, *tool)], events, provider_ctx)

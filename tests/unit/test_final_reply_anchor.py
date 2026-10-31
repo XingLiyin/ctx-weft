@@ -18,14 +18,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.loop import task_memory_fold as fp
 from ctx_weft.core.loop.steps.finalize import (
     finalize_task_memory,
 )
-from ctx_weft.core.loop.task_memory_fold import FINAL_REPLY_NOTE_UNTITLED
+from ctx_weft.core.assembler.task_memory import render_task_record, task_record_kind, task_record_group
 from ctx_weft.core.models.task import NormalTaskSettings, Task
-from ctx_weft.core.utils.task_ref import task_ref_parts
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
@@ -114,7 +112,7 @@ async def _agent_turns(mem, agent_id="ag1") -> list:
 
 
 def _has_finish_call(rec) -> bool:
-    return any(tc.get("name") == FINISH_TASK for tc in (rec.metadata.get("tool_calls") or []))
+    return task_record_kind(rec) in {"recap", "final_reply"}
 
 
 # ─── 三槽形态 ────────────────────────────────────────────────────────────────
@@ -129,18 +127,17 @@ async def test_close_writes_recap_then_reply_then_report() -> None:
     turns = await _agent_turns(mem)
     assert len(turns) == 3, f"长任务 close 应写三槽；实得 {[(r.role, r.content[:20]) for r in turns]}"
     recap, anchor, report = turns
-    assert (recap.role, anchor.role, report.role) == ("assistant", "assistant", "tool")
-    assert recap.content.startswith("recap") and not _has_finish_call(recap), \
+    assert (recap.role, anchor.role, report.role) == ("user", "assistant", "user")
+    assert "recap" in recap.content and task_record_kind(recap) == "recap", \
         "recap 槽只放过程复述（+ 收束尾注）、不挂 finish_task"
     assert _has_finish_call(anchor), "finish_task{} 必须挂在答复那条消息上"
     assert _REPLY in anchor.content and anchor.metadata.get("final_reply") is True
-    assert report.metadata.get("tool_call_id") == \
-        (anchor.metadata.get("tool_calls") or [{}])[0].get("id"), "报告须与锚点配对"
+    assert task_record_group(report) == \
+        task_record_group(anchor), "报告须与锚点配对"
     assert recap.timestamp < anchor.timestamp <= report.timestamp
 
 
 async def test_anchor_wraps_reply_with_notes() -> None:
-    from ctx_weft.core.loop.task_memory_fold import FINAL_REPLY_CLOSING_NOTE
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
@@ -148,9 +145,9 @@ async def test_anchor_wraps_reply_with_notes() -> None:
     await _close(mem, _task(), scope)
 
     anchor = (await _agent_turns(mem))[1]
-    assert anchor.content == (
-        f"{runtime_prompt('final_reply_note', ref=task_ref_parts('t1', '抽取配置解析'))}\n\n{_REPLY}\n\n{FINAL_REPLY_CLOSING_NOTE}"
-    ), f"锚点 = 提示词 + outputs 正文 + 收束尾注；实得 {anchor.content!r}"
+    assert anchor.content == render_task_record("final_reply", task_id="t1",
+        title="抽取配置解析", body=_REPLY)
+
 
 
 async def test_root_task_without_title_falls_back_to_bare_id() -> None:
@@ -161,13 +158,14 @@ async def test_root_task_without_title_falls_back_to_bare_id() -> None:
 
     await _close(mem, _task(title=""), scope)
 
-    assert (await _agent_turns(mem))[1].content.startswith(
-        runtime_prompt("final_reply_note", ref="t1"))
+    anchor = (await _agent_turns(mem))[1]
+    assert 'task_id="t1"' in anchor.content
+    assert 'title=""' not in anchor.content
 
 
-def test_untitled_note_used_only_when_nothing_identifies_the_task() -> None:
-    from ctx_weft.core.loop.task_memory_fold import _final_reply_block
-    assert _final_reply_block(task_ref_parts("", ""), "x").startswith(FINAL_REPLY_NOTE_UNTITLED)
+async def test_untitled_record_keeps_its_kind() -> None:
+    assert render_task_record("final_reply", body="x") == '<task_final_reply task_id="">\nx\n</task_final_reply>'
+
 
 
 async def test_task_layer_keeps_no_anchor_record() -> None:
@@ -231,7 +229,7 @@ async def test_deferred_close_upgrades_to_three_slots_on_bg_report() -> None:
     turns = await _agent_turns(mem)
     assert len(turns) == 3, f"bg 报告已到 → 升三槽；实得 {[(r.role, r.content[:24]) for r in turns]}"
     recap, anchor, report = turns
-    assert recap.content.startswith("bg 真 recap"), "recap 槽换成 bg 真报告"
+    assert "bg 真 recap" in recap.content, "recap 槽换成 bg 真报告"
     assert "bg 真 summary" in report.content
     assert _REPLY in anchor.content and _has_finish_call(anchor)
 
@@ -255,7 +253,7 @@ async def test_bg_replacement_does_not_clobber_the_anchor() -> None:
     turns = await _agent_turns(mem)
     assert len(turns) == 3, f"替换后仍是三槽；实得 {[(r.role, r.content[:24]) for r in turns]}"
     recap, anchor, report = turns
-    assert recap.content.startswith("bg 真 recap")
+    assert "bg 真 recap" in recap.content
     assert _REPLY in anchor.content and _has_finish_call(anchor), "锚点不得被 recap 冲掉"
     assert "bg 真 summary" in report.content
 
@@ -277,10 +275,10 @@ async def test_rendered_messages_put_finish_call_on_the_reply() -> None:
     msgs = history_messages(blocks, task_id="t2")
 
     tail = msgs[-3:]
-    assert [m.role for m in tail] == ["assistant", "assistant", "tool"], \
+    assert [m.role for m in tail] == ["user", "assistant", "user"], \
         f"尾部应是 recap → 答复 → 报告；实得 {[(m.role, str(m.content)[:24]) for m in msgs]}"
     assert not tail[0].tool_calls, "recap 那条不带 tool_calls"
-    assert [tc.get("name") for tc in tail[1].tool_calls] == [FINISH_TASK]
+    assert all(not message.tool_calls for message in tail)
     assert _REPLY in tail[1].content
 
 
@@ -323,7 +321,6 @@ async def test_recap_slot_carries_closing_note() -> None:
     """recap 槽是 agent 层普通 assistant 回合，拿不到段摘要那条尾注
     （annotate_assistant_summary 只贴 TASK_COMPACT_SUMMARY）。它形似「我上一轮就是这么答的」，
     同样需要一句系统注解说明它是过程复述、不是答复。"""
-    from ctx_weft.core.loop.task_memory_fold import PROCESS_RECAP_NOTE
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
@@ -331,14 +328,12 @@ async def test_recap_slot_carries_closing_note() -> None:
     await _close(mem, _task(), scope)
 
     recap = (await _agent_turns(mem))[0]
-    assert recap.content.startswith("recap"), "复述正文仍在最前"
-    assert recap.content.endswith(PROCESS_RECAP_NOTE), \
-        f"recap 槽须以系统注解收束；实得 {recap.content!r}"
+    assert "recap" in recap.content, "复述正文仍在最前"
+    assert recap.content.endswith("</task_recap>")
 
 
 async def test_two_slot_recap_also_carries_the_note() -> None:
     """两槽形态下 recap 槽同样会被模仿（它还挂着 finish_task），一视同仁。"""
-    from ctx_weft.core.loop.task_memory_fold import PROCESS_RECAP_NOTE
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
@@ -347,13 +342,12 @@ async def test_two_slot_recap_also_carries_the_note() -> None:
 
     turns = await _agent_turns(mem)
     assert len(turns) == 2
-    assert turns[0].content.endswith(PROCESS_RECAP_NOTE)
+    assert turns[0].content.endswith("</task_recap>")
 
 
 async def test_bg_rewritten_recap_keeps_the_note() -> None:
     """bg 事后用真报告重写 recap 槽时，注解不能丢（两处形态共用 build_finish_slots）。"""
     from ctx_weft.core.loop.task_memory_fold import (
-        PROCESS_RECAP_NOTE,
         replace_finish_report,
     )
     mem = InMemoryMemoryProvider()
@@ -368,5 +362,5 @@ async def test_bg_rewritten_recap_keeps_the_note() -> None:
                                  "bg 真 recap", "bg 真 summary", outcome, task.title)
 
     recap = (await _agent_turns(mem))[0]
-    assert recap.content.startswith("bg 真 recap")
-    assert recap.content.endswith(PROCESS_RECAP_NOTE)
+    assert "bg 真 recap" in recap.content
+    assert recap.content.endswith("</task_recap>")

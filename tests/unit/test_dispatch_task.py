@@ -26,7 +26,7 @@ from ctx_weft.core.models.errors import (
 )
 from ctx_weft.core.models.task import PORT_MAIN, PORT_NONE, NormalTaskSettings
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import MemoryAddress, MemoryEventType, ProviderContext, ToolCall
+from ctx_weft.protocols import MemoryAddress, MemoryEventType, ProviderContext
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -43,8 +43,7 @@ pytestmark = pytest.mark.asyncio
 def _finish(n: int = 12) -> list[MockResponse]:
     """n 个「回一句就 finish_task」的回合，够 root + 派发出去的那几条用。"""
     return [
-        MockResponse(text="done", tool_calls=[
-            ToolCall(id=f"tc{i}", name="control__finish_task", arguments={})])
+        MockResponse(text="done", tool_calls=[])
         for i in range(n)
     ]
 
