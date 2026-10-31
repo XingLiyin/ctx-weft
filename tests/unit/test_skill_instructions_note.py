@@ -5,7 +5,7 @@ from ctx_weft.core.assembler.builder import PromptBuilder
 from tests.assembler_testkit import context_from_blocks
 
 
-def test_runtime_note_is_rendered_after_raw_skill_body():
+def test_core_renders_skill_body_without_adding_usage_instructions():
     body = "Run scripts/convert.py to convert the file."
     request = SimpleNamespace(
         purpose="act", intent=None, extra={}, template=None,
@@ -22,7 +22,8 @@ def test_runtime_note_is_rendered_after_raw_skill_body():
     out = "\n".join(str(message.content) for message in prompt.messages)
 
     assert "## Instructions for the current task" in out
-    assert "skill_executor__exec_script" in out
-    assert "skill_executor__read_file" in out
-    assert "skill_executor__list_files" in out
-    assert out.index("skill_executor__exec_script") > out.index(body)
+    assert body in out
+    assert "skill_executor__exec_script" not in out
+    assert "skill_executor__read_file" not in out
+    assert "skill_executor__list_files" not in out
+    assert "SKILL_DIR" not in out

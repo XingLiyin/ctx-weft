@@ -15,27 +15,25 @@ from __future__ import annotations
 import dataclasses
 import glob as _glob
 import logging
-import os
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ctx_weft.protocols.capability import (
     Capability,
     CapabilityProviderInfo,
     SkillCapability,
-    SkillCapabilityProvider,
     SkillDefinition,
     qualify,
 )
-from collections.abc import AsyncIterator, Callable
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ctx_weft.protocols.capability import CapabilityEvent
 
 from ctx_weft.protocols.context import ProviderContext
-from ctx_weft.providers._encoding import decode_console
-from ctx_weft.providers._script_runner import run_with_liveness
+from ctx_weft.providers.capability_skill_shell import ShellSkillCapabilityProvider
 
 from ._parser import SkillFileMetadata, load_skill_md
 
@@ -51,18 +49,15 @@ _SKILL_READ_FILE_NAME = qualify("skill_executor:read_file")
 _SKILL_LIST_FILES_NAME = qualify("skill_executor:list_files")
 _SKILL_EXEC_SCRIPT_NAME = qualify("skill_executor:exec_script")
 
-# composer 把它渲染成 "#### local_skill skills" 标题下的引子段（见 composer._render_grouped_
-# _section）。受众是**还没绑 skill、正在挑 skill 派发**的 actor：它在这里第一次看到 skill 清单，
-# 需要知道 skill 不是工具、怎么触发、以及 skill 自带文件归 skill_executor 管。已绑定 skill 的
-# 任务另有 PrepareStep 的运行时说明（prepare._SKILL_SCRIPT_RUNTIME_NOTE），两处受众不同。
+# The catalog explains skill selection. Resource-access details accompany the
+# selected skill's definition, so they remain visible even with a single skill.
 SKILL_PROVIDER_DESCRIPTION = (
-    "Skills are instruction bundles, not callable tools — never invoke a skill name as a tool. "
-    f"To run one, delegate a task bound to it: {_DELEGATE_TASK_NAME}(..., "
-    f"skill_name='{PROVIDER_NAME}__<name>'). The skill's instructions are then loaded into that "
-    "task. Inside such a task, reach the skill's own files only through the skill_executor tools "
-    f"— {_SKILL_READ_FILE_NAME}, {_SKILL_LIST_FILES_NAME}, {_SKILL_EXEC_SCRIPT_NAME}. Never read, "
-    "search, or run skill files with the filesystem or shell tools: skill paths do not resolve "
-    "from the session workspace."
+    "Skills provide task instructions and bundled resources. "
+    f"Assign one with {_DELEGATE_TASK_NAME}(..., skill_name='{PROVIDER_NAME}__<name>'). "
+    "Its instructions load into the delegated task. "
+    f"Within that task, use {_SKILL_LIST_FILES_NAME} and {_SKILL_READ_FILE_NAME} for skill "
+    f"resources, and {_SKILL_EXEC_SCRIPT_NAME}(command=...) to run commands. "
+    "Use filesystem tools for workspace files."
 )
 
 
@@ -98,7 +93,7 @@ def _scan(skills_dir: Path) -> dict[str, _SkillEntry]:
 
 # ── Provider ──────────────────────────────────────────────────────────────────
 
-class LocalSkillCapabilityProvider(SkillCapabilityProvider):
+class LocalSkillCapabilityProvider(ShellSkillCapabilityProvider):
     """从本地目录实现 Level1（list）/ Level2（load_definition）/ Level3（files/resource/script）。"""
 
     name = PROVIDER_NAME
@@ -118,16 +113,14 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
     ) -> None:
         self._dir = skills_dir
         self._index: dict[str, _SkillEntry] | None = None
-        self._script_timeout_sec = script_timeout_sec
-        self._idle_timeout_sec = idle_timeout_sec
-        self._hard_cap_sec = hard_cap_sec
-        self._output_limit_chars = output_limit_chars
-        # 运行 .py 脚本用的解释器；None=用 PATH 上的裸 `python`。打包（冻结）形态下
-        # PATH 上通常没有 Python，由 host 注入随包内置的解释器路径（同 bash venv 那份）。
-        self._python_executable = python_executable
-        # 注入后,.py 执行委托给 bash_exec 流水线(workspace venv/安全/超时/隐藏窗口)。
-        # None → 回退本地直跑(_exec_direct)。
-        self._bash_runner = bash_runner
+        super().__init__(
+            script_timeout_sec=script_timeout_sec,
+            idle_timeout_sec=idle_timeout_sec,
+            hard_cap_sec=hard_cap_sec,
+            output_limit_chars=output_limit_chars,
+            python_executable=python_executable,
+            bash_runner=bash_runner,
+        )
 
     def _get_index(self) -> dict[str, _SkillEntry]:
         if self._index is None:
@@ -223,89 +216,11 @@ class LocalSkillCapabilityProvider(SkillCapabilityProvider):
             raise FileNotFoundError(f"resource '{resource_path}' not found in skill '{skill_name}'")
         return full.read_text(encoding="utf-8")
 
-    # ── Level 3：script execution ─────────────────────────────────────────────
+    # ── Shell execution resource lease ────────────────────────────────────────
 
-    async def exec_script(
-        self, skill_name: str, script_path: str, args: str, ctx: ProviderContext,
-    ) -> str:
-        entry = self._require_entry(skill_name)
-        skill_root = entry.skill_dir.resolve()
-        resolved = (entry.skill_dir / script_path).resolve()
-        try:
-            resolved.relative_to(skill_root)
-        except ValueError:
-            raise ValueError(f"script_path '{script_path}' escapes skill directory")
-        if not resolved.is_file():
-            raise FileNotFoundError(f"script '{script_path}' not found in skill '{skill_name}'")
-
-        if self._bash_runner is not None:
-            return await self._exec_via_bash(skill_root, resolved, args, ctx)
-        return await self._exec_direct(skill_root, resolved, args)
-
-    async def _exec_via_bash(
-        self, skill_root: Path, resolved: Path, args: str, ctx: ProviderContext
-    ) -> str:
-        """委托给 bash_exec 流水线:.py 用裸 python(由 venv 激活解析),脚本走绝对路径。
-        注入 SKILL_DIR 与 skill 自己的超时;收集 result/error 事件转成返回值/异常。"""
-        base = f'python "{resolved}"' if resolved.suffix == ".py" else f'"{resolved}"'
-        cmd = f"{base} {args}" if args else base
-
-        extra = {
-            **ctx.extra,
-            "extra_env": {**(ctx.extra.get("extra_env") or {}), "SKILL_DIR": str(skill_root)},
-            "bash_idle_timeout_sec": self._idle_timeout_sec,
-            "bash_hard_cap_sec": self._hard_cap_sec,
-            "bash_max_output_bytes": self._output_limit_chars,
-        }
-        ctx2 = dataclasses.replace(ctx, extra=extra)
-
-        content = ""
-        exit_code = 0
-        async for ev in self._bash_runner(cmd, ctx2):
-            if ev.kind == "error":
-                msg = ev.payload.get("message") or ev.payload.get("code") or "skill exec failed"
-                raise RuntimeError(msg)
-            if ev.kind == "result":
-                content = ev.payload.get("content", "")
-                exit_code = (ev.payload.get("metadata") or {}).get("exit_code", 0)
-        if exit_code != 0:
-            raise RuntimeError(f"script exited with code {exit_code}\n{content[: self._output_limit_chars]}")
-        return content[: self._output_limit_chars]
-
-    async def _exec_direct(self, skill_root: Path, resolved: Path, args: str) -> str:
-        """无 bash_runner 时的回退:本地直跑,cwd=skill_dir,解释器用内置/裸 python。"""
-        if resolved.suffix == ".py":
-            interp = self._python_executable or "python"
-            base = f'"{interp}" "{resolved}"'
-        else:
-            base = f'"{resolved}"'
-        cmd = f"{base} {args}" if args else base
-
-        env = {**os.environ, "SKILL_DIR": str(skill_root), "PYTHONIOENCODING": "utf-8"}
-        result = await run_with_liveness(
-            cmd,
-            cwd=str(skill_root),
-            env=env,
-            idle_timeout_sec=self._idle_timeout_sec,
-            hard_cap_sec=self._hard_cap_sec,
-            output_limit_bytes=self._output_limit_chars,
-        )
-        stdout = result.stdout[: self._output_limit_chars]
-        stderr = result.stderr[: self._output_limit_chars]
-
-        if result.timed_out:
-            survivor_note = (
-                "" if result.terminated_clean
-                else f" WARNING: {len(result.survivors)} process(es) may still be "
-                     "running; outputs may be partial."
-            )
-            raise RuntimeError(
-                f"exec_script timed out ({result.timeout_kind}).{survivor_note}\n"
-                f"stdout: {stdout}\nstderr: {stderr}"
-            )
-        if result.exit_code != 0:
-            raise RuntimeError(
-                f"script exited with code {result.exit_code}\n"
-                f"stdout: {stdout}\nstderr: {stderr}"
-            )
-        return stdout
+    @asynccontextmanager
+    async def borrow_skill_root(
+        self, skill_name: str, ctx: ProviderContext,
+    ) -> AsyncIterator[Path]:
+        """本地资源永久保留；执行基类只在本次调用期间借用目录。"""
+        yield self._require_entry(skill_name).skill_dir.resolve()

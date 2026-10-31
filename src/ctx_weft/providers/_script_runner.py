@@ -275,7 +275,7 @@ async def run_with_liveness(
     on_output: Callable[[str, str], None] | None = None,
     on_progress: Callable[[LivenessProgress], None] | None = None,
 ) -> RunResult:
-    from ctx_weft.providers._encoding import decode_console
+    from ctx_weft.providers._encoding import iter_console_output
 
     proc, handle = await spawn_contained(command, cwd=cwd, env=env)
     stdout_buf: list[str] = []
@@ -286,16 +286,12 @@ async def run_with_liveness(
     async def _reader(stream, name: str, buf: list[str]):
         assert stream is not None
         size = 0
-        while True:
-            line = await stream.readline()
-            if not line:
-                break
-            counters["output_bytes"] += len(line)
+        async for byte_count, text in iter_console_output(stream):
+            counters["output_bytes"] += byte_count
             if size < output_limit_bytes:
-                text = decode_console(line)
                 buf.append(text)
-                size += len(line)
-                if on_output is not None:
+                size += byte_count
+                if on_output is not None and text:
                     try:
                         on_output(name, text)
                     except Exception:

@@ -410,7 +410,13 @@ class ContextAssembler:
             try:
                 definition = await provider.load_definition(cap.name, self.deps.provider_ctx)
                 if definition is not None:
-                    return json_value(definition)
+                    value = json_value(definition)
+                    execution_instructions = getattr(provider, "execution_instructions", "").strip()
+                    if execution_instructions:
+                        value["instructions"] = (
+                            f"{definition.instructions.rstrip()}\n\n{execution_instructions}"
+                        ).lstrip("\n")
+                    return value
                 error = "Skill definition was not returned by provider.load_definition()"
             except Exception as exc:
                 error = f"provider.load_definition() failed: {exc}"

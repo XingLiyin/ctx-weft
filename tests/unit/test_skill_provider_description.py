@@ -1,7 +1,4 @@
-"""skill provider 的组描述：composer 把它写在 `#### local_skill skills` 标题下，
-是 actor 挑 skill 派发时唯一能看到的用法说明——须点明 skill 不是可调用工具、
-只能经 delegate_task 绑到任务上触发，且 skill 自带文件只能用 skill_executor 工具读取/执行。
-"""
+"""Catalog usage and provider-specific resource guidance reach their audiences."""
 
 from __future__ import annotations
 
@@ -11,8 +8,6 @@ import pytest
 
 from ctx_weft.protocols.context import ProviderContext
 from ctx_weft.providers.capability_skill_local import LocalSkillCapabilityProvider
-
-pytestmark = pytest.mark.asyncio
 
 
 def _provider(tmp_path: Path) -> LocalSkillCapabilityProvider:
@@ -28,16 +23,31 @@ def test_description_names_delegate_and_skill_executor_tools(tmp_path: Path) -> 
         "skill_executor__list_files",
         "skill_executor__exec_script",
     ):
-        assert frag in desc, f"组描述须点名 {frag}；实得 {desc!r}"
+        assert frag in desc, f"Catalog description must name {frag}: {desc!r}"
 
 
-def test_description_warns_off_filesystem_and_shell(tmp_path: Path) -> None:
+def test_catalog_separates_skill_resources_from_workspace_files(tmp_path: Path) -> None:
     desc = _provider(tmp_path).description.lower()
-    assert "shell" in desc and "filesystem" in desc, \
-        "须明确禁止拿 filesystem / shell 工具去操作 skill 文件"
+    assert "filesystem tools for workspace files" in desc
+    assert "SKILL_DIR" not in desc
 
 
+@pytest.mark.asyncio
 async def test_describe_surfaces_the_description(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     info = await provider.describe(ProviderContext(session_id="s1", tenant_id="default"))
     assert info.description == provider.description
+
+    skill = tmp_path / "skills" / "example"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: example\ndescription: test\n---\nRun scripts/example.py.\n",
+        encoding="utf-8",
+    )
+    provider.invalidate_cache()
+    definition = await provider.load_definition("example", ProviderContext(session_id="s1"))
+    assert definition is not None
+    assert "Run scripts/example.py." in definition.instructions
+    assert "SKILL_DIR" not in definition.instructions
+    assert "SKILL_DIR" in provider.execution_instructions
+    assert ("%SKILL_DIR%" in provider.execution_instructions) != ("$SKILL_DIR" in provider.execution_instructions)

@@ -95,7 +95,7 @@ async def list_files(
     skill_name: str,
     ctx: ProviderContext,
 ) -> SkillResult:
-    """List files in the current skill's directory."""
+    """List resources bundled with the skill assigned to this task."""
     content = await skill_provider.list_files(skill_name, pattern, limit, ctx)
     return SkillResult(content=content)
 
@@ -112,7 +112,7 @@ async def read_file(
     skill_name: str,
     ctx: ProviderContext,
 ) -> SkillResult:
-    """Read a file from the current skill's directory (paginated, one window per call).
+    """Read a text resource bundled with the assigned skill, one page per call.
 
     Returns a numbered line window, not the whole file — a long reference doc would
     otherwise blow up the context. When more remains, the tail of the content carries the
@@ -131,16 +131,15 @@ async def read_file(
 
 @skill_executor_tool
 async def exec_script(
-    script_path: Annotated[str, "Relative path to the script within the skill directory"],
-    args: Annotated[str, "Command-line argument string appended after the script path"] = "",
+    command: Annotated[str, "Complete command, including the program and arguments; use the resource-access instructions supplied with the skill"],
     *,
     skill_provider: SkillCapabilityProvider,
     skill_name: str,
     ctx: ProviderContext,
 ) -> SkillResult:
-    """Execute a script from the current skill's directory."""
+    """Run a command for the skill assigned to this task."""
     try:
-        content = await skill_provider.exec_script(skill_name, script_path, args, ctx)
+        content = await skill_provider.exec_script(skill_name, command, ctx)
         return SkillResult(content=content)
     except Exception as exc:
         return SkillResult(content=str(exc), is_error=True)

@@ -32,7 +32,7 @@ async def test_exec_script_sets_pythonioencoding(tmp_path, monkeypatch):
 
     prov = LocalSkillCapabilityProvider(skills_dir)
     ctx = ProviderContext(session_id="s1")
-    out = await prov.exec_script("enc-skill", "scripts/run.py", "", ctx)
+    out = await prov.exec_script("enc-skill", "python scripts/run.py", ctx)
 
     assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
     assert out.strip() == "utf-8"

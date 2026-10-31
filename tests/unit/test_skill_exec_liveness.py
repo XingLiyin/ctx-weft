@@ -22,7 +22,7 @@ async def test_idle_timeout_reports_honestly(tmp_path):
     prov = LocalSkillCapabilityProvider(skills_dir, idle_timeout_sec=1.0, hard_cap_sec=30)
     ctx = ProviderContext(session_id="s1")
     with pytest.raises(RuntimeError) as exc:
-        await prov.exec_script("live-skill", "scripts/run.py", "", ctx)
+        await prov.exec_script("live-skill", "python scripts/run.py", ctx)
     msg = str(exc.value).lower()
     assert "idle" in msg or "timed out" in msg
 
@@ -31,5 +31,5 @@ async def test_normal_script_returns_stdout(tmp_path):
     skills_dir = _make_skill(tmp_path, "print('done-42')\n")
     prov = LocalSkillCapabilityProvider(skills_dir, idle_timeout_sec=10, hard_cap_sec=30)
     ctx = ProviderContext(session_id="s1")
-    out = await prov.exec_script("live-skill", "scripts/run.py", "", ctx)
+    out = await prov.exec_script("live-skill", "python scripts/run.py", ctx)
     assert "done-42" in out

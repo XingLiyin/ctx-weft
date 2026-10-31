@@ -188,7 +188,7 @@ class AgentCapability(Capability):
 class SkillDefinition:
     skill_id: str      # 对应 SkillCapability.id
     skill_name: str
-    instructions: str  # SKILL.md frontmatter 之后的全文
+    instructions: str  # 技能正文；装配时追加 provider.execution_instructions
 
 
 # ── 公共事件 / 元信息 ──────────────────────────────────────────────────────────
@@ -307,6 +307,11 @@ class SkillCapabilityProvider(CapabilityProvider, ABC):
     Level 2 / Level 3 均由子类实现；SkillExecutorCapabilityProvider 路由到此。
     """
 
+    @property
+    def execution_instructions(self) -> str:
+        """资源执行说明，加载 skill 后追加到正文；空字符串表示无需补充。"""
+        return ""
+
     @abstractmethod
     async def load_definition(
         self, skill_name: str, ctx: ProviderContext,
@@ -330,9 +335,13 @@ class SkillCapabilityProvider(CapabilityProvider, ABC):
 
     @abstractmethod
     async def exec_script(
-        self, skill_name: str, script_path: str, args: str, ctx: ProviderContext,
+        self, skill_name: str, command: str, ctx: ProviderContext,
     ) -> str:
-        """Level 3：执行技能目录内的脚本，返回 stdout。"""
+        """Level 3：在技能环境中执行完整命令，返回执行输出。
+
+        Provider 负责让命令访问 skill 资源，并在运行说明中描述访问方式；
+        shell、目录变量及工作区选择不是此协议的约束。ctx 携带会话/任务身份。
+        """
         ...
 
 

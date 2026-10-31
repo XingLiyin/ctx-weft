@@ -16,7 +16,6 @@ from ctx_weft.providers._script_runner import (
     terminate_tree,
 )
 
-
 # ── liveness primitives ───────────────────────────────────────────────────────
 
 
@@ -110,6 +109,27 @@ async def test_clean_exit_collects_output():
     assert "hello" in result.stdout
     assert "world" in result.stdout
     assert any("hello" in t for _, t in out_lines)
+
+
+async def test_utf16_stdout_stderr_and_streamed_output():
+    stdout = "C:/中文目录/脚本.py\r\n第二行\r\n"
+    stderr = "错误路径 C:/输入文件.txt\r\n"
+    command = (
+        f'"{sys.executable}" -c "import sys; '
+        f"sys.stdout.buffer.write(bytes.fromhex('{stdout.encode('utf-16-le').hex()}')); "
+        f"sys.stderr.buffer.write(bytes.fromhex('{stderr.encode('utf-16-be').hex()}'))\""
+    )
+    chunks = []
+    result = await run_with_liveness(
+        command, cwd=None, env=None,
+        idle_timeout_sec=10, hard_cap_sec=30, output_limit_bytes=10000,
+        on_output=lambda stream, text: chunks.append((stream, text)),
+    )
+    assert result.exit_code == 0
+    assert result.stdout == stdout
+    assert result.stderr == stderr
+    assert "".join(text for stream, text in chunks if stream == "stdout") == stdout
+    assert "".join(text for stream, text in chunks if stream == "stderr") == stderr
 
 
 async def test_idle_timeout_kills_silent_sleeper():

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from ctx_weft.core.assembler import ContextAssembler
 from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.sources.capability import CapabilitySource
@@ -23,6 +25,8 @@ class _SkillProvider(SkillCapabilityProvider):
 
     def __init__(self):
         self.loaded_with = None
+
+    execution_instructions = ""
 
     async def list(self, ctx):
         return [SkillCapability(id="local_skill:pdf", name="pdf", description="d")]
@@ -44,11 +48,12 @@ class _SkillProvider(SkillCapabilityProvider):
     async def load_resource(self, skill_name, resource_path, ctx):
         return ""
 
-    async def exec_script(self, skill_name, script_path, args, ctx):
+    async def exec_script(self, skill_name, command, ctx):
         return ""
 
 
-async def test_loads_by_bare_name_from_qualified_skill_name() -> None:
+@pytest.mark.parametrize("execution_instructions", ["", "Use resource://skill/scripts with exec_script."])
+async def test_loads_by_bare_name_from_qualified_skill_name(execution_instructions) -> None:
     capability = SkillCapability(
         id="local_skill:pdf",
         name="pdf",
@@ -57,6 +62,7 @@ async def test_loads_by_bare_name_from_qualified_skill_name() -> None:
     cache = CapabilityCache()
     cache.put("agt_1", [capability])
     provider = _SkillProvider()
+    provider.execution_instructions = execution_instructions
     request = SimpleNamespace(
         purpose="act",
         bound_capabilities=[capability],
@@ -90,4 +96,9 @@ async def test_loads_by_bare_name_from_qualified_skill_name() -> None:
     prompt = await assembler.compile(inputs, template=request.template)
     assert provider.loaded_with == "pdf"
     assert "BODY" in prompt.messages[0].content
-    assert "skill_executor__exec_script" in prompt.messages[0].content
+    if execution_instructions:
+        assert execution_instructions in prompt.messages[0].content
+        assert prompt.messages[0].content.index("BODY") < prompt.messages[0].content.index(execution_instructions)
+        assert prompt.messages[0].content.count(execution_instructions) == 1
+    assert "SKILL_DIR" not in prompt.messages[0].content
+    assert "skill_executor__exec_script" not in prompt.messages[0].content

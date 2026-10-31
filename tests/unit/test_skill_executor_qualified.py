@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-
 from ctx_weft.core.capabilities.skill_executor import (
     SkillExecutorCapabilityProvider,
 )
 from ctx_weft.protocols.capability import (
-    Capability, CapabilityProviderInfo, SkillCapability, SkillCapabilityProvider,
+    Capability,
+    CapabilityProviderInfo,
+    SkillCapability,
+    SkillCapabilityProvider,
     SkillDefinition,
 )
 from ctx_weft.protocols.context import ProviderContext
@@ -37,7 +38,8 @@ class _FakeSkillProvider(SkillCapabilityProvider):
     async def load_resource(self, skill_name, resource_path, ctx) -> str:
         return "res"
 
-    async def exec_script(self, skill_name, script_path, args, ctx) -> str:
+    async def exec_script(self, skill_name, command, ctx) -> str:
+        self.exec_called_with = (skill_name, command, ctx)
         return "out"
 
 
@@ -113,3 +115,19 @@ async def test_read_file_bad_window_is_tool_error_not_crash() -> None:
         )
     ]
     assert any(e.kind == "error" and e.payload.get("code") == "SKILL_EXEC_ERROR" for e in events)
+
+
+async def test_exec_schema_and_dispatch_use_command_only() -> None:
+    provider = _FakeSkillProvider()
+    executor = SkillExecutorCapabilityProvider(_Registry([provider]))
+    ctx = ProviderContext(session_id="s1", task_id="t1", skill_name="local_skill__pdf")
+    cap = next(c for c in await executor.list(ctx) if c.name == "exec_script")
+    assert set(cap.input_schema["properties"]) == {"command"}
+    assert cap.input_schema["required"] == ["command"]
+    command = 'python "$SKILL_DIR/scripts/run.py" | formatter > out.txt'
+    events = [event async for event in executor.invoke(
+        "skill_executor:exec_script", {"command": command}, ctx,
+    )]
+    assert provider.exec_called_with == ("pdf", command, ctx)
+    assert events[-1].kind == "result"
+    assert events[-1].payload["content"] == "out"
