@@ -416,7 +416,9 @@ def report_observation(
         str,
         "Fill when task_status is 'success' or 'fail', or the observation prompt identifies a closed task: "
         "a CONCISE process report of the WHOLE task — "
-        "the important steps taken and lessons/experience, incorporating any sub-task results. "
+        "the original goal, achieved result and essential exact values, artifact paths or references; "
+        "include important steps, lessons and sub-task results where needed. "
+        "This report must remain useful when the task's conversation and final reply are compressed away. "
         "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
         "deliverable shown to the user is the actor's closing message text, "
         "not any tool argument. Leave empty for 'continue'.",

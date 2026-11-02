@@ -33,7 +33,7 @@
 
 根据任务目标和真实执行证据，结合上方提供的评价原则，判断这个任务是否完成，然后调用 `{{ report_observation }}` 恰好一次——不要调别的工具。不必反复权衡：画面清楚了就调。
 
-`task_status` 与 `act_recap` 恒为必填；其余字段按工具上各自写明的条件填。{% if ctx.subtasks %}
+`task_status` 与 `act_recap` 恒为必填；其余字段按工具上各自写明的条件填。填写 `task_summary` 时保留原始目标、实际结果及关键精确数值或产物引用：胶囊降为最小形态后，这份总结需要独立承载整个任务。{% if ctx.subtasks %}
 
 {{ subtasks_heading }}（它们的结果在上文对话里；若需要在 `next_step_hint` 里点出某一个，请用它完整的 task_id）：
 {{ shared.subtasks(ctx.subtasks) }}{% endif %}
@@ -42,7 +42,7 @@
 {% macro recap(ctx) -%}
 记录发生了什么：调用 `{{ report_observation }}` 恰好一次——不要调别的工具。
 
-填写 `act_recap`。{% if ctx.closed %} 同时填写 `task_summary`——任务已经结束，所以那个字段承载整个任务的过程报告。{% endif %} 不要填写任务判决、失败原因或下一轮提示字段。
+填写 `act_recap`。{% if ctx.closed %} 同时填写 `task_summary`，保留整个任务的目标、实际结果及关键精确数值或产物引用，使这份报告能够独立作为最小任务胶囊。{% endif %} 不要填写任务判决、失败原因或下一轮提示字段。
 {%- endmacro %}
 
 {% macro body(ctx) -%}

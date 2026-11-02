@@ -19,12 +19,16 @@ semantic facts; this file owns placement, order, priorities and required content
   ) %}
   {% do prompt.before(
       item.ref, shared.history_before(item), priority=item.priority,
-      required=item.current_prompt
+      required=item.current_prompt, group=item.group
   ) %}
   {% do prompt.after(
       item.ref, shared.history_after(item), priority=item.priority,
-      required=item.current_prompt
+      required=item.current_prompt, group=item.group
   ) %}
+{% endfor %}
+
+{% for capsule in capsules | default([]) %}
+  {% do prompt.capsule(capsule.group, capsule.messages, timestamp=capsule.timestamp) %}
 {% endfor %}
 
 {% set state = namespace(

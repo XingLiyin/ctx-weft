@@ -94,6 +94,7 @@ async def test_composer_merges_open_conv_and_residue_by_timestamp() -> None:
     blocks = await _collect(mem, _sc("t1"))
     messages = history_messages(blocks, task_id="t1")
     roles = [m.role for m in messages]
-    assert roles == ["user", "assistant", "tool"]
-    assert messages[1].tool_calls[0]["id"] == "d1"
-    assert messages[2].tool_call_id == "d1"
+    assert roles == ["user", "user", "user"]
+    assert "<task_start" in messages[1].content
+    assert "<task_result" in messages[2].content and "child out" in messages[2].content
+    assert all(not message.tool_calls for message in messages)

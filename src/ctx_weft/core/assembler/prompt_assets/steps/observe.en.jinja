@@ -33,7 +33,7 @@ A closing message that still asks the user for something is not a completed task
 
 Judge whether the task is complete, against the task goal and actual execution evidence, applying any evaluation principles supplied above, and call `{{ report_observation }}` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.
 
-`task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each.{% if ctx.subtasks %}
+`task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each. When filling `task_summary`, retain the original goal, achieved result and essential exact values or artifact references: this summary will stand alone after the task capsule is reduced to its minimal form.{% if ctx.subtasks %}
 
 {{ subtasks_heading }} (their results are in the conversation above; refer to one by its exact task_id if you need to flag it in `next_step_hint`):
 {{ shared.subtasks(ctx.subtasks) }}{% endif %}
@@ -42,7 +42,7 @@ Judge whether the task is complete, against the task goal and actual execution e
 {% macro recap(ctx) -%}
 Record what happened: call `{{ report_observation }}` exactly once — no other tools.
 
-Fill `act_recap`.{% if ctx.closed %} Also fill `task_summary` — the task has ended, so that field carries the whole task's process report.{% endif %} Do not fill task verdict, failure reason, or next-step hint fields.
+Fill `act_recap`.{% if ctx.closed %} Also fill `task_summary` — retain the whole task's goal, achieved result and essential exact values or artifact references so the report can stand alone as the minimal task capsule.{% endif %} Do not fill task verdict, failure reason, or next-step hint fields.
 {%- endmacro %}
 
 {% macro body(ctx) -%}

@@ -8,7 +8,7 @@ miniAgents 对齐版：
 from __future__ import annotations
 
 from ctx_weft.core.assembler.task_memory import (
-    render_task_record, task_record_group, task_record_kind, task_record_metadata,
+    final_reply_source, render_task_record, task_record_group, task_record_kind, task_record_metadata,
 )
 
 import logging
@@ -366,6 +366,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
             await _synthesize_dispatch_pair(
                 memory, parent_scope, task, act_recap, task_summary, outcome, ctx.provider_ctx,
                 raw_fold_scope=raw_fold_scope, final_reply=final_reply, preserve_raw=short,
+                summary_available=has_llm_summary,
                 operation_id=getattr(state, "extra", {}).get("observe_id", ""),
                 completed_at=getattr(state, "extra", {}).get("observe_completion", {}).get("completed_at", ""))
 
@@ -374,6 +375,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome,
                                         ctx.provider_ctx, raw_fold_scope=raw_fold_scope,
                                         final_reply=final_reply, preserve_raw=short,
+                                        summary_available=has_llm_summary,
                                         operation_id=getattr(state, "extra", {}).get("observe_id", ""),
                                         completed_at=getattr(state, "extra", {}).get("observe_completion", {}).get("completed_at", ""))
         events.append(make_event(
@@ -459,6 +461,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
 async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_summary: str,
                                     outcome: str, provider_ctx, *,
                                     raw_fold_scope=None, final_reply: str = "", preserve_raw: bool | None = None,
+                                    summary_available: bool | None = None,
                                     operation_id: str = "", completed_at: str = "") -> None:
     """Persist finish slots with the original raw-retention policy.
 
@@ -481,7 +484,15 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
         switched=getattr(task, "switch_requested", False),
     )
     policy = {"preserve_raw": (raw_fold_scope is None and not final_reply) if preserve_raw is None else preserve_raw,
-              "outcome": outcome, "slot_count": len(slots), "observe_id": operation_id}
+              "outcome": outcome, "slot_count": len(slots), "observe_id": operation_id,
+              "capsule_state": "full",
+              "has_summary": bool((task_summary or act_recap).strip()) and summary_available is not False}
+    raw = await load_records(memory, MemoryAddress(session_id=scope.session_id, task_id=task.id,
+        agent_id=getattr(task, "assigned_agent_id", None) or scope.agent_id),
+        MemoryScope.TASK, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    source = final_reply_source(raw, _output_text(getattr(task, "outputs", None)))
+    if source:
+        policy["final_reply_record_id"] = source
     for index, event in enumerate(slots):
         event.metadata["finish_policy"] = policy
         event.id = record_id(operation_id, "finish_v1", scope, task.id, index)

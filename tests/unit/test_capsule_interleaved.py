@@ -420,7 +420,8 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     start = next(i for i, m in enumerate(messages) if "<task_start" in str(m.content))
     result = next(i for i, m in enumerate(messages) if "<task_result" in str(m.content))
     child = next(i for i, m in enumerate(messages) if m.content == "child task")
-    finish = next(i for i, m in enumerate(messages) if "<task_finish" in str(m.content))
+    finish = next(i for i, m in enumerate(messages) if "<task_final_reply" in str(m.content))
+    assert all("<task_finish" not in str(m.content) for m in messages)
     assert start < result < child < finish
     assert all(not m.tool_calls and m.role != "tool" for m in messages)
     assert any("child act recap" in str(m.content) for m in messages)
