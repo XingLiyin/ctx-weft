@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ctx_weft.core.assembler.task_memory import (
-    project_task_history, render_task_record, task_record_group, task_record_kind, task_record_metadata,
+    legacy_task_call_name, project_task_history, render_task_record, task_record_group, task_record_kind, task_record_metadata,
 )
 from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.utils.clock import now_utc
@@ -141,16 +141,17 @@ async def segment_fold(
 
 def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outcome: str,
                        act_recap: str, task_summary: str, final_reply: str,
-                       base, tool_call_id: str, switched: bool = False) -> list[MemoryEvent]:
+                       base, tool_call_id: str, switched: bool = False,
+                       lean: bool = False) -> list[MemoryEvent]:
     """Write ordinary, Jinja-rendered task records with stable closure metadata."""
-    parts = [("recap", act_recap)]
-    if final_reply.strip():
+    parts = [] if lean else [("recap", act_recap)]
+    if final_reply.strip() and not lean:
         parts.append(("final_reply", final_reply.strip()))
     parts.append(("finish", task_summary or act_recap))
     events = []
     for index, (kind, body) in enumerate(parts):
         content = render_task_record(kind, task_id=task_id, parent_task_id=parent_task_id or "",
-                                    title=title, outcome=outcome if kind == "finish" else "", body=body)
+                                    title=title, outcome=outcome if kind in {"finish", "final_reply"} else "", body=body)
         events.append(MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
             content=content, timestamp=base + timedelta(microseconds=index),
@@ -183,7 +184,7 @@ async def find_finish_target(memory, provider_ctx, scope, task_id, *, legacy_out
         if assistant.role != "assistant":
             continue
         for call in assistant.metadata.get("tool_calls") or []:
-            if call.get("name") != qualify("control:finish_task"):
+            if legacy_task_call_name(call) != qualify("control:finish_task"):
                 continue
             tools = [r for r in own if r.role == "tool" and
                      r.metadata.get("tool_call_id") == call.get("id")]
@@ -229,7 +230,8 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
         asst = [r for r in tagged if task_record_kind(r) in {"recap", "final_reply"}]
         tool = [r for r in tagged if task_record_kind(r) == "finish"]
         recap_slot = []
-    if not asst or not tool:
+    lean = bool(tool and tool[0].metadata.get("finish_policy", {}).get("capsule_state") == "lean")
+    if (not asst and not lean) or not tool:
         raise RuntimeError(f"Incomplete finish pair for task={task_id} call={tool_call_id}")
 
     first = (recap_slot or asst or tool)[0]
@@ -244,8 +246,9 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
         scope=scope, task_id=task_id, parent_task_id=parent_task_id, title=title,
         outcome=outcome, act_recap=act_recap, task_summary=task_summary,
         final_reply=final_reply, base=ts, tool_call_id=tool_call_id,
+        lean=lean,
     )
-    if existing_anchor is not None and not (final_reply or "").strip():
+    if existing_anchor is not None and not (final_reply or "").strip() and not lean:
         # 占位已是三槽而本次没带答复：锚点正文原样保留，只换 recap 与报告两槽。
         events = [e for e in events if not e.metadata.get("final_reply")]
         events.insert(1, MemoryEvent(
@@ -262,7 +265,10 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
     policy = first.metadata.get("finish_policy")
     if policy is not None:
         for event in events:
-            event.metadata["finish_policy"] = {**policy, "slot_count": len(events)}
+            event.metadata["finish_policy"] = {
+                **policy, "slot_count": len(events), "outcome": outcome,
+                "has_summary": bool((task_summary or act_recap).strip()),
+            }
     if operation_id:
         from ctx_weft.core.loop.steps.observe import record_id
         for index, event in enumerate(events):

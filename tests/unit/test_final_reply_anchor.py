@@ -149,7 +149,7 @@ async def test_anchor_wraps_reply_with_notes() -> None:
 
     anchor = (await _agent_turns(mem))[1]
     assert anchor.content == render_task_record("final_reply", task_id="t1",
-        title="抽取配置解析", body=_REPLY)
+        title="抽取配置解析", outcome="success", body=_REPLY)
 
 
 
@@ -277,12 +277,13 @@ async def test_rendered_messages_put_finish_call_on_the_reply() -> None:
     blocks = await recalled_blocks(req, deps)
     msgs = history_messages(blocks, task_id="t2")
 
-    tail = msgs[-3:]
-    assert [m.role for m in tail] == ["user", "assistant", "user"], \
+    tail = msgs[-2:]
+    assert [m.role for m in tail] == ["user", "assistant"], \
         f"尾部应是 recap → 答复 → 报告；实得 {[(m.role, str(m.content)[:24]) for m in msgs]}"
     assert not tail[0].tool_calls, "recap 那条不带 tool_calls"
     assert all(not message.tool_calls for message in tail)
     assert _REPLY in tail[1].content
+    assert all("<task_finish" not in str(m.content) for m in msgs)
 
 
 async def test_dispatch_ack_points_at_the_final_reply() -> None:

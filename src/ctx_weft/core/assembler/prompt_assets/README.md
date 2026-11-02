@@ -33,6 +33,26 @@ This preserves source IDs, timestamps and storage; no database migration or even
 rewrite is needed. Template edits also apply to this legacy read projection.
 TASK conversation records and real business tool calls remain unchanged.
 
+Closed tasks have mutually exclusive full and minimal prompt views. A full capsule
+shows its retained task body, recap and final reply; its stored finish report is
+hidden. Short tasks label the original assistant answer using the persisted
+`finish_policy.final_reply_record_id`, without copying its body into AGENT memory.
+Legacy raw answers are projected when an unambiguous final prose turn survives.
+
+The finish report is the minimal task capsule, retaining the goal, outcome and
+essential result. Budget trimming first replaces an entire closed task subtree
+with this alternative; it never independently drops the answer and leaves a recap.
+If even the minimal view does not fit, normal group trimming applies. Required
+current-task groups remain protected. This selection changes no stored rows.
+
+Persistent demotion atomically replaces the task subtree's details with one finish
+record and `finish_policy.capsule_state = "lean"`. Late reports update that minimal
+record without resurrecting a recap or final reply. IDs, timestamps and metadata
+provide identity and recovery; no logic parses the rendered labels.
+Closures with `has_summary = false` keep raw evidence and do not offer an empty
+finish as a compression alternative. Inherited snapshot rows follow the receiving
+task's capsule lifetime, including snapshots written before this change.
+
 Observe always attempts an LLM review at judgement boundaries, including when
 ROLE is absent. ROLE supplies additional evaluation principles; the base observe
 program still specifies judgement and `report_observation`. Failed or unusable

@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+from ctx_weft.core.assembler.task_memory import capsule_origin, task_record_kind, task_record_group
 
 import dataclasses
 import inspect
@@ -430,7 +430,7 @@ def _dispatch_finish_sets(recs) -> tuple[set, set]:
     for r in recs:
         if r.kind is not MemoryKind.CONVERSATION_TURN:
             continue
-        oid = r.metadata.get("origin_task_id")
+        oid = capsule_origin(r)
         if oid is None:
             continue
         kind = task_record_kind(r)
@@ -455,7 +455,9 @@ async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
         _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
     agent_recs = await load_records(ctx.memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
-    for r in [*body, *agent_recs]:
+    from ctx_weft.core.assembler.task_memory import capsule_history
+    visible, _ = capsule_history([*body, *agent_recs])
+    for r in visible:
         text = r.content if isinstance(r.content, str) else content_to_text(r.content)
         # 图片另计：不计入则降级图片的 freed_tokens 恒为 0，escalating_compact 的
         # est 不减、误判该级白跑而继续升级（见 spec 2026-08-20-multimodal-design §6.5）。
@@ -478,11 +480,11 @@ async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
     parent_of: dict[str, Any] = {}
     has_dispatch, has_finish = _dispatch_finish_sets(recs)
     # has_result：该 origin 有返回结果（result/tool 回合）——派发型 root task 的「完成」标志。
-    has_result = {r.metadata.get("origin_task_id") for r in recs
+    has_result = {capsule_origin(r) for r in recs
                   if (r.role == "tool" or task_record_kind(r) == "result")
-                  and r.metadata.get("origin_task_id") is not None}
+                  and capsule_origin(r) is not None}
     for r in recs:
-        oid = r.metadata.get("origin_task_id")
+        oid = capsule_origin(r)
         if oid is None:
             continue
         p = r.metadata.get("parent_task_id")
@@ -542,7 +544,7 @@ async def fold_root_experience(
     for r in recs:
         if r.kind is not MemoryKind.CONVERSATION_TURN:
             continue
-        oid = r.metadata.get("origin_task_id")
+        oid = capsule_origin(r)
         if oid is None:
             continue
         p = r.metadata.get("parent_task_id")
@@ -553,9 +555,9 @@ async def fold_root_experience(
     origins = set(parent_of)
     # 完成的顶层单元（保留/折叠的对象）= 同 agent 亲做（has_finish）或派给别的 agent 且结果已回
     # （has_result：有 result/tool 回合）。仅「派出但结果未回」才是真·在途 active，不作可折胶囊。
-    has_result = {r.metadata.get("origin_task_id") for r in recs
+    has_result = {capsule_origin(r) for r in recs
                   if (r.role == "tool" or task_record_kind(r) == "result")
-                  and r.metadata.get("origin_task_id") is not None}
+                  and capsule_origin(r) is not None}
     active = has_dispatch - has_finish - has_result
     current = getattr(state.scope, "task_id", None)  # 当前正在跑的 task 不折
     top = [oid for oid, pid in parent_of.items()
@@ -590,7 +592,7 @@ async def fold_root_experience(
         # + 其 agent 层 conversation turn（finish 对 + dispatch 对，同 origin 同命运）+ 旧摘要
         for r in agent_recs:
             if (r.kind is MemoryKind.CONVERSATION_TURN
-                    and r.metadata.get("origin_task_id") in fold_set):
+                    and capsule_origin(r) in fold_set):
                 out.append(r.id)
             elif r.kind is MemoryKind.SUMMARY:
                 out.append(r.id)  # 旧摘要并入新摘要
@@ -644,7 +646,7 @@ async def fold_root_experience(
     surviving = origins - fold_set
     kept_ts: list = []
     for r in recs:
-        oid = r.metadata.get("origin_task_id")
+        oid = capsule_origin(r)
         if r.kind is MemoryKind.CONVERSATION_TURN and oid in surviving:
             kept_ts.append(r.timestamp)
     for r in body_recs:
@@ -672,34 +674,68 @@ async def fold_root_experience(
 
 
 async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: set) -> int:
-    """L2：把 origin_ids 里本 agent 亲做的 rich 胶囊降级成 sub-agent lean 表示。
-    - 删该 task 的 task 层 body（USER_PROMPT/段摘要/raw，metadata['task_id'] in origin_ids）。
-    - agent 层 finish 对：supersede assistant 槽（act_recap + finish 调用），保留 tool 槽（综合总结回填）
-      作 lean 表示。已无 assistant 槽（已 lean / 纯 dispatch 对）的单元跳过。
-    无 LLM。返回 supersede 条数。"""
+    """Atomically replace a closed task subtree with its single finish capsule.
+
+    Classification uses task-memory facts, including legacy projections, rather
+    than user/assistant/tool roles. A late recap can update the lean record but
+    must never resurrect its deleted details.
+    """
+    from ctx_weft.core.assembler.task_memory import project_task_history
+    from ctx_weft.core.loop.steps.observe import record_id
+    from ctx_weft.protocols import MemoryEvent
+
     memory = ctx.memory
     body = await load_records(memory,
         _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
     turns = await load_records(memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN])
-    has_dispatch, has_finish = _dispatch_finish_sets(turns)
-
-    ids: list = []
-    for r in body:
-        if (r.address.task_id if r.address else r.metadata.get("task_id")) in origin_ids:
-            ids.append(r.id)   # 删 task 层 body（降级核心：丢交互细节）
-    for r in turns:
-        oid = r.metadata.get("origin_task_id")
-        if oid not in origin_ids:
+    projected = project_task_history(turns)
+    finishes = {capsule_origin(r): r for r in projected
+                if task_record_kind(r) == "finish"}
+    parents = {oid: r.metadata.get("parent_task_id") for oid, r in finishes.items()}
+    total = 0
+    processed = set()
+    for origin in origin_ids:
+        if origin in processed or origin not in finishes:
             continue
-        # 仅降级「本 agent 亲做」单元（有 finish 回合）；纯 dispatch 对本就 lean，不动
-        if oid in has_finish and r.role == "assistant":
-            ids.append(r.id)   # 折 finish 对 assistant 槽，仅留 tool 槽回填
-    if not ids:
-        return 0
-    await memory.fold(ids, [], ctx.provider_ctx)  # 纯遗忘（v2 P3d）
-    return len(ids)
+        # When both a parent and child were requested, only reduce the parent.
+        ancestor, seen = parents.get(origin), set()
+        while ancestor in parents and ancestor not in seen and ancestor not in origin_ids:
+            seen.add(ancestor)
+            ancestor = parents.get(ancestor)
+        if ancestor in origin_ids:
+            continue
+        closing = finishes[origin]
+        if closing.metadata.get("finish_policy", {}).get("has_summary") is False:
+            continue  # Failed observations do not authorize discarding raw evidence.
+        if closing.metadata.get("finish_policy", {}).get("capsule_state") == "lean":
+            continue
+        descendants = {origin}
+        while True:
+            expanded = descendants | {oid for oid, parent in parents.items() if parent in descendants}
+            if expanded == descendants:
+                break
+            descendants = expanded
+        # Retain a still-running descendant and its dispatch context intact.
+        if any(task_record_kind(r) == "start" and capsule_origin(r) in descendants
+               and r.metadata.get("child_task_id")
+               and r.metadata.get("child_task_id") not in finishes for r in projected):
+            continue
+        ids = [r.id for r in body if r.address.task_id in descendants]
+        ids.extend(r.id for r in turns if capsule_origin(r) in descendants)
+        policy = {**closing.metadata.get("finish_policy", {}), "capsule_state": "lean",
+                  "slot_count": 1, "preserve_raw": False}
+        policy.pop("final_reply_record_id", None)
+        lean = MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
+            address=closing.address, content=closing.content, timestamp=closing.timestamp,
+            role="user", id=record_id("demote_capsule", closing.id), blob_refs=closing.blob_refs,
+            metadata={**closing.metadata, "finish_policy": policy})
+        await memory.fold(ids, [lean], ctx.provider_ctx)
+        processed.update(descendants)
+        total += len(ids)
+    return total
 
 
 async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -> list:
@@ -716,7 +752,7 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -
     for r in recs:
         if r.kind is not MemoryKind.CONVERSATION_TURN:
             continue
-        oid = r.metadata.get("origin_task_id")
+        oid = capsule_origin(r)
         if oid is None:
             continue
         p = r.metadata.get("parent_task_id")
@@ -726,9 +762,9 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -
             first_ts[oid] = r.timestamp
     origins = set(parent_of)
     # 与 fold_root_experience 同口径：完成单元 = has_finish 或 has_result（结果已回）；当前 task 除外。
-    has_result = {r.metadata.get("origin_task_id") for r in recs
+    has_result = {capsule_origin(r) for r in recs
                   if (r.role == "tool" or task_record_kind(r) == "result")
-                  and r.metadata.get("origin_task_id") is not None}
+                  and capsule_origin(r) is not None}
     active = has_dispatch - has_finish - has_result
     current = getattr(state.scope, "task_id", None)
     top = [oid for oid, pid in parent_of.items()

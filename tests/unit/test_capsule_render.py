@@ -172,8 +172,8 @@ async def test_composer_renders_finish_pair_as_llm_messages() -> None:
     messages = history_messages(blocks, task_id="t1")
 
     assert all(m.role != "tool" and not m.tool_calls for m in messages)
-    assert any("Process Report: completed" in str(m.content) for m in messages)
-    assert any("<task_finish" in str(m.content) for m in messages)
+    assert any("<task_final_reply" in str(m.content) for m in messages)
+    assert all("<task_finish" not in str(m.content) for m in messages)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,7 +214,8 @@ async def test_drop_orphan_preserves_finish_pair() -> None:
     assert all(m.role != "tool" for m in messages)
     after = drop_orphan_tool_results(messages)
     assert after == messages
-    assert any("Process Report: OK" in str(m.content) for m in after)
+    assert any("<task_final_reply" in str(m.content) for m in after)
+    assert all("<task_finish" not in str(m.content) for m in after)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,6 +283,7 @@ async def test_finish_pair_survives_alongside_conversation() -> None:
     after = drop_orphan_tool_results(messages)
 
     # finish 对的 tool 消息必须存活
-    assert any("Process Report: success" in str(m.content) for m in after)
+    assert any("<task_final_reply" in str(m.content) for m in after)
+    assert all("<task_finish" not in str(m.content) for m in after)
     assert any("working on it" in str(m.content) for m in after)
     assert all(not m.tool_calls and m.role != "tool" for m in after)

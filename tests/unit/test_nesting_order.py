@@ -230,9 +230,9 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
         "P:UP", "P:LLM",
         "P:DELEGATE_call", "P:DELEGATE_result",
         "C:UP", "C:SUMMARY", "C:LLM2",
-        "C:FINISH_call", "C:FINISH_report",
+        "C:FINISH_call",
         "P:RESUME",
-        "P:FINISH_call", "P:FINISH_report",
+        "P:FINISH_call",
     ]
     assert labels == expected, f"nested order broke under async backfill:\n got={labels}\nwant={expected}"
 
@@ -241,7 +241,7 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
 
     # (1) C 子树严格落在 P delegate 对 与 P 续跑 之间 —— NOT 混入 P 后续回合
     c_subtree = [pos["C:UP"], pos["C:SUMMARY"], pos["C:LLM2"],
-                 pos["C:FINISH_call"], pos["C:FINISH_report"]]
+                 pos["C:FINISH_call"]]
     assert pos["P:DELEGATE_result"] < min(c_subtree), "C subtree must start after P's delegate pair"
     assert max(c_subtree) < pos["P:RESUME"], (
         "C subtree must end BEFORE P's resume (would mis-order if seq_no-primary / write-time ts)"
@@ -249,9 +249,8 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
 
     # (2) delegate 对相邻
     assert pos["P:DELEGATE_result"] == pos["P:DELEGATE_call"] + 1, "delegate pair must be adjacent"
-    # (3) 各 finish 对相邻
-    assert pos["C:FINISH_report"] == pos["C:FINISH_call"] + 1, "C finish pair must be adjacent"
-    assert pos["P:FINISH_report"] == pos["P:FINISH_call"] + 1, "P finish pair must be adjacent"
+    # Full capsules expose the final reply; their minimal report stays hidden.
+    assert "C:FINISH_report" not in pos and "P:FINISH_report" not in pos
 
     # (4) tool 邻接：C 子树不被插进任一 assistant-tool_call 与其 tool_result 之间
     #     即每个 assistant(带 tool_calls) 后紧跟其 tool 结果

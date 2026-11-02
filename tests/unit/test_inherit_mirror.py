@@ -74,14 +74,14 @@ async def test_inherit_mirrors_frames_and_bubbles():
     contents = [(t.role, t.content) for t in chrono]
 
     # cross-agent Amy bubble is present (was previously MISSING)
-    assert any(role == "tool" and "你好 Amy" in c for role, c in contents), \
+    assert any(role == "user" and "你好 Amy" in c for role, c in contents), \
         f"cross-agent bubble must be inherited; got {contents}"
 
     # same-agent Lily body present AND preceded by a start_task frame (was previously a NAKED leak)
     lily_body_idx = next(i for i, (role, c) in enumerate(contents) if "请向 Lily 问好" in c)
     preceding_frames = [t for t in chrono[:lily_body_idx]
-                        if t.role == "assistant"
-                        and any(tc.get("id") == "tc_lily" for tc in (t.metadata.get("tool_calls") or []))]
+                        if t.role == "user" and "<task_start" in t.content
+                        and t.timestamp == _BASE + timedelta(seconds=2)]
     assert preceding_frames, "Lily's body must be preceded by its start_task frame (no naked leak)"
 
     # everything carries both provenance tags (agent id is the real one, task id is optional)

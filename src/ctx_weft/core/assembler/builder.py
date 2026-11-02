@@ -84,19 +84,24 @@ def _memory_type(record) -> str:
     return str(record.type or legacy_type_of(record.kind, record.scope, record.role))
 
 
-def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from ctx_weft.protocols import MemoryEventType, MemoryKind, MemoryScope
 
-    from ctx_weft.core.assembler.task_memory import project_task_history, task_record_group
+    from ctx_weft.core.assembler.task_memory import capsule_history, task_record_group
 
     records = context._records if records is None else records
-    projected = dict(zip(records, project_task_history(records.values()), strict=True))
+    history_ids = {block["memory_id"] for block in context.memory_blocks if block["kind"] == "history"}
+    visible, capsules = capsule_history(r for key, r in records.items() if key in history_ids)
+    projected = {r.id: r for r in visible}
+    capsule_groups = {record_id: capsule.group for capsule in capsules for record_id in capsule.full_ids}
     task_id = context.task.get("id", "")
     base = max((r.metadata.get("seq_no", 0) for r in records.values()
                 if r.scope is MemoryScope.TASK), default=0) + 1
     rows = []
     for block in context.memory_blocks:
         if block["kind"] != "history":
+            continue
+        if block["memory_id"] not in projected:
             continue
         record = projected[block["memory_id"]]
         if record.kind is not None and record.kind not in (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY):
@@ -162,7 +167,7 @@ def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[st
             task_id=record.metadata.get("task_id", ""),
             origin_task_id=record.metadata.get("origin_task_id", ""),
             summary_kind=summary_kind,
-            group=("task-memory:" + str(task_record_group(record))
+            group=capsule_groups.get(record.id) or ("task-memory:" + str(task_record_group(record))
                    if task_record_group(record) else None),
         ))
 
@@ -192,6 +197,9 @@ def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[st
         last_user_ref=f"history:{user_indexes[-1]}" if user_indexes else None,
         last_ref=f"history:{len(prepared) - 1}" if prepared else None,
         last_role=prepared[-1]["message"].role if prepared else None,
+        capsules=[dict(group=capsule.group,
+                       messages=[LLMMessage(role=r.role or "user", content=r.content) for r in capsule.lean],
+                       timestamp=capsule.lean[-1].timestamp) for capsule in capsules if capsule.lean],
     )
     return prepared, refs
 
@@ -449,6 +457,7 @@ class PromptBuilder:
     _tool_groups: dict[str, str] = field(default_factory=dict, init=False)
     _last_refs: tuple[str, ...] = field(default=(), init=False)
     _last_trace: list[dict] = field(default_factory=list, init=False)
+    _capsule_fallbacks: dict[str, list[PromptOperation]] = field(default_factory=dict, init=False)
 
     def compile(self, context, *, tools: list[LLMTool] | None = None, records=None,
                 template=None, trim: bool = True, capabilities=None, skill_definition=None):
@@ -460,6 +469,7 @@ class PromptBuilder:
         self._operations.clear()
         self._serial = 0
         self._tool_groups.clear()
+        self._capsule_fallbacks.clear()
         self.tools(tools or [])
         facts = _prompt_facts(context, records, template, capabilities=capabilities,
                               skill_definition=skill_definition)
@@ -606,6 +616,22 @@ class PromptBuilder:
     def tools(self, tools: list[LLMTool]) -> None:
         self._tools = deepcopy(tools)
 
+    def capsule(self, group: str, messages: list[LLMMessage], *, timestamp=None) -> None:
+        """Register a template-supplied minimal alternative to an atomic capsule."""
+        full = [op for op in self._operations if op.group == group]
+        if not full:
+            return
+        sequence = max(op.sequence for op in full)
+        first_ref = next(op.ref for op in full if op.kind in {"message", "user"})
+        operations = []
+        for index, message in enumerate(messages):
+            self.message(message, ref=first_ref if index == 0 else f"{group}:lean:{index}",
+                         group=group, priority=max(op.priority for op in full), timestamp=timestamp)
+            op = self._operations.pop()
+            op.sequence = sequence
+            operations.append(op)
+        self._capsule_fallbacks[group] = operations
+
     def build(
         self,
         token_limit: int | None,
@@ -628,6 +654,7 @@ class PromptBuilder:
             grouped[group_key(operation)].append(operation)
 
         kept_groups = set(grouped)
+        replacements: dict[str, list[PromptOperation]] = {}
         total = sum(op.token_count for op in operations)
         owner_group = {
             operation.ref: group_key(operation)
@@ -648,7 +675,7 @@ class PromptBuilder:
                 if current not in kept_groups:
                     continue
                 kept_groups.discard(current)
-                total -= sum(member.token_count for member in grouped[current])
+                total -= sum(member.token_count for member in replacements.get(current, grouped[current]))
                 pending.extend(decoration_groups.get(current, ()))
 
         candidates = []
@@ -666,6 +693,19 @@ class PromptBuilder:
             candidates.append((required, -priority, timestamp, -tokens, key))
 
         if content_limit is not None:
+            for required, _negative_priority, _timestamp, _negative_tokens, key in sorted(candidates):
+                if total <= content_limit:
+                    break
+                if required:
+                    continue
+                fallback = self._capsule_fallbacks.get(key)
+                if fallback:
+                    old_tokens = sum(op.token_count for op in grouped[key])
+                    new_tokens = sum(op.token_count for op in fallback)
+                    if new_tokens < old_tokens:
+                        replacements[key] = fallback
+                        total -= old_tokens - new_tokens
+            # Only after lean alternatives have been considered may a capsule be dropped.
             for required, _negative_priority, _timestamp, _negative_tokens, key in sorted(candidates):
                 if total <= content_limit:
                     break
@@ -692,7 +732,10 @@ class PromptBuilder:
                 image_count=images,
             )
 
-        kept = [op for op in operations if group_key(op) in kept_groups]
+        kept = [op for op in operations if group_key(op) in kept_groups
+                and group_key(op) not in replacements]
+        kept.extend(op for key, replacement in replacements.items() if key in kept_groups
+                    for op in replacement)
         kept_refs = {op.ref for op in kept if op.kind in {"message", "user"}}
         kept = [
             op for op in kept
