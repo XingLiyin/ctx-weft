@@ -23,7 +23,6 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.core.utils.content import content_to_text
@@ -238,8 +237,7 @@ _BASH_CALL = MockResponse(
 def _finish_call(tc_id: str = "tc_finish") -> MockResponse:
     return MockResponse(
         text="done",
-        tool_calls=[ToolCall(id=tc_id, name="control__finish_task",
-                             arguments={"deliverables_summary": "done"})],
+        tool_calls=[],
     )
 
 
@@ -428,8 +426,6 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
         t = tm.get_task(req.task_id)
         return t if (t is not None and t.status in ("FINISHED", "FAILED", "CANCELED")) else None
 
-    ctxp = ProviderContext(session_id=sid, tenant_id="default")
-    scope = state.scope
 
     task = await _poll(_final_task)
     assert task.status == "FINISHED", f"expected FINISHED, got {task.status}"
@@ -522,9 +518,9 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
     task = await _poll(_final_task)
     assert task.status == "FINISHED", f"expected FINISHED, got {task.status}"
 
+
     ctxp = ProviderContext(session_id=sid, tenant_id="default")
     scope = state.scope
-
     recs = await memory.recall_recent(scope, [MemoryEventType.USER_PROMPT], 50, ctxp)
     injected = [r for r in recs if r.metadata.get("source") == "hitl_reply"]
     assert len(injected) == 1, f"expected exactly one injected reply turn, got {len(injected)}"

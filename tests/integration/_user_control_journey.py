@@ -68,8 +68,7 @@ class ControlLLM(_FinishEveryTaskLLM):
 
     def finish(self, request, text=None):
         text = text or "Release checklist ready. " + facts(request_text(request))
-        return self._stream(MockResponse(text=text, tool_calls=[ToolCall(
-            id=self._id("finish"), name="control__finish_task", arguments={})]), request)
+        return self._stream(MockResponse(text=text, tool_calls=[]), request)
 
     def stall(self):
         async def stream():

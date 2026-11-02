@@ -4,7 +4,6 @@ import pytest
 
 from ctx_weft.core.models.errors import AgentBusyError, AgentNotFound, AgentTerminatedError
 from ctx_weft.core.runtime import SessionStartParams
-from ctx_weft.protocols import ToolCall
 from ctx_weft.protocols.agent import AgentDetail, AgentSummary
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
@@ -291,9 +290,7 @@ async def test_start_session_agent_id_is_addressable_root_agent():
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(observer_verdict="success", responses=[
-        MockResponse(text="done", tool_calls=[
-            ToolCall(id="tc1", name="control__finish_task", arguments={}),
-        ]),
+        MockResponse(text="done", tool_calls=[]),
     ])
     rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())
@@ -328,9 +325,7 @@ async def test_summary_carries_created_at_for_live_agents():
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[
-        MockResponse(text="done", tool_calls=[
-            ToolCall(id="tc1", name="control__finish_task", arguments={}),
-        ]),
+        MockResponse(text="done", tool_calls=[]),
     ])
     rt = make_runtime(llm=llm, agent_provider=resolver)
     rt.providers.register_memory(InMemoryMemoryProvider())

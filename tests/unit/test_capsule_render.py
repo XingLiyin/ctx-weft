@@ -168,25 +168,9 @@ async def test_composer_renders_finish_pair_as_llm_messages() -> None:
     blocks = await _collect(mem, scope)
     messages = history_messages(blocks, task_id="t1")
 
-    roles = [m.role for m in messages]
-    assert "assistant" in roles, f"assistant message missing; roles={roles}"
-    assert "tool" in roles, f"tool message missing; roles={roles}"
-
-    asst_msgs = [m for m in messages if m.role == "assistant"]
-    tool_msgs = [m for m in messages if m.role == "tool"]
-
-    # assistant 消息必须包含 finish_task tool_call
-    finish_tcs = [
-        tc for m in asst_msgs for tc in m.tool_calls
-        if tc.get("name") == _FINISH_TASK_NAME
-    ]
-    assert finish_tcs, f"finish_task tool_call not in assistant messages; got {asst_msgs}"
-    assert finish_tcs[0]["id"] == tool_call_id
-
-    # tool 消息必须携带匹配的 tool_call_id
-    matched = [m for m in tool_msgs if m.tool_call_id == tool_call_id]
-    assert matched, f"tool message with tool_call_id={tool_call_id} not found; got {tool_msgs}"
-    assert "Process Report" in (matched[0].content or "")
+    assert all(m.role != "tool" and not m.tool_calls for m in messages)
+    assert any("Process Report: completed" in str(m.content) for m in messages)
+    assert any("<task_finish" in str(m.content) for m in messages)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -224,16 +208,10 @@ async def test_drop_orphan_preserves_finish_pair() -> None:
     messages = history_messages(blocks, task_id="t1")
 
     # 确认消息列表合法（含 assistant + tool 配对）
-    before_count = len([m for m in messages if m.role == "tool"])
-    assert before_count > 0, "precondition: tool message must be present before drop_orphan"
-
+    assert all(m.role != "tool" for m in messages)
     after = drop_orphan_tool_results(messages)
-
-    after_tool = [m for m in after if m.role == "tool" and m.tool_call_id == tool_call_id]
-    assert after_tool, (
-        f"drop_orphan_tool_results incorrectly dropped the finish-pair tool message "
-        f"(tool_call_id={tool_call_id})"
-    )
+    assert after == messages
+    assert any("Process Report: OK" in str(m.content) for m in after)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +279,6 @@ async def test_finish_pair_survives_alongside_conversation() -> None:
     after = drop_orphan_tool_results(messages)
 
     # finish 对的 tool 消息必须存活
-    finish_tool = [m for m in after if m.role == "tool" and m.tool_call_id == tool_call_id]
-    assert finish_tool, "finish-pair tool message must survive drop_orphan_tool_results"
-    assert "Process Report" in (finish_tool[0].content or "")
+    assert any("Process Report: success" in str(m.content) for m in after)
+    assert any("working on it" in str(m.content) for m in after)
+    assert all(not m.tool_calls and m.role != "tool" for m in after)

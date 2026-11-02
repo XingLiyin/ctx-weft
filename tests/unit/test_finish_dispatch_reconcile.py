@@ -1,103 +1,18 @@
-"""finish_task 与 delegate 同批出现时的批末仲裁：finish 胜出。
-
-锁定 ActStep._reconcile_finish_vs_dispatch：
-- 两类工具都出现 → 当前 task 清掉挂起意图 suspend_requested（路由走 observe 收尾），
-  被派发任务经 detach_staged 改投到当前 task 的 parent，task.outputs 保留。
-- 只出现一类 → 不仲裁，行为不变。
-- 顺序无关（finish 在前 / delegate 在前结果一致）。
-"""
-
-from __future__ import annotations
-
+"""Delegation remains blocking and cannot be detached by a completion tool."""
 from types import SimpleNamespace
-
-from ctx_weft.core.loop.steps.act import _reconcile_finish_vs_dispatch
-from ctx_weft.core.capabilities.control_tools import (
-    DELEGATE_TASK_NAME,
-    FINISH_TASK_NAME,
-    REPORT_OBSERVATION_NAME,
-)
-from ctx_weft.core.models.task import NormalTaskSettings
-from ctx_weft.protocols import ToolCall
+from ctx_weft.core.capabilities.control_tools import ControlContext, delegate_task, _CONTROL_TOOLS
+from ctx_weft.core.models.task import Task
 
 
-class _FakeTM:
-    def __init__(self) -> None:
-        self.detached: list[tuple[str, str | None]] = []
-
-    def detach_staged(self, from_parent_id: str, to_parent_id: str | None) -> None:
-        self.detached.append((from_parent_id, to_parent_id))
-
-
-def _state(parent: str | None):
-    settings = NormalTaskSettings()
-    settings.spawn_titles = ["child"]
-    # delegate 置的是**路由意图**（Task 4：task.status 归 TaskManager，run 内不写）
-    task = SimpleNamespace(
-        id="cur", parent_task_id=parent, status="ACTIVE", suspend_requested=True,
-        actor_done=True, settings=settings, outputs="my final reply",
-    )
-    return SimpleNamespace(task=task)
-
-
-def _tc(name: str) -> ToolCall:
-    return ToolCall(id=f"tc_{name}", name=name, arguments={})
-
-
-def _run(state, tm, tool_calls):
-    ctx = SimpleNamespace(task_manager=tm)
-    _reconcile_finish_vs_dispatch(state, ctx, tool_calls)
-
-
-def test_finish_plus_delegate_finish_wins() -> None:
-    state, tm = _state(parent="G"), _FakeTM()
-    _run(state, tm, [_tc(FINISH_TASK_NAME), _tc(DELEGATE_TASK_NAME)])
-
-    assert tm.detached == [("cur", "G")]              # 改投到当前 task 的 parent
-    assert state.task.suspend_requested is False     # 撤销挂起意图 → 路由走 observe
-    assert state.task.settings.spawn_titles == []    # 清脏状态
-    assert state.task.outputs == "my final reply"    # finish 的产出保留
-
-
-def test_root_task_detaches_to_top_level() -> None:
-    state, tm = _state(parent=None), _FakeTM()
-    _run(state, tm, [_tc(FINISH_TASK_NAME), _tc(DELEGATE_TASK_NAME)])
-
-    assert tm.detached == [("cur", None)]            # root → 改投为顶层独立 root
-    assert state.task.suspend_requested is False
-
-
-def test_order_independent() -> None:
-    """delegate 在前、finish 在后，结果与反序一致（只看本批是否两类都出现）。"""
-    state, tm = _state(parent="G"), _FakeTM()
-    _run(state, tm, [_tc(DELEGATE_TASK_NAME), _tc(FINISH_TASK_NAME)])
-
-    assert tm.detached == [("cur", "G")]
-    assert state.task.suspend_requested is False
-
-
-def test_finish_only_no_reconcile() -> None:
-    state, tm = _state(parent="G"), _FakeTM()
-    _run(state, tm, [_tc(FINISH_TASK_NAME)])
-
-    assert tm.detached == []                          # 没派发 → 不仲裁
-    assert state.task.suspend_requested is True       # 原样不动（此处仅断言未被仲裁触碰）
-
-
-def test_delegate_only_no_reconcile() -> None:
-    """仅 delegate（无 finish）→ 维持 suspend 派发语义，不被仲裁干预。"""
-    state, tm = _state(parent="G"), _FakeTM()
-    _run(state, tm, [_tc(DELEGATE_TASK_NAME)])
-
-    assert tm.detached == []
-    assert state.task.suspend_requested is True
-    assert state.task.settings.spawn_titles == ["child"]
-
-
-def test_non_dispatch_control_tool_does_not_trigger() -> None:
-    """finish + 非派发控制工具（report_observation）不触发改投。"""
-    state, tm = _state(parent="G"), _FakeTM()
-    _run(state, tm, [_tc(FINISH_TASK_NAME), _tc(REPORT_OBSERVATION_NAME)])
-
-    assert tm.detached == []
-    assert state.task.suspend_requested is True
+def test_delegation_keeps_the_child_attached_and_requests_suspension():
+    staged = []
+    manager = SimpleNamespace(stage_task=lambda task, **kwargs: staged.append((task, kwargs)))
+    task = Task(id="parent", session_id="s", status="ACTIVE", assigned_agent_id="a", creator_agent_id="a")
+    ctx = ControlContext(session_id="s", task_id=task.id, agent_id="a", task=task,
+                         task_manager=manager, session=None, tool_call_id="delegate")
+    delegate_task(title="Child", task_prompt="Do the child work", ctx=ctx)
+    child, options = staged[0]
+    assert child.parent_task_id == task.id
+    assert options["parent_task_id"] == task.id
+    assert task.suspend_requested and task.actor_done
+    assert "control:finish_task" not in _CONTROL_TOOLS

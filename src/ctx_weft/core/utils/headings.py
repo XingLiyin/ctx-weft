@@ -26,13 +26,8 @@ __all__ = ["FINAL_OUTPUT_HEADING", "PROGRESS_SO_FAR_HEADING", "SUBTASKS_HEADING"
 # 由下一轮 actor 自己决定重派还是自己做。
 SUBTASKS_HEADING = "## Your sub-tasks"
 
-# `finish_task` 收尾时注入 actor 产出那一段的标题。**这个名字是跨仓契约**：observer 的
-# ROLE.md（住在宿主仓）里有一句「产出由 trailing prompt 注入在这个标题下」，用来告诉观察者
-# 去哪儿找证据——那一段产出不在重建的对话里（`finish_task` 是 SILENT 工具）。
-#
-# 改了这里而不改那边，ROLE 当场开始撒谎，且不会有任何报错。改造前 ROLE 里那个指向**不存在
-# 工具**的名字就是这样烂掉的（2026-09-22 到 09-28 之间一直在撒谎）。导出成常量，好让宿主侧的
-# `tests/test_default_observer_role.py` 拿它对 ROLE 文本做断言——文字契约只能靠这种方式钉。
+# Final output supplied to the observer when it is not already visible in history.
+# This heading is shared with the host's ROLE.md and historical prompt records.
 FINAL_OUTPUT_HEADING = "## Actor's Final Output"
 
 # 当前 task 的上一段复述在重建对话里冠的标题。渲染由 `assembler/sources/_history.py`

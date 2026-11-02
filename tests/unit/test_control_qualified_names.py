@@ -17,6 +17,6 @@ def test_qualified_name_constants() -> None:
 
 
 def test_delegate_task_docstring_uses_qualified_finish_name() -> None:
-    assert "control__finish_task" in (delegate_task.__doc__ or "")
+    assert "control__finish_task" not in (delegate_task.__doc__ or "")
     # no bare-name reference left to mislead the LLM
     assert "use finish_task" not in (delegate_task.__doc__ or "")

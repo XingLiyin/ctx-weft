@@ -6,7 +6,7 @@
 {%- endmacro %}
 
 {% macro dispatch_closed(failed, ref) -%}
-子任务 {{ ref }} 在此执行——结果：{% if failed %}失败{% else %}已完成{% endif %}。其执行过程内联在下方，以它自己的 {{ finish_task }} 和交付的最终答复收尾。
+子任务 {{ ref }} 在此执行——结果：{% if failed %}失败{% else %}已完成{% endif %}。其执行过程内联在下方，包含最终答复和任务收尾记录。
 {%- endmacro %}
 
 {% macro dispatch_cancelled(reason, ref) -%}
@@ -33,3 +33,9 @@
 [已由复核者关闭：本任务被判定为完成。请再发一条消息以开启新一轮。]
 {%- endmacro %}
 
+
+{% macro task_memory_record(record) -%}
+<task_{{ record.kind }} task_id="{{ record.task_id | e }}"{% if record.parent_task_id %} parent_task_id="{{ record.parent_task_id | e }}"{% endif %}{% if record.title %} title="{{ record.title | e }}"{% endif %}{% if record.outcome %} outcome="{{ record.outcome | e }}"{% endif %}>
+{% if record.kind == "start" %}{{ record.description }}{% else %}{{ record.body }}{% endif %}
+</task_{{ record.kind }}>
+{%- endmacro %}

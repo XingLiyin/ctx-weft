@@ -206,4 +206,4 @@ def test_the_two_semantics_no_longer_share_one_function():
     assert src.count("_park_for_interrupt(state, ctx") == 4
     # 让位那两个按**调用点**数，不按 "(state, ctx" 这个字面数：`finish_task` 那一处是多行写法
     # （轮号取 `state.extra[ACT_TURNS_USED_KEY]`，不借 for 循环泄漏出来的变量）。
-    assert src.count("_park_await_user(") - src.count("async def _park_await_user(") == 2
+    assert src.count("_park_await_user(") - src.count("async def _park_await_user(") == 1

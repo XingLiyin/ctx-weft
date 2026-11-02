@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ctx_weft.protocols import load_records
+from ctx_weft.core.assembler.task_memory import task_record_kind
 from ctx_weft.core.control.reducers import prune_view_for_snapshot, rebuild_view
 from ctx_weft.core.models.discriminators import TaskErrorCode
 from ctx_weft.protocols.events import EventType
@@ -98,8 +99,8 @@ async def test_observe_real_process_crash(tmp_path, snapshot, mode, cut):
                 assert len(publications) == 1
                 turns = await load_records(memory, MemoryAddress(session_id="crash-session", agent_id=root),
                     MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
-                assert sum(any(tc.get("name") == "control__finish_task" for tc in
-                    (turn.metadata.get("tool_calls") or [])) for turn in turns) == 1
+                assert sum(task_record_kind(turn) == "finish" for turn in turns) == 1
+
             done = [row.event.payload.get("observe_id") for row in rows
                     if row.event.type == EventType.OBSERVE_APPLIED]
             assert len(done) == 1 and done[0]

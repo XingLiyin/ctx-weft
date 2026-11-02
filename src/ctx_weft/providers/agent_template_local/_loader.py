@@ -4,8 +4,8 @@
   agents/
     default/
       SOUL.md    frontmatter(name/version/description/tools/loop_config) + body(actor soul)
-      ROLE.md    frontmatter(tools) + body(observer role)（可选；缺了 = 这个 agent 没有
-                 observer，见 core/loop/steps/observe.py::has_observe_role 的三个下游）
+      ROLE.md    frontmatter(tools) + body(observer evaluation principles)（可选；缺少时
+                 observe 仍运行，使用基础 Jinja 提示词判断任务结局）
 
 SOUL.md frontmatter 示例：
   ---

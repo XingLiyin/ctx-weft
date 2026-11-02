@@ -7,6 +7,10 @@ miniAgents 对齐版：
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import (
+    render_task_record, task_record_group, task_record_kind, task_record_metadata,
+)
+
 import logging
 from typing import Any
 
@@ -28,42 +32,21 @@ from ctx_weft.core.utils.verdict import (
     VERDICT_SUCCESS,
 )
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress, load_records
-from ctx_weft.protocols.capability import qualify
 
 logger = logging.getLogger(__name__)
 
 # v2 P3：旧类型清单常量（_OWN_CONV_TYPES/_FINAL_RAW_TYPES）随读侧 kind+role 谓词化删除。
 
 def _dispatch_running_ack(ref: str) -> str:
-    """派发对 tool 槽的 **running 态**：子任务真正 start 时写，close 时被 `_dispatch_ack` 终态替换。
-
-    与终态同理不含任何子任务产出——此刻也还没有。只说明「在跑」+ 导读下方的内联执行。
-
-    ``ref`` 是 `task_ref` 的规范称呼（标题 + id）。带 id 是必须的：这条会在重建对话里
-    **顶掉** delegate 时那条带 id 的活回执，只印标题的话模型下一回合就拿不到句柄了。
-    """
+    """Running acknowledgement for the child task; its body follows inline."""
     return runtime_prompt("dispatch_running", ref=ref)
 
 
 # 同 agent 派发：派发对 tool 结果（不含任何子任务结果，spec 2026-06-30 §2.5）。
 def _dispatch_ack(ref: str, outcome: str) -> str:
-    """同 agent 派发对的 tool 槽：终态 + 内联导读，**绝不含子任务产出**。
-
-    「不回填真实结果」是结构性的，不是保守：llm_gateway.reorder_tool_results_after_calls 会把
-    每条 tool result 强行挪到其 assistant tool_call 之后（OpenAI 兼容端点要求二者相邻，否则
-    400），所以本条**必定**渲染在子 body 之前——无论它的 timestamp 是什么。塞进真实产出就成了
-    「先结论、后过程」的倒叙，且与内联 body + 嵌套 finish 对重复。
-
-    但本条是在 close 时刻才写的，**已知 outcome**，故可以带两样位置正确的前向信息：
-      ① 终态——让 delegate_task 这个调用真正解析出结果，而不是永远停在「started」；
-      ② 导读——告诉读者子任务的完整执行内联在下方、以自己的 finish_task 收尾。导读同时解释了
-         紧随其后的 user 回合（子任务的 task_prompt，非用户发言），否则易被读成用户插话。
-    刻意保持指针级长度：每个派发都会复读一份。
-    """
+    """Terminal acknowledgement pointing to the inline child execution and closure."""
     return runtime_prompt("dispatch_closed", ref=ref, failed=outcome == "fail")
 
-# 派发框的叙事工具名（仅出现在重建历史的 tool_calls 里，非可调用能力）。
-START_TASK_NAME = qualify("control:start_task")
 
 
 # 归一可能 naive 的 datetime 为 aware(UTC)——事件重放 / DB 反序列化可能丢 tz，
@@ -98,6 +81,8 @@ def _frame_tool_call_id(frame, task) -> str | None:
     存量 legacy 记录经 `_legacy_dispatch` 归一后同样单调用。actor 的真实回合（可能并行多调用）
     落在 task 层，不进本视图。
     """
+    if frame.metadata.get("task_memory"):
+        return task_record_group(frame)
     tcs = frame.metadata.get("tool_calls") or []
     tcid = task.origin_tool_call_id
     if tcid and any(tc.get("id") == tcid for tc in tcs):
@@ -106,18 +91,13 @@ def _frame_tool_call_id(frame, task) -> str | None:
 
 
 async def _find_dispatch_frame(memory, parent_scope, task, provider_ctx):
-    """在 parent scope 只查已存在的派发框（属于本子任务的 assistant 回合），不铸新框。
-    找到 → 返回 `(框的时间戳（归一 aware UTC）, 配对 tool_call_id)`；没有 → None。
-
-    供 `_ensure_dispatch_frame`（find+create）与 `synthesize_cancel_closure`（find-only，
-    born-cancel 未铸框时整体跳过、不补铸）共用。
-    """
+    """Find an existing child start record, accepting legacy synthetic assistant frames."""
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
     existing = await load_records(memory,
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     frame = next(
-        (r for r in existing if r.role == "assistant" and _is_frame_of(r, task)),
+        (r for r in existing if (task_record_kind(r) == "start" or r.role == "assistant") and _is_frame_of(r, task)),
         None,
     )
     if frame is None:
@@ -128,32 +108,10 @@ async def _find_dispatch_frame(memory, parent_scope, task, provider_ctx):
 
 
 async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
-    """在 parent scope 铸一条属于本子任务的 assistant 派发框，返回
-    `(时间戳, 配对 tool_call_id)`——时间戳 == 配对 tool result 应锚定的时刻 = task
-    真正开始执行的时刻（started_at）。
+    """Persist one child start label at its first started_at (or created_at).
 
-    **框与 result 同锚 started_at**：二者共用同一时间戳 → 按 (timestamp, seq_no) 排序时严格相邻
-    （框先写 seq 小、result 后写 seq 大），且落在「任务开始执行」这条时间线上（而非派发时刻）。
-    started_at 晚于 actor 派发那一轮、早于子 body（body 由 driver 在启动后才 ingest USER_PROMPT），
-    故「派发框 → Task started/result → 子 body → finish 对」顺序天然成立、胶囊连续。回退 created_at
-    （历史/无 started_at）再回退 now，统一归一为 aware(UTC)。
-
-    delegate_task 与 delegate_plan 子统一走此铸框路径（gateway 不再为 delegate_task eager 写框——
-    eager 框只能带派发时刻，无法落在 started_at 时间线上，见 capability_gateway._record_invocation）。
-    框的 tool name 取 task.origin_tool_name（保真）：delegate_task 子 = 真名 control__delegate_task
-    （actor 确实调过）；delegate_plan 子 = None → 回退 START_TASK_NAME 叙事名（无 per-child 真实调用）。
-    幂等：若本子任务的框已存在（终态 finalize 单入本不会重入，此为防御），直接返回、不重复铸。
-    origin_task_id 留父（delegate_task 的父 = 派发 task；delegate_plan 子 = 留 plan task）；
-    **child_task_id 记子**——派发框与 ack 里唯一指向子任务的字段，close 时靠它认框。
-
-    配对 id 的取值序：框已存在 → 用框自己的；否则 task.origin_tool_call_id；再否则现生成一个。
-    生成是安全的：actor 真实的 delegate_task 调用**不入 memory**（gateway 对 DISPATCH 工具不写
-    对话，见 capability_gateway._record_invocation），这里的框和 ack 整对都是 core 合成的叙事，
-    id 只用于本对内部配对，从不与 actor 侧的 id 对账（delegate_plan 子任务本就是现生成的，
-    见 control_capability）。有了它，重启丢掉 origin_tool_call_id 的子任务也能正常闭合。
-
-    find + create：find 部分委托 `_find_dispatch_frame`（与 cancel closure 的 find-only 用法共用）。
-    """
+    Retain the existing timestamp and group on retry/recovery. child_task_id
+    identifies the dispatch after transient origin_tool_call_id has been lost."""
     found = await _find_dispatch_frame(memory, parent_scope, task, provider_ctx)
     if found is not None:
         # 幂等：框已铸（常态——ensure_dispatch_frame_at_start 在子 start 时就铸好了）。
@@ -166,25 +124,14 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     # 可能来自事件重放而为 naive（历史无 started_at 时回退 created_at 再回退 now）。
     ts = _as_utc(task.started_at or task.created_at or now_utc())
     tool_call_id = task.origin_tool_call_id or generate_id("tcall")
-    await memory.ingest(
-        MemoryEvent(
-            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
-            content="", timestamp=ts, role="assistant",
-            metadata={"origin_task_id": task.parent_task_id,
-                      "parent_task_id": task.parent_task_id,
-                      "child_task_id": task.id,
-                      "tool_calls": [{"id": tool_call_id,
-                                      "name": task.origin_tool_name or START_TASK_NAME,
-                                      # task_id 进**渲染面**：`child_task_id` 一直在
-                                      # 同一个 metadata 里，但那是给 `_is_frame_of` 用的
-                                      # 内部键，模型看不到——于是重建历史里「我派发了谁」
-                                      # 只剩标题，同名兄弟无法区分。
-                                      "input": {"task_id": task.id,
-                                                "title": task.title,
-                                                "description": task.description or ""}}]},
-        ),
-        provider_ctx,
-    )
+    await memory.ingest(MemoryEvent(
+        kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
+        content=render_task_record("start", task_id=task.id, parent_task_id=task.parent_task_id or "",
+                                   title=task.title, description=task.description or ""),
+        timestamp=ts, role="user",
+        metadata={"origin_task_id": task.parent_task_id, "parent_task_id": task.parent_task_id,
+                  "child_task_id": task.id, "task_memory": task_record_metadata("start", tool_call_id)},
+    ), provider_ctx)
     return ts, tool_call_id
 
 
@@ -199,27 +146,17 @@ def _parent_scope_of(state, task) -> MemoryAddress:
 
 async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, provider_ctx,
                                *, replace: bool, tool_call_id: str, operation_id: str = "") -> None:
-    """写派发对的 tool 槽（tool_call_id 由 `_ensure_dispatch_frame` / `_find_dispatch_frame`
-    给出，与框配对）。
+    """Atomically replace the running child acknowledgement with a labeled result.
 
-    replace=False（start）：已有配对 result 时 no-op —— retry/resume 会重跑 driver.run，
-      不能每轮都 churn 一遍、更不能改写原锚点。
-    replace=True（close）：先 supersede 旧的 running ack 再写终态。**必须替换而非新增**：
-      同一 tool_call_id 若有两条 active result，reorder_tool_results_after_calls 会把两条
-      都排到框之后，于是「在跑」和「已完成」并列出现。
-
-    旧 ack 的识别用 `_is_frame_of`（child_task_id 优先、存量回退 tool_call_id）而非只比
-    tool_call_id：重启后拿到的 id 可能是新生成的，只比 id 会漏掉 start 时那条 running ack，
-    于是两条 active result 并存。新写的 ack 同样带 child_task_id，start/close/取消三个时刻
-    共用本函数，字段一路带下去不会在替换时掉。
-    """
+    Start is idempotent; close/cancel supersedes the previous result. The group
+    and timestamp remain anchored to the start record, including after recovery."""
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
     recs = await load_records(memory,
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
         MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     stale = [r.id for r in recs
-             if r.role == "tool"
-             and (_is_frame_of(r, task) or r.metadata.get("tool_call_id") == tool_call_id)]
+             if (task_record_kind(r) == "result" or r.role == "tool")
+             and (_is_frame_of(r, task) or task_record_group(r) == tool_call_id)]
     from ctx_weft.core.loop.steps.observe import record_id
     result_id = record_id(operation_id, "dispatch_result", task.id, parent_scope)
     if result_id and result_id in stale:
@@ -230,10 +167,11 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
     await memory.fold(stale, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
-            content=content, timestamp=ts, role="tool", id=result_id,
+            content=render_task_record("result", task_id=task.id, title=task.title, body=content),
+            timestamp=ts, role="user", id=result_id,
             metadata={"origin_task_id": task.parent_task_id,
                       "child_task_id": task.id,
-                      "tool_call_id": tool_call_id},
+                      "task_memory": task_record_metadata("result", tool_call_id)},
         ),
     ], provider_ctx)
 
@@ -393,7 +331,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     # 判据只看 parent_task_id + mem_content：origin_tool_call_id 是瞬态字段，重启重建后为 None，
     # 曾经把它写进条件 → 跨重启收尾的子任务整段 bubble 被跳过（父的 ack 停在 running、finish 对
     # 不合成 = 胶囊丢失），而末段 raw 照删。配对 id 现由框自己给出，不再需要它当门槛。
-    if task.parent_task_id and mem_content and not getattr(task, "switched_to_task_id", ""):
+    if task.parent_task_id and not getattr(task, "switched_to_task_id", ""):
         parent_scope = _parent_scope_of(state, task)
         # 框通常已由 ensure_dispatch_frame_at_start（子 start 时）铸好，_ensure_dispatch_frame 在此
         # 幂等命中；仅对没走过 start 钩子的路径（旧数据 / start 与 close 之间崩溃）才真正补铸。
@@ -432,7 +370,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                 completed_at=getattr(state, "extra", {}).get("observe_completion", {}).get("completed_at", ""))
 
     # 2) 自身 finish 对：own root（session 根或跨 agent 根）close 时无条件在 own scope 合成
-    if (is_own_root or getattr(task, "switched_to_task_id", "")) and mem_content:
+    if is_own_root or getattr(task, "switched_to_task_id", ""):
         await _synthesize_dispatch_pair(memory, state.scope, task, act_recap, task_summary, outcome,
                                         ctx.provider_ctx, raw_fold_scope=raw_fold_scope,
                                         final_reply=final_reply, preserve_raw=short,
@@ -534,9 +472,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     # 占位 close（raw_fold_scope 非 None = 末段 raw 还没折）先写两槽：答复此刻仍在 raw 里，
     # 提前塞锚点会让它出现两遍；等 bg 真报告落地、raw 真被折时由 replace_finish_report 升三槽。
     embed_reply = "" if raw_fold_scope is not None else final_reply
-    # 反转契约（spec 2026-07-01）：finish_task 退化为无参收尾标记（答复不再塞进 input.result）。
-    # 槽位形态见 build_finish_slots：有答复 → recap / 答复+finish_task / 报告 三槽，
-    # 无答复 → recap+finish_task / 报告 两槽。
+    # Closure records carry process recap, optional final reply and terminal status.
     slots = build_finish_slots(
         scope=scope, task_id=task.id, parent_task_id=task.parent_task_id,
         title=task.title or "", outcome=outcome, act_recap=act_recap,
@@ -548,8 +484,23 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
               "outcome": outcome, "slot_count": len(slots), "observe_id": operation_id}
     for index, event in enumerate(slots):
         event.metadata["finish_policy"] = policy
-        event.id = record_id(operation_id, "finish", scope, task.id, index)
-        await memory.ingest(event, provider_ctx)
+        event.id = record_id(operation_id, "finish_v1", scope, task.id, index)
+    # A pre-upgrade producer may already have written part of its old closure.
+    # Replace those rows atomically instead of retaining an orphan legacy pair.
+    existing = await load_records(memory,
+        MemoryAddress(session_id=scope.session_id, agent_id=scope.agent_id),
+        MemoryScope.AGENT, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
+    legacy = [r.id for r in existing
+              if r.metadata.get("origin_task_id") == task.id
+              and not r.metadata.get("task_memory")
+              and (task_record_group(r) == tool_call_id or
+                   operation_id and r.metadata.get("finish_policy", {}).get("observe_id") == operation_id)]
+    if legacy:
+        await memory.fold(legacy, slots, provider_ctx)
+    else:
+        for event in slots:
+            await memory.ingest(event, provider_ctx)
+
 
 
 
@@ -566,8 +517,7 @@ async def apply_task_close(
     「派发框 + 停在 running 的 ack」，拿不到任何产出。调用方见
     `steps.observe._out_of_band_finalize`。
 
-    两道 `mem_content` 门与拆出来之前逐字相同：close 要 `terminal and mem_content`
-    （terminal 由调用方判），blackboard 要 `outcome == "success" and mem_content`。
+    终态总是写入收尾记录；只有真实内容非空的 success 才发布黑板。
     mem_content 在这里现算（`task.outputs` + `task_summary or act_recap`），两个调用方
     因此不会各算一份、算歪一份。
     """
@@ -576,12 +526,10 @@ async def apply_task_close(
     if "BlackboardPublished:" in getattr(state, "extra", {}).get("observe_effects", []):
         return events
     mem_content = _build_memory_content(task.outputs, task_summary or act_recap)
-    if not mem_content:
-        return events
 
     # 统一 close：bubble / 自身残留 / 软删自身对话 / GC 子树（spec 2026-06-23）。
-    # has_llm_summary：规则 observe 占位 close 不即折末段 raw，等 bg 真摘要落地后补删
-    # （spec 2026-07-20 延迟折叠）。带外路径恒 True——判决方就是 LLM，真摘要已在手。
+    # Only a genuine recap permits discarding the raw segment. Mechanical success
+    # records the terminal status while retaining execution evidence.
     events.extend(await finalize_task_memory(
         ctx.memory, state, task, mem_content, outcome, ctx,
         act_recap=act_recap, task_summary=task_summary,
@@ -589,7 +537,7 @@ async def apply_task_close(
     ))
 
     # success 时发布 BLACKBOARD，供任何 agent 按 task_id 精确召回
-    if outcome == "success":
+    if outcome == "success" and mem_content:
         await ctx.memory.ingest(
             MemoryEvent(
                 kind=MemoryKind.PUBLICATION, scope=MemoryScope.SESSION,
@@ -614,29 +562,9 @@ async def apply_task_close(
 
 
 def task_finalized_event(state, task, *, outcome: str):
-    """`TASK_FINALIZED`：结局 + 交付物出核。**每条收尾路径都要发一次**。
+    """Publish the actual final answer and optional legacy deliverables summary.
 
-    交付物分两段送：`output` 是答复本身，`summary` 是 agent 给 reviewer 的自评清单
-    （`finish_task` 的 deliverables_summary）。**必须分开**——host 打印「最终答复」只该拿
-    output；此前只送 task_id/outcome，host 的 tasks 表 outputs_json / error 两列因此恒空。
-
-    判据以 `task.outputs` 为准绳，不直接读 state.extra，两条边界都在这一句里：
-    ① retry 驳回：observer 判本段不合格会把 task.outputs 置空（FinalizeStep 的 retry 分支、
-       task/manager.py 的 requeue 各有一次），但 state.extra 里还留着上一轮的废稿；直接读
-       extra 会让 host 把一份已被驳回的稿子写进 tasks 表。所以 deliverable 为空 → 两段一起
-       归空。
-    ② extra 空但 outputs 有货：多段任务的末段可能没正文，recap 重启路径更是根本没跑过
-       ActStep（state.extra 全空）——这时 task.outputs 才是真答复，回落它。
-    `getattr(..., None) or {}` 只为容忍用 SimpleNamespace 造 state 的单测替身
-    （test_finalize_fail_reason / test_subtask_nesting），生产路径必命中真字段。
-
-    output 送**纯文本**（_output_text 提取），不送 content parts：这个字段的消费者是
-    tasks.outputs_json 与 CLI 打印，两个都是文本场景；多模态交付物有 blob store 那条正路，
-    不该让事件载荷背图片。
-
-    **`retry` 也要发**（拆出来时差点漏掉）：那时 outputs 刚被置空，这一条把 host 投影里
-    上一次的 outputs_json 清掉。只在 terminal 时发会留下一份已被驳回的稿子。
-    """
+    task.outputs is authoritative, so rejected drafts are never published."""
     extra = getattr(state, "extra", None) or {}
     deliverable = _output_text(task.outputs)
     return make_event(

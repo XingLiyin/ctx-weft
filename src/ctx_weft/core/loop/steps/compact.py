@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+
 import dataclasses
 import inspect
 import logging
@@ -289,9 +291,12 @@ def _split_for_collapse(recs: list, keep_last: int) -> tuple[list, list]:
         owner = next((i for i in range(cut) if recs[i].role == "assistant" and any(
             tc.get("id") in kept_call_ids for tc in (recs[i].metadata.get("tool_calls") or []))),
             None)
-        if owner is None:
+        groups = {task_record_group(r) for r in recs[cut:] if task_record_group(r)}
+        group_owner = next((i for i in range(cut) if task_record_group(recs[i]) in groups), None)
+        candidates = [i for i in (owner, group_owner) if i is not None]
+        if not candidates:
             return recs[:cut], recs[cut:]
-        cut = owner
+        cut = min(candidates)
 
 
 def _worth_collapsing(fold: list) -> bool:
@@ -306,7 +311,8 @@ def _worth_collapsing(fold: list) -> bool:
     """
     rendered = _rendered_only(fold)
     first_user = next((r for r in rendered
-                       if r.role == "user" and r.kind is MemoryKind.CONVERSATION_TURN), None)
+                       if r.role == "user" and r.kind is MemoryKind.CONVERSATION_TURN
+                       and not task_record_kind(r)), None)
     return any(r is not first_user for r in rendered)
 
 
@@ -355,7 +361,7 @@ async def collapse_task_layer(
     # 「原始消息」节 = 折区最早一条 user 回合的原文（已坍缩过则取其原始节，保持有界）
     original = ""
     for r in fold:
-        if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user":
+        if r.kind is MemoryKind.CONVERSATION_TURN and r.role == "user" and not task_record_kind(r):
             text = r.content if isinstance(r.content, str) else content_to_text(r.content)
             original = _original_section(text)
             break
@@ -424,11 +430,16 @@ def _dispatch_finish_sets(recs) -> tuple[set, set]:
     has_dispatch: set = set()
     has_finish: set = set()
     for r in recs:
-        if r.kind is not MemoryKind.CONVERSATION_TURN or r.role != "assistant":
+        if r.kind is not MemoryKind.CONVERSATION_TURN:
             continue
         oid = r.metadata.get("origin_task_id")
         if oid is None:
             continue
+        kind = task_record_kind(r)
+        if kind == "start":
+            has_dispatch.add(oid)
+        elif kind == "finish":
+            has_finish.add(oid)
         for tc in (r.metadata.get("tool_calls") or []):
             name = str(tc.get("name", ""))
             if name.endswith("finish_task"):
@@ -470,7 +481,8 @@ async def _count_root_residues(state: LoopState, ctx: LoopContext) -> int:
     has_dispatch, has_finish = _dispatch_finish_sets(recs)
     # has_result：该 origin 有返回结果（result/tool 回合）——派发型 root task 的「完成」标志。
     has_result = {r.metadata.get("origin_task_id") for r in recs
-                  if r.role == "tool" and r.metadata.get("origin_task_id") is not None}
+                  if (r.role == "tool" or task_record_kind(r) == "result")
+                  and r.metadata.get("origin_task_id") is not None}
     for r in recs:
         oid = r.metadata.get("origin_task_id")
         if oid is None:
@@ -544,7 +556,8 @@ async def fold_root_experience(
     # 完成的顶层单元（保留/折叠的对象）= 同 agent 亲做（has_finish）或派给别的 agent 且结果已回
     # （has_result：有 result/tool 回合）。仅「派出但结果未回」才是真·在途 active，不作可折胶囊。
     has_result = {r.metadata.get("origin_task_id") for r in recs
-                  if r.role == "tool" and r.metadata.get("origin_task_id") is not None}
+                  if (r.role == "tool" or task_record_kind(r) == "result")
+                  and r.metadata.get("origin_task_id") is not None}
     active = has_dispatch - has_finish - has_result
     current = getattr(state.scope, "task_id", None)  # 当前正在跑的 task 不折
     top = [oid for oid, pid in parent_of.items()
@@ -716,7 +729,8 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -
     origins = set(parent_of)
     # 与 fold_root_experience 同口径：完成单元 = has_finish 或 has_result（结果已回）；当前 task 除外。
     has_result = {r.metadata.get("origin_task_id") for r in recs
-                  if r.role == "tool" and r.metadata.get("origin_task_id") is not None}
+                  if (r.role == "tool" or task_record_kind(r) == "result")
+                  and r.metadata.get("origin_task_id") is not None}
     active = has_dispatch - has_finish - has_result
     current = getattr(state.scope, "task_id", None)
     top = [oid for oid, pid in parent_of.items()

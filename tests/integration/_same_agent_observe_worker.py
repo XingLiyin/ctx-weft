@@ -44,8 +44,7 @@ class ChildLLM(_RouterLLM):
             return super().complete(request, stream)
         self._act_calls += 1
         answer = "CHILD FINAL ANSWER" if self._act_calls == 2 else "ROOT FINAL ANSWER"
-        return self._stream(MockResponse(text=answer, tool_calls=[ToolCall(
-            id=self._id("finish"), name="control__finish_task", arguments={})]), request)
+        return self._stream(MockResponse(text=answer, tool_calls=[]), request)
 
 
 def make_child_runtime(store, memory, size, recovering=False):

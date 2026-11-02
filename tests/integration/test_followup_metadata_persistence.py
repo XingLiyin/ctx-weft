@@ -49,7 +49,7 @@ async def test_followup_metadata_survives_cold_recovery(tmp_path, snapshot_phase
 
             # Keep the follow-up waiting for the user so cold owner materialization
             # must restore a complete, nonterminal task, including its metadata.
-            llm._observer_verdict = None
+            llm._observer_verdict = "continue"
             second = await rt.send_message(first.agent_id, "Second request", session_id=sid)
             task = tm.get_task(second.task_id)
             await wait_until(lambda: task.title == "Task 2" and task.status == "AWAITING_HUMAN"

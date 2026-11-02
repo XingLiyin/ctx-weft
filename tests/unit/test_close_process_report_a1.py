@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group, render_task_record
+
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -64,14 +66,14 @@ def _make_task(task_id: str = "t1", agent_id: str = "ag1",
 async def _get_finish_tool(mem: InMemoryMemoryProvider, scope: MemoryAddress) -> MemoryEvent | None:
     """取 agent scope 内最新的 tool role AGENT_CONVERSATION_TURN（finish 记录）。"""
     recs = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
-    tool_recs = [r for r in recs if r.role == "tool"]
+    tool_recs = [r for r in recs if task_record_kind(r) == "finish"]
     return tool_recs[0] if tool_recs else None  # recall_recent returns newest-first
 
 
 async def _get_finish_asst(mem: InMemoryMemoryProvider, scope: MemoryAddress) -> MemoryEvent | None:
     """取 agent scope 内最新的 assistant role AGENT_CONVERSATION_TURN（finish 记录）。"""
     recs = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
-    asst_recs = [r for r in recs if r.role == "assistant"]
+    asst_recs = [r for r in recs if task_record_kind(r) == "recap"]
     return asst_recs[0] if asst_recs else None
 
 
@@ -98,12 +100,12 @@ async def test_a1_slot_hit_uses_background_report() -> None:
 
     finish_tool = await _get_finish_tool(mem, asc)
     assert finish_tool is not None, "finish tool record must exist"
-    assert finish_tool.content == "[task: '测试任务' (t1)] 好报告_sum", (
+    assert finish_tool.content == render_task_record("finish", task_id="t1", title="测试任务", outcome="success", body="好报告_sum"), (
         f"slot hit: finish tool content must be '好报告_sum' (+ task marker); got {finish_tool.content!r}"
     )
     finish_asst = await _get_finish_asst(mem, asc)
     assert finish_asst is not None, "finish assistant record must exist"
-    assert finish_asst.content.startswith("好报告_act"), (
+    assert "好报告_act" in finish_asst.content, (
         f"slot hit: finish assistant content must be act_recap '好报告_act'; got {finish_asst.content!r}"
     )
 
@@ -129,13 +131,13 @@ async def test_a1_placeholder_then_async_replace() -> None:
     finish_tool_placeholder = await _get_finish_tool(mem, asc)
     assert finish_tool_placeholder is not None, "placeholder finish tool must exist"
     assert finish_tool_placeholder.content, "placeholder tool content must be non-empty"
-    placeholder_tool_call_id = finish_tool_placeholder.metadata.get("tool_call_id")
+    placeholder_tool_call_id = task_record_group(finish_tool_placeholder)
     assert placeholder_tool_call_id, "placeholder finish tool must have tool_call_id"
 
     finish_asst_placeholder = await _get_finish_asst(mem, asc)
     assert finish_asst_placeholder is not None, "placeholder finish assistant must exist"
     # 反转契约：finish 对 assistant 槽 = act_recap（过程复述，≠ 答复）
-    assert finish_asst_placeholder.content.startswith("占位 act_recap"), (
+    assert "占位 act_recap" in finish_asst_placeholder.content, (
         f"placeholder assistant content must be '占位 act_recap'; got {finish_asst_placeholder.content!r}"
     )
 
@@ -150,8 +152,8 @@ async def test_a1_placeholder_then_async_replace() -> None:
 
     # 旧两条占位记录应被 supersede（不再出现）
     all_recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
-    active_tool_recs = [r for r in all_recs if r.role == "tool"]
-    active_asst_recs = [r for r in all_recs if r.role == "assistant"]
+    active_tool_recs = [r for r in all_recs if task_record_kind(r) == "finish"]
+    active_asst_recs = [r for r in all_recs if task_record_kind(r) == "recap"]
     assert len(active_tool_recs) == 1, (
         f"after replace, exactly 1 active finish tool record expected; got {len(active_tool_recs)}: "
         f"{[r.content for r in active_tool_recs]}"
@@ -163,15 +165,15 @@ async def test_a1_placeholder_then_async_replace() -> None:
     new_finish_asst = active_asst_recs[0]
     # 归属前缀须**存活**替换：_replace_finish_report 整条重写 tool 槽，漏传 title 就会把
     # finalize 合成占位时打上的 `[task: …]` 标记抹掉。
-    assert new_finish_tool.content == "[task: '测试任务' (t1)] 好报告_sum", (
+    assert new_finish_tool.content == render_task_record("finish", task_id="t1", title="测试任务", outcome="success", body="好报告_sum"), (
         f"new finish tool content must be '好报告_sum' (+ task marker preserved across the "
         f"bg replace); got {new_finish_tool.content!r}"
     )
     # 反转契约：finish 对 assistant 槽 = act_recap（bg 刷新后的 "好报告_act"，≠ 答复）
-    assert new_finish_asst.content.startswith("好报告_act"), (
+    assert "好报告_act" in new_finish_asst.content, (
         f"new finish assistant content must be act_recap '好报告_act'; got {new_finish_asst.content!r}"
     )
-    assert new_finish_tool.metadata.get("tool_call_id") == placeholder_tool_call_id, (
+    assert task_record_group(new_finish_tool) == placeholder_tool_call_id, (
         "replaced record must keep same tool_call_id for proper pair matching"
     )
 
@@ -239,14 +241,14 @@ async def test_slot_hit_replaces_report_no_raw_mirror() -> None:
     # agent 层从不写 final_segment_raw 镜像（task-resident）
     assert [r for r in recs if r.metadata.get("final_segment_raw")] == []
     # agent 层只有 finish 对（无 body 镜像）
-    assert len(recs) == 2 and {r.role for r in recs} == {"assistant", "tool"}
+    assert len(recs) == 2 and {r.role for r in recs} == {"user"}
     finish_tool = await _get_finish_tool(mem, asc)
-    assert finish_tool.content == "[task: '测试任务' (t1)] 真实段总结", (
+    assert finish_tool.content == render_task_record("finish", task_id="t1", title="测试任务", outcome="success", body="真实段总结"), (
         f"slot hit: tool content must be '真实段总结' (+ task marker); got {finish_tool.content!r}"
     )
     finish_asst = await _get_finish_asst(mem, asc)
     # 反转契约：finish 对 assistant 槽 = act_recap（"真实段_act"，≠ 答复）
-    assert finish_asst.content.startswith("真实段_act"), (
+    assert "真实段_act" in finish_asst.content, (
         f"slot hit: assistant content must be act_recap '真实段_act'; got {finish_asst.content!r}"
     )
     # user 锚点 + 最终段 raw 留 task 层
@@ -271,7 +273,7 @@ async def test_degraded_keeps_task_layer_raw_body() -> None:
     recs = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
     # 无 final_segment_raw 镜像（agent 层不再镜像 body）
     assert [r for r in recs if r.metadata.get("final_segment_raw")] == []
-    assert len(recs) == 2 and {r.role for r in recs} == {"assistant", "tool"}
+    assert len(recs) == 2 and {r.role for r in recs} == {"user"}
     # 最终段 raw body 留 task 层
     body = await mem.recall_recent(tsc, [T.LLM_RESPONSE, T.TOOL_RESULT], 500, _pctx())
     assert len(body) == 2, "降级时最终段 raw body 留 task 层（task-resident）"
@@ -294,31 +296,22 @@ async def test_synthesize_dispatch_pair_two_segments() -> None:
     await _synthesize_dispatch_pair(mem, asc, task, "本段我做了 A、B", "整段：A→B→验证，已就绪", "success", _pctx())
 
     turns = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 50, _pctx())
-    asst = [r for r in turns if r.role == "assistant"]
-    tool = [r for r in turns if r.role == "tool"]
+    asst = [r for r in turns if task_record_kind(r) == "recap"]
+    tool = [r for r in turns if task_record_kind(r) == "finish"]
     # assistant 槽 = act_recap（过程复述）；答复由内联 body / blackboard 承载，不在此重复
-    assert asst and asst[0].content.startswith("本段我做了 A、B")
-    call = asst[0].metadata["tool_calls"][0]
-    assert call["name"].endswith("finish_task")
-    # finish_task 退化为无参收尾标记（不再塞 input.result）
-    assert call["input"] == {}
-    # tool 槽 = `[task: '<title>' (<id>)] ` 归属前缀 + task_summary（process report）
-    assert tool and tool[0].content == "[task: '测试任务' (t1)] 整段：A→B→验证，已就绪"
-    # 同 tool_call_id、同 timestamp（相邻）
-    tcid = asst[0].metadata["tool_calls"][0]["id"]
-    assert tool[0].metadata["tool_call_id"] == tcid
-    assert asst[0].timestamp == tool[0].timestamp
+    assert asst and "本段我做了 A、B" in asst[0].content
+    assert tool and "整段：A→B→验证，已就绪" in tool[0].content
+    assert task_record_group(asst[0]) == task_record_group(tool[0])
+    assert asst[0].timestamp < tool[0].timestamp
+    assert all(not r.metadata.get("tool_calls") for r in turns)
+
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
-def test_finish_tool_text_falls_back():
-    """_finish_tool_text 优先用 task_summary；空则退 act_recap；都空给占位（不掺 outputs）。"""
-    from ctx_weft.core.loop.task_memory_fold import _finish_tool_text
-    # task_summary（process report）优先；空则退 act_recap；都空给占位（不掺 outputs——outputs 在 call 入参）
-    assert _finish_tool_text("综合 process report", "recap", "success") == "综合 process report"
-    assert _finish_tool_text("", "recap", "success") == "recap"
-    assert _finish_tool_text("", "", "success") == "(nothing further to report for this segment)"
-    assert _finish_tool_text("", "", "fail") == "(no final output)"
+def test_empty_close_has_no_fabricated_report():
+    text = render_task_record("finish", task_id="t1", outcome="success", body="")
+    assert text == '<task_finish task_id="t1" outcome="success">\n\n</task_finish>'
+
 
 
 async def test_partial_finish_is_not_ready_and_replay_is_idempotent(monkeypatch):

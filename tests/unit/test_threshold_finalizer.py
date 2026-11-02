@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+
 from ctx_weft.core.utils.task_ref import task_ref
 
 import pytest
@@ -84,13 +86,13 @@ async def test_root_finish_pair_written_on_own_scope() -> None:
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await memory.recall_recent(scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
 
-    assistant = [r for r in recs if r.role == "assistant"]
-    tool = [r for r in recs if r.role == "tool"]
+    assistant = [r for r in recs if task_record_kind(r) == "recap"]
+    tool = [r for r in recs if task_record_kind(r) in {"finish", "result"}]
     assert len(assistant) == 1
     assert len(tool) == 1
     tool_calls = assistant[0].metadata.get("tool_calls") or []
-    assert any(tc.get("name", "").endswith("finish_task") for tc in tool_calls)
-    assert "[outcome=fail]" in tool[0].content
+    assert tool_calls == []
+    assert 'outcome="fail"' in tool[0].content
     assert "Failure threshold hit" in tool[0].content
     assert "1) c1: boom1" in tool[0].content
     assert "2) c2: boom2" in tool[0].content
@@ -108,7 +110,7 @@ async def test_ack_task_running_ack_replaced_with_cancelled_text() -> None:
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     before = await memory.recall_recent(
         parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
-    tool_before = [r for r in before if r.role == "tool"]
+    tool_before = [r for r in before if task_record_kind(r) in {"finish", "result"}]
     assert len(tool_before) == 1
     assert "is running now" in tool_before[0].content
 
@@ -116,7 +118,7 @@ async def test_ack_task_running_ack_replaced_with_cancelled_text() -> None:
 
     after = await memory.recall_recent(
         parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
-    tool_after = [r for r in after if r.role == "tool"]
+    tool_after = [r for r in after if task_record_kind(r) in {"finish", "result"}]
     assert len(tool_after) == 1
     assert "was cancelled mid-run" in tool_after[0].content
     assert "session failure threshold hit" in tool_after[0].content
@@ -140,7 +142,7 @@ async def test_root_none_only_replaces_ack() -> None:
     # 但 root finish 对是 assistant + tool 的一对 finish_task 调用；没写 root finish 对时不应出现
     # finish_task tool_call。
     recs = await memory.recall_recent(root_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
-    assistant = [r for r in recs if r.role == "assistant"
+    assistant = [r for r in recs if task_record_kind(r) == "recap"
                  and any(tc.get("name", "").endswith("finish_task")
                          for tc in (r.metadata.get("tool_calls") or []))]
     assert assistant == []
@@ -172,7 +174,7 @@ async def test_one_bad_ack_task_does_not_block_others() -> None:
     ctx = ProviderContext(session_id="s1", tenant_id="default")
     recs = await memory.recall_recent(
         parent_scope, [MemoryEventType.AGENT_CONVERSATION_TURN], 2000, ctx)
-    tool_recs = {r.metadata.get("tool_call_id"): r for r in recs if r.role == "tool"}
+    tool_recs = {task_record_group(r): r for r in recs if task_record_kind(r) in {"finish", "result"}}
     assert "was cancelled mid-run" in tool_recs["call-good"].content
     # bad 的写失败：旧 running ack 被替换失败前置的 supersede 步骤可能已执行，但至少不应崩溃
     # 整个流程；good 分支已验证不受影响即达成 best-effort 目标。

@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind
+
 import asyncio
 import dataclasses
 
@@ -124,8 +126,7 @@ class _RecordingRouterLLM(MockLLMAdapter):
             # 子 agent 的 act：正文=交付物（研究成果），同一回合调 finish_task 收尾
             return self._stream(MockResponse(
                 text=CHILD_RESULT,
-                tool_calls=[ToolCall(id=self._id("sub"), name="control__finish_task",
-                                     arguments={})],
+                tool_calls=[],
             ), request)
 
         # root 的 act
@@ -142,8 +143,7 @@ class _RecordingRouterLLM(MockLLMAdapter):
             ]), request)
         return self._stream(MockResponse(
             text="root done",
-            tool_calls=[ToolCall(id=self._id("fin"), name="control__finish_task",
-                                 arguments={})],
+            tool_calls=[],
         ), request)
 
 
@@ -251,7 +251,7 @@ async def test_subagent_runs_its_own_loop_and_result_flows_back():
     agent_recs = await load_records(memory, parent_addr, MemoryScope.AGENT, pctx)
     child_results = [
         r for r in agent_recs
-        if r.role == "tool" and (r.metadata or {}).get("child_task_id") == child_task.id
+        if task_record_kind(r) == "result" and (r.metadata or {}).get("child_task_id") == child_task.id
     ]
     assert child_results, (
         f"no dispatch tool record for child {child_task.id} in parent agent scope; "

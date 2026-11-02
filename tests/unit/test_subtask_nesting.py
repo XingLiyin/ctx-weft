@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+
 from ctx_weft.core.utils.task_ref import task_ref
 
 from datetime import UTC, datetime, timedelta
@@ -103,14 +105,12 @@ async def test_same_agent_child_mints_frame_and_writes_ack() -> None:
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
     from ctx_weft.core.loop.steps.finalize import _dispatch_ack
     # 铸出的派发框（携 oc1，真名 delegate_task），锚 started_at
-    frame = [r for r in turns if r.role == "assistant"
-             and any(tc.get("id") == "oc1" and tc.get("name") == DELEGATE_TASK_NAME
-                     for tc in (r.metadata.get("tool_calls") or []))]
+    frame = [r for r in turns if task_record_kind(r) == "start" and task_record_group(r) == 'oc1']
     assert frame, "finalize 须为 delegate_task 子铸一条派发框（真名 delegate_task）"
     assert frame[0].timestamp == started, "框须锚 started_at"
     # 配对静态 ack，同锚 started_at → 与框同时间戳（严格相邻）
-    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
-    assert ack and ack[0].content == _dispatch_ack(task_ref(child), "success"), (
+    ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "oc1"]
+    assert ack and _dispatch_ack(task_ref(child), "success") in ack[0].content, (
         f"§2.5: static ack content must be {_dispatch_ack(task_ref(child), 'success')!r}; got {[r.content for r in ack]}"
     )
     assert ack[0].timestamp == started == frame[0].timestamp, (
@@ -140,7 +140,6 @@ async def test_start_hook_mints_frame_and_running_ack_at_started_at() -> None:
     自己的来历，那条 task_prompt 的 user 回合不再像用户凭空插话。
     """
     from ctx_weft.core.loop.steps.finalize import ensure_dispatch_frame_at_start
-    from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
 
     mem = InMemoryMemoryProvider()
     started = _BASE + timedelta(seconds=5)
@@ -149,10 +148,8 @@ async def test_start_hook_mints_frame_and_running_ack_at_started_at() -> None:
     await ensure_dispatch_frame_at_start(_state(child, _sc("c1"), LoopConfig()), _loop_ctx(mem))
 
     turns = await _turns(mem, _sc("p1"))
-    frame = [r for r in turns if r.role == "assistant"
-             and any(tc.get("id") == "oc1" and tc.get("name") == DELEGATE_TASK_NAME
-                     for tc in (r.metadata.get("tool_calls") or []))]
-    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
+    frame = [r for r in turns if task_record_kind(r) == "start" and task_record_group(r) == 'oc1']
+    ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "oc1"]
     assert frame, "start 时须铸出派发框"
     assert ack, "start 时须写配对 running ack（否则框悬挂、被 legalize 剥掉）"
     assert frame[0].timestamp == started == ack[0].timestamp, "框与 ack 须同锚 started_at"
@@ -183,8 +180,8 @@ async def test_start_hook_idempotent_across_reruns() -> None:
     await ensure_dispatch_frame_at_start(state, lctx)
 
     turns = await _turns(mem, _sc("p1"))
-    assert len([r for r in turns if r.role == "assistant"]) == 1, f"框不得重复；got {turns}"
-    assert len([r for r in turns if r.role == "tool"]) == 1, f"ack 不得重复；got {turns}"
+    assert len([r for r in turns if task_record_kind(r) == "start"]) == 1, f"框不得重复；got {turns}"
+    assert len([r for r in turns if task_record_kind(r) == "result"]) == 1, f"ack 不得重复；got {turns}"
     assert turns[-1].timestamp == started, "重跑不得改写原锚点"
 
 
@@ -208,9 +205,9 @@ async def test_close_replaces_running_ack_with_terminal() -> None:
     )
 
     acks = [r for r in await _turns(mem, _sc("p1"))
-            if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
+            if task_record_kind(r) == "result" and task_record_group(r) == "oc1"]
     assert len(acks) == 1, f"同一 tool_call_id 只能有一条 active result；got {[a.content for a in acks]}"
-    assert acks[0].content == _dispatch_ack(task_ref(child), "success")
+    assert _dispatch_ack(task_ref(child), "success") in acks[0].content
     assert "running" not in acks[0].content, "running 态须被终态替换掉"
     assert acks[0].timestamp == started, "替换后仍须锚 started_at（与框相邻）"
 
@@ -242,9 +239,8 @@ async def test_close_ack_stays_co_anchored_with_frame_after_retry() -> None:
     )
 
     turns = await _turns(mem, _sc("p1"))
-    frame = [r for r in turns if r.role == "assistant"
-             and any(tc.get("id") == "oc1" for tc in (r.metadata.get("tool_calls") or []))]
-    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
+    frame = [r for r in turns if task_record_kind(r) == "start" and task_record_group(r) == 'oc1']
+    ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "oc1"]
     assert len(frame) == 1 and len(ack) == 1
     assert frame[0].timestamp == first_start, "框须保持首次 started_at，不被 retry 改写"
     assert ack[0].timestamp == frame[0].timestamp, (
@@ -282,12 +278,12 @@ async def test_same_agent_child_finish_pair_written_into_parent_scope() -> None:
     )
 
     # task-resident: NO body mirror (no user anchor)
-    assert not any(r.role == "user" for r in child_turns), (
+    assert all(task_record_kind(r) in {"recap", "finish"} for r in child_turns), (
         "task-resident: child finish pair must NOT mirror body (no user anchor)"
     )
 
     # must include finish pair: tool role (content = act_recap fallback since task_summary="")
-    finish_tool = [r for r in child_turns if r.role == "tool"]
+    finish_tool = [r for r in child_turns if task_record_kind(r) == "finish"]
     assert finish_tool, "expected finish-pair tool turn in parent scope capsule"
     assert finish_tool[0].content, (
         f"finish tool content must be non-empty, got: {finish_tool[0].content!r}"
@@ -327,12 +323,12 @@ async def test_cross_agent_child_bubble_is_conversation_turn() -> None:
     # dispatch result == 普通 conversation turn（tool），配对 oc2、归 delegating task(p1) 单元
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
     result = [r for r in turns
-              if r.role == "tool" and r.metadata.get("tool_call_id") == "oc2"]
+              if task_record_kind(r) == "result" and task_record_group(r) == "oc2"]
     assert result, "expected dispatch result as AGENT_CONVERSATION_TURN (tool) paired with oc2"
     assert result[0].metadata.get("origin_task_id") == "p1", (
         "dispatch result 须归 delegating task 单元（与 finish 对同 origin、同命运）"
     )
-    assert result[0].content == mem_content, (
+    assert mem_content in result[0].content, (
         f"expected full mem_content (black box), got: {result[0].content!r}"
     )
     # 不再写 legacy TASK_DISPATCH_RESULT enum
@@ -365,14 +361,12 @@ async def test_same_agent_close_mints_frame_and_ack_co_anchored() -> None:
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
 
     # 铸出的派发框（真名 delegate_task）
-    frame = [r for r in turns if r.role == "assistant"
-             and any(tc.get("id") == "oc1" and tc.get("name") == DELEGATE_TASK_NAME
-                     for tc in (r.metadata.get("tool_calls") or []))]
+    frame = [r for r in turns if task_record_kind(r) == "start" and task_record_group(r) == 'oc1']
     assert frame, "_close_one 须铸派发框（真名 delegate_task）"
 
     # 配对静态 result：content=_dispatch_ack(title)、tool_call_id 配对、与框同锚 started_at
-    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "oc1"]
-    assert ack and ack[0].content == _dispatch_ack(task_ref(child), "success"), f"expected static ack {_dispatch_ack(task_ref(child), 'success')!r}, got {[r.content for r in ack]}"
+    ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "oc1"]
+    assert ack and _dispatch_ack(task_ref(child), "success") in ack[0].content, f"expected static ack {_dispatch_ack(task_ref(child), 'success')!r}, got {[r.content for r in ack]}"
     assert frame[0].timestamp == started == ack[0].timestamp, (
         f"框与 ack 须同锚 started_at；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
     )
@@ -449,37 +443,12 @@ async def test_concurrent_same_agent_dispatch_pairs_stay_adjacent() -> None:
 
     dispatch_ids = {"oc0", "oc1", "oc2"}
 
-    def _tc_id(r):
-        if r.role == "assistant":
-            for tc in (r.metadata.get("tool_calls") or []):
-                if tc.get("id") in dispatch_ids and tc.get("name") == DELEGATE_TASK_NAME:
-                    return tc["id"]
-        if r.role == "tool" and r.metadata.get("tool_call_id") in dispatch_ids:
-            return r.metadata["tool_call_id"]
-        return None
-
-    seq = [(r.role, _tc_id(r)) for r in recs if _tc_id(r) is not None]
-    assert seq == [("assistant", "oc0"), ("tool", "oc0"),
-                   ("assistant", "oc1"), ("tool", "oc1"),
-                   ("assistant", "oc2"), ("tool", "oc2")], f"派发对未成对相邻/未按 started_at 有序: {seq}"
-
-    # 过 legalize：整条(含 finish 对)重建为 LLMMessage 后仍合法（无悬挂/无孤儿/配对紧邻）
-    msgs = [LLMMessage(role="user", content="root")]
-    for r in recs:
-        if r.role == "assistant":
-            tcs = [{"id": tc["id"], "name": tc.get("name", ""), "input": tc.get("input", {})}
-                   for tc in (r.metadata.get("tool_calls") or [])]
-            msgs.append(LLMMessage(role="assistant", content=r.content or "", tool_calls=tcs))
-        elif r.role == "tool":
-            msgs.append(LLMMessage(role="tool", content=r.content or "(x)",
-                                   tool_call_id=r.metadata.get("tool_call_id", "")))
-    out = legalize_messages(msgs)
-    seen: set[str] = set()
-    for m in out:
-        if m.role == "assistant":
-            seen.update(tc.get("id") for tc in m.tool_calls)
-        if m.role == "tool":
-            assert m.tool_call_id in seen, f"tool result {m.tool_call_id} 未紧跟其 tool_use"
+    dispatch = [r for r in recs if task_record_group(r) in dispatch_ids]
+    assert [(task_record_kind(r), task_record_group(r)) for r in dispatch] == [
+        (kind, f"oc{i}") for i in range(3) for kind in ("start", "result")]
+    assert all(r.role == "user" and not r.metadata.get("tool_calls") for r in dispatch)
+    msgs = [LLMMessage(role=r.role, content=r.content) for r in recs]
+    assert "\n\n".join(m.content for m in legalize_messages(msgs)) == "\n\n".join(m.content for m in msgs)
 
 
 async def test_cross_agent_result_carries_outputs_and_task_summary() -> None:
@@ -515,8 +484,8 @@ async def test_cross_agent_result_carries_outputs_and_task_summary() -> None:
 
     parent_scope = _sc("p99", "ag1")
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    result = [r for r in turns if r.role == "tool"
-              and r.metadata.get("tool_call_id") == "oc99"]
+    result = [r for r in turns if task_record_kind(r) == "result"
+              and task_record_group(r) == "oc99"]
     assert result
     body = result[0].content
     assert "最终产出给 user" in body          # 最终输出
@@ -526,7 +495,7 @@ async def test_cross_agent_result_carries_outputs_and_task_summary() -> None:
 
 async def test_plan_child_mints_start_task_frame_when_absent() -> None:
     """delegate_plan 子: parent scope 无预置框 → finalize 补铸 start_task 框，bubble/ACK 配对其 id。"""
-    from ctx_weft.core.loop.steps.finalize import _close_one, START_TASK_NAME
+    from ctx_weft.core.loop.steps.finalize import _close_one
     from datetime import timedelta
 
     mem = InMemoryMemoryProvider()
@@ -547,22 +516,20 @@ async def test_plan_child_mints_start_task_frame_when_absent() -> None:
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
 
     # a minted start_task frame exists, carrying the child's origin_tool_call_id
-    frame = [r for r in turns if r.role == "assistant"
-             and any(tc.get("id") == "tcall_plan_c1" and tc.get("name") == START_TASK_NAME
-                     for tc in (r.metadata.get("tool_calls") or []))]
+    frame = [r for r in turns if task_record_kind(r) == "start" and task_record_group(r) == 'tcall_plan_c1']
     assert frame, "a start_task frame must be minted for the plan child"
     assert frame[0].metadata.get("origin_task_id") == "p1", "frame stays in delegating(p1) unit (留父)"
     assert frame[0].timestamp == created, "frame back-dated to child.created_at for adjacency"
 
     # the paired ACK result shares the frame's tool_call_id and timestamp
-    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "tcall_plan_c1"]
+    ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "tcall_plan_c1"]
     assert ack, "paired result must carry the same tool_call_id"
     assert ack[0].timestamp == frame[0].timestamp, "result adjacent to its frame"
 
 
 async def test_plan_child_frame_anchors_at_started_at() -> None:
     """时间戳锚 = task.started_at（task manager 真正启动 task 时），优先于 created_at。"""
-    from ctx_weft.core.loop.steps.finalize import _close_one, START_TASK_NAME
+    from ctx_weft.core.loop.steps.finalize import _close_one
 
     mem = InMemoryMemoryProvider()
     parent_scope = _sc("p1", "ag1")
@@ -581,13 +548,11 @@ async def test_plan_child_frame_anchors_at_started_at() -> None:
                      short=True, act_recap="本段做了 X", task_summary="整段总结")
 
     turns = await mem.recall_recent(parent_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())
-    frame = [r for r in turns if r.role == "assistant"
-             and any(tc.get("id") == "tcall_plan_c1" and tc.get("name") == START_TASK_NAME
-                     for tc in (r.metadata.get("tool_calls") or []))]
+    frame = [r for r in turns if task_record_kind(r) == "start" and task_record_group(r) == 'tcall_plan_c1']
     assert frame, "a start_task frame must be minted for the plan child"
     assert frame[0].timestamp == started, "frame 须锚在 started_at（task manager 真正启动时），非 created_at"
 
-    ack = [r for r in turns if r.role == "tool" and r.metadata.get("tool_call_id") == "tcall_plan_c1"]
+    ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "tcall_plan_c1"]
     assert ack and ack[0].timestamp == started, "paired ack 须与 frame 同锚 started_at"
 
 

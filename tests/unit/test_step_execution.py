@@ -299,8 +299,8 @@ async def test_mechanical_request_failure_never_executes_observe_or_schedules_re
         raise AssertionError("uncommitted intent must not start a report")
     async def fail(event):
         assert event.type == EventType.OBSERVE_REQUESTED
-        assert event.payload["judge_task"] is False
-        assert event.payload["verdict"]["task_outcome"] == "success"
+        assert event.payload["judge_task"] is True
+        assert "verdict" not in event.payload
         raise OSError("requested commit failed")
     monkeypatch.setattr(ObserveStep, "execute", forbidden)
     driver = StepDriver({"observe": ObserveStep()})

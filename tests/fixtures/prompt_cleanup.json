@@ -181,21 +181,21 @@
   "dispatch": {
     "": {
       "running": "Sub-task  is running now \u2014 its execution follows below.",
-      "success": "Sub-task  ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
-      "fail": "Sub-task  ran here \u2014 outcome: FAILED. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
-      "continue": "Sub-task  ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered."
+      "success": "Sub-task  ran here \u2014 outcome: completed. Its execution is inlined below, including its final reply and task report.",
+      "fail": "Sub-task  ran here \u2014 outcome: FAILED. Its execution is inlined below, including its final reply and task report.",
+      "continue": "Sub-task  ran here \u2014 outcome: completed. Its execution is inlined below, including its final reply and task report."
     },
     "Task (t1)": {
       "running": "Sub-task Task (t1) is running now \u2014 its execution follows below.",
-      "success": "Sub-task Task (t1) ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
-      "fail": "Sub-task Task (t1) ran here \u2014 outcome: FAILED. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
-      "continue": "Sub-task Task (t1) ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered."
+      "success": "Sub-task Task (t1) ran here \u2014 outcome: completed. Its execution is inlined below, including its final reply and task report.",
+      "fail": "Sub-task Task (t1) ran here \u2014 outcome: FAILED. Its execution is inlined below, including its final reply and task report.",
+      "continue": "Sub-task Task (t1) ran here \u2014 outcome: completed. Its execution is inlined below, including its final reply and task report."
     },
     "Task {literal}": {
       "running": "Sub-task Task {literal} is running now \u2014 its execution follows below.",
-      "success": "Sub-task Task {literal} ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
-      "fail": "Sub-task Task {literal} ran here \u2014 outcome: FAILED. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered.",
-      "continue": "Sub-task Task {literal} ran here \u2014 outcome: completed. Its execution is inlined below, ending with its own control__finish_task and the final reply it delivered."
+      "success": "Sub-task Task {literal} ran here \u2014 outcome: completed. Its execution is inlined below, including its final reply and task report.",
+      "fail": "Sub-task Task {literal} ran here \u2014 outcome: FAILED. Its execution is inlined below, including its final reply and task report.",
+      "continue": "Sub-task Task {literal} ran here \u2014 outcome: completed. Its execution is inlined below, including its final reply and task report."
     }
   },
   "finish": {

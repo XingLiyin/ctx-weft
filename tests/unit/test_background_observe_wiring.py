@@ -151,14 +151,15 @@ async def test_mechanical_verdict_requests_one_report(monkeypatch, child, bounda
     monkeypatch.setattr(StepDriver, "start", start)
     outcome = await StepDriver.for_context(ctx).execute("observe", state, ctx)
     assert outcome.next_step == "finalize"
-    options, = launched
-    requested, = ctx.event_bus.emitted
-    assert options["observe_id"] == requested.payload["observe_id"]
-    assert options["judge_task"] is requested.payload["judge_task"] is False
-    assert options["verdict"] == requested.payload["verdict"]
-    assert options["verdict"]["task_outcome"] == ("continue" if boundary == "max_turns" else "success")
-    assert options["boundary"] == report_boundary
-    await asyncio.gather(*pending)
+    assert launched == []
+    stages = [e for e in ctx.event_bus.emitted if e.type.startswith("Observe")]
+    assert [e.type for e in stages] == [EventType.OBSERVE_REQUESTED,
+        EventType.OBSERVE_STARTED, EventType.OBSERVE_COMPLETED]
+    assert stages[0].payload["judge_task"] is True
+    assert stages[-1].payload["result"]["verdict"]["task_outcome"] == "success"
+    assert outcome.state_patch["verdict"].reported is False
+    assert outcome.state_patch["verdict"].act_recap == ""
+
 
 
 def _spy_launch(monkeypatch) -> list:

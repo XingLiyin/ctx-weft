@@ -89,7 +89,7 @@ async def test_bare_name_does_not_resolve() -> None:
 
 def test_classification_sets_are_qualified() -> None:
     assert "control__delegate_task" in DISPATCH_TOOLS
-    assert "control__finish_task" in SILENT_TOOLS
+    assert "control__finish_task" not in SILENT_TOOLS
     # background observe 终止工具：silent，不入 task 对话（task close 后才跑，否则污染冻结对话）
     assert "control__report_observation" in SILENT_TOOLS
     assert "delegate_task" not in DISPATCH_TOOLS  # bare no longer matches

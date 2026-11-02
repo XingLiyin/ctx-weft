@@ -8,6 +8,8 @@ _agent_scope, _state, _loop_ctx, _make_task, _pctx, T, finalize_task_memory, Loo
 """
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind
+
 import pytest
 
 from ctx_weft.protocols.template import LoopConfig
@@ -44,9 +46,9 @@ async def test_close_writes_finish_pair_keeps_body() -> None:
     # agent 层：恰 2 条 finish 对
     caps = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
     assert len(caps) == 2
-    assert caps[0].role == "tool"  # newest-first: Process Report tool 在前
-    asst = [c for c in caps if c.role == "assistant"][0]
-    assert asst.metadata["tool_calls"][0]["name"].endswith("finish_task")
+    assert task_record_kind(caps[0]) == "finish"  # newest-first: Process Report tool 在前
+    asst = [c for c in caps if task_record_kind(c) == "recap"][0]
+    assert not asst.metadata.get("tool_calls")
     # task 层 body 仍在（未 supersede）
     body = await mem.recall_recent(
         tsc, [T.USER_PROMPT, T.LLM_RESPONSE, T.TOOL_RESULT], 500, _pctx(),
@@ -62,7 +64,6 @@ async def test_short_close_keeps_active_raw() -> None:
     active LLM_RESPONSE/TOOL_RESULT 仍可 recall（全 raw 保留，Task 1 行为不变）。"""
     mem = InMemoryMemoryProvider()
     tsc = _task_scope("t1")
-    asc = _agent_scope()
     await mem.ingest(_ev(T.USER_PROMPT, tsc, "做X", 1, role="user"), _pctx())
     await mem.ingest(_ev(T.LLM_RESPONSE, tsc, "在做", 2, role="assistant"), _pctx())
     await mem.ingest(_ev(T.TOOL_RESULT, tsc, "ok", 3, role="tool"), _pctx())
@@ -131,5 +132,5 @@ async def test_long_close_supersedes_final_raw_keeps_anchors() -> None:
     caps = await mem.recall_recent(asc, [T.AGENT_CONVERSATION_TURN], 500, _pctx())
     assert len(caps) == 3
     reply_slot = [c for c in caps if c.metadata.get("final_reply")][0]
-    assert reply_slot.metadata["tool_calls"][0]["name"].endswith("finish_task")
+    assert task_record_kind(reply_slot) == "final_reply" and not reply_slot.metadata.get("tool_calls")
     assert "大功告成" in reply_slot.content

@@ -31,7 +31,6 @@ from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse  #
 from ctx_weft.providers.memory.sql.provider import open_sqlite_memory  # noqa: E402
 from tests.integration.test_minimal_loop import (  # noqa: E402
     InlineAgentTemplateProvider,
-    make_echo_template,
     make_runtime,
 )
 
@@ -109,9 +108,7 @@ class _RouterLLM(MockLLMAdapter):
         if self._act_calls == 1:
             return self._stream(MockResponse(tool_calls=[
                 ToolCall(id="c1", name=self._tool, arguments=dict(self._args))]), request)
-        return self._stream(MockResponse(text="done", tool_calls=[
-            ToolCall(id=f"f{self._act_calls}", name="control__finish_task",
-                     arguments={})]), request)
+        return self._stream(MockResponse(text="done", tool_calls=[]), request)
 
 
 def _template():

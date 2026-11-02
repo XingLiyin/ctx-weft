@@ -1,5 +1,5 @@
 {% macro observation_missing_output() -%}
-The previous round ended without a final output. Review the recap above and judge whether this task still needs more work. If it does, continue with the necessary tool calls. Once everything required is done, write your final reply to the user as your normal message text and then call the `{{ finish_task }}` tool to complete the task — your message text is the reply and the deliverable.
+The previous segment did not provide a final output. Review what remains, do the necessary work, and provide the actual final answer as normal message text.
 {%- endmacro %}
 
 {% macro observation_missing_verdict() -%}
@@ -8,10 +8,6 @@ This observation requires a task verdict. Call the submission tool again with ta
 
 {% macro observation_tool_unavailable(tool) -%}
 Tool {{ tool }} is not available in this observation. Use an advertised tool.
-{%- endmacro %}
-
-{% macro plain_text_needs_finish() -%}
-Your previous turn ended with a prose reply and no tool call, so this task is still open — prose alone never ends it. Nobody is waiting to read that reply: only `{{ finish_task }}` ends a task. If the goal is now achieved, write the final reply as your normal message text and call `{{ finish_task }}` in that same turn. If work remains, do the work.
 {%- endmacro %}
 
 {% macro react_nudge(terminal_tool) -%}

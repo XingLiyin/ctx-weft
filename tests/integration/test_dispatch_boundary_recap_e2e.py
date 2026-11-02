@@ -11,7 +11,6 @@ import asyncio
 
 import pytest
 
-from ctx_weft.core import CtxWeftRuntime
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols import MemoryAddress, MemoryEventType, ProviderContext, ToolCall
@@ -79,10 +78,7 @@ class _RouterLLM(MockLLMAdapter):
             ]), request)
         # 子任务 act 与 root resume 后的 act：finish（text=收尾正文，落 task.outputs——
         # 子任务走 LLM observe，report_observation 的 success 护栏要求 task.outputs 非空）
-        return self._stream(MockResponse(text="done", tool_calls=[
-            ToolCall(id=self._id("fin"), name="control__finish_task",
-                     arguments={"deliverables_summary": "done"}),
-        ]), request)
+        return self._stream(MockResponse(text="done", tool_calls=[]), request)
 
 
 async def _wait_all_finished(runtime, session_id, n, timeout=8.0):

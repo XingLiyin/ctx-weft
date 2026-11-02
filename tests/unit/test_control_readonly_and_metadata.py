@@ -63,7 +63,7 @@ def test_no_output_guard_is_owned_by_step_and_does_not_mutate_task():
     assert submitted.metadata[K.OBSERVER_OUTCOME] == "success"
     observation = ObserveStep()._interpret_submission(NS(task=task), submitted)
     assert observation.verdict.task_outcome == "continue"
-    assert "without a final output" in observation.verdict.next_step_hint
+    assert "did not provide a final output" in observation.verdict.next_step_hint
     assert task.observer_outcome is None
 
 

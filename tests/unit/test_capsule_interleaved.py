@@ -8,6 +8,7 @@ role 映射）随 mirror 删除而移除——其验证的镜像机制已不存�
 切割/fail 前缀等仍适用于新模型的断言。
 """
 from __future__ import annotations
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -87,17 +88,11 @@ async def test_synthesize_writes_only_finish_pair():
 
     # 仅 finish 对（assistant finish_task + tool Process Report）
     assert len(caps) == 2, f"expected only finish pair; got {[(c.role, c.content[:30]) for c in caps]}"
-    assert caps[-2].role == "assistant"
-    tool_calls = caps[-2].metadata.get("tool_calls", [])
-    assert len(tool_calls) == 1
-    assert tool_calls[0]["name"].endswith("finish_task")
-    # finish 对 assistant 槽 = act_recap（此处 4th 参传入 "最终答复"）；finish_task 无参标记
-    assert caps[-2].content.startswith("最终答复")  # + PROCESS_RECAP_NOTE
-    assert tool_calls[0]["input"] == {}
-    assert caps[-1].role == "tool"
-    # tool 槽 = `[task: '<title>' (<id>)] ` 归属前缀 + 过程报告
-    assert caps[-1].content.startswith("[task: '测试任务' (t1)] Process Report:")
-    assert all(c.metadata.get("origin_task_id") == "t1" for c in caps)
+    assert caps[-2].role == "user"
+    assert task_record_kind(caps[-2]) == "recap"
+    assert not caps[-2].metadata.get("tool_calls")
+    assert "最终答复" in caps[-2].content
+
 
     # body 不镜像、留 task 层
     body = await mem.recall_recent(tsc, [T.USER_PROMPT, T.TASK_COMPACT_SUMMARY], 100, _ctx())
@@ -139,8 +134,8 @@ async def test_finish_pair_tool_call_id_matches():
     caps = await _caps(mem, asc)
     finish_assistant = caps[-2]
     finish_tool = caps[-1]
-    tc_id = finish_assistant.metadata["tool_calls"][0]["id"]
-    assert finish_tool.metadata.get("tool_call_id") == tc_id
+    tc_id = task_record_group(finish_assistant)
+    assert task_record_group(finish_tool) == tc_id
 
 
 # ── fail 结局在 tool content 里有 [outcome=fail] 前缀 ─────────────────────
@@ -156,7 +151,7 @@ async def test_fail_outcome_prefix_in_tool_content():
 
     caps = await _caps(mem, asc)
     tool_content = caps[-1].content
-    assert "[outcome=fail]" in tool_content
+    assert 'outcome="fail"' in tool_content
 
 
 # ── 同 agent 派发 ack：终态 + 内联导读 ─────────────────────────────────────
@@ -168,7 +163,7 @@ def test_dispatch_ack_carries_outcome_and_inline_pointer():
     assert "抽取 TokenStore" in ack
     assert "completed" in ack, f"ack must resolve the call to a terminal outcome; got {ack!r}"
     assert "inlined below" in ack, f"ack must point at the inline execution; got {ack!r}"
-    assert "control__finish_task" in ack
+    assert "control__finish_task" not in ack
 
 
 def test_dispatch_ack_marks_failure():
@@ -199,7 +194,7 @@ async def test_finish_tool_content_names_owning_task():
     await _synthesize_dispatch_pair(mem, asc, task, "过程复述", "综合总结", "success", _ctx())
 
     tool_content = (await _caps(mem, asc))[-1].content
-    assert tool_content.startswith("[task: '测试任务' (t1)] "), (
+    assert tool_content.startswith('<task_finish task_id="t1" title="测试任务"'), (
         f"finish tool content must name its owning task; got {tool_content!r}"
     )
     assert "综合总结" in tool_content
@@ -215,7 +210,7 @@ async def test_finish_tool_content_names_task_before_fail_marker():
     await _synthesize_dispatch_pair(mem, asc, task, "失败报告", "", "fail", _ctx())
 
     tool_content = (await _caps(mem, asc))[-1].content
-    assert tool_content.startswith("[task: '测试任务' (t1)] [outcome=fail] "), (
+    assert tool_content.startswith('<task_finish task_id="t1" title="测试任务" outcome="fail">'), (
         f"expected task marker before fail marker; got {tool_content!r}"
     )
 
@@ -235,7 +230,7 @@ async def test_finish_tool_content_without_title_keeps_fail_marker():
     await _synthesize_dispatch_pair(mem, asc, task, "失败报告", "", "fail", _ctx())
 
     tool_content = (await _caps(mem, asc))[-1].content
-    assert tool_content.startswith("[task: t1] [outcome=fail] "), (
+    assert tool_content.startswith('<task_finish task_id="t1" outcome="fail">'), (
         f"empty title must not emit an empty task marker; got {tool_content!r}"
     )
 
@@ -256,10 +251,10 @@ async def test_adjacent_finish_pairs_are_distinguishable():
     await _synthesize_dispatch_pair(mem, asc, grand, "写了 8 个 case", "孙总结", "success", _ctx())
     await _synthesize_dispatch_pair(mem, asc, child, "抽出 TokenStore 类", "子总结", "success", _ctx())
 
-    tools = [c for c in await _caps(mem, asc) if c.role == "tool"]
+    tools = [c for c in await _caps(mem, asc) if task_record_kind(c) == "finish"]
     assert len(tools) == 2, f"expected 2 finish tool slots; got {len(tools)}"
-    assert "[task: '补 TokenStore 单测'" in tools[0].content
-    assert "[task: '抽取 TokenStore'" in tools[1].content
+    assert 'title="补 TokenStore 单测"' in tools[0].content
+    assert 'title="抽取 TokenStore"' in tools[1].content
 
 
 # ── 无幸存 task 层记录时 finish 对仍写出 ─────────────────────────────────
@@ -275,8 +270,8 @@ async def test_no_task_records_still_writes_finish_pair():
 
     caps = await _caps(mem, asc)
     assert len(caps) == 2, f"expected 2 (finish pair only), got {len(caps)}"
-    assert caps[-2].role == "assistant"
-    assert caps[-1].role == "tool"
+    assert caps[-2].role == "user"
+    assert caps[-1].role == "user"
 
 
 # ── 回归：dict-list outputs 须正确提取进 blackboard mem_content（不得为空）─────────
@@ -325,7 +320,7 @@ async def test_embedded_process_report_in_outputs():
     # 验证 tool content 从完整分隔符后切割，即只含 "real report"
     # 而非 "draft\\n\\nProcess Report: real report"（前缀为归属标记，见 _finish_report_prefix）
     tool_content = finish_tool.content
-    assert tool_content == "[task: '测试任务' (t1)] Process Report: real report", (
+    assert 'Process Report: real report' in tool_content and 'draft' not in tool_content, (
         f"tool content should be 'Process Report: real report' (+ task marker) but got "
         f"{tool_content!r}; old split logic would include embedded separator content"
     )
@@ -422,37 +417,10 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
     _assert_tool_follows_call(messages)
 
     # ── delegate → _DISPATCH_ACK strictly adjacent ──
-    delegate_idx = next(
-        i for i, m in enumerate(messages)
-        if m.role == "assistant" and any(
-            tc.get("id") == origin_tcid for tc in (m.tool_calls or [])
-        )
-    )
-    ack_idx = delegate_idx + 1
-    assert messages[ack_idx].role == "tool", (
-        f"expected tool (dispatch ack) at {ack_idx}, got role={messages[ack_idx].role!r}"
-    )
-    assert messages[ack_idx].content == _dispatch_ack("child task", "success"), (
-        f"expected dispatch ack after delegate, got {messages[ack_idx].content!r}"
-    )
-    assert messages[ack_idx].tool_call_id == origin_tcid
-
-    # ── child body comes AFTER the ack ──
-    child_body_indices = [
-        i for i, m in enumerate(messages)
-        if m.role == "user" and "child" in (m.content or "")
-    ]
-    assert child_body_indices, "child body (user message) must appear in composed messages"
-    assert all(ci > ack_idx for ci in child_body_indices), (
-        f"child body must come after _DISPATCH_ACK @{ack_idx}; got child at {child_body_indices}"
-    )
-
-    # ── finish pair adjacent ──
-    finish_call_idx = next(
-        i for i, m in enumerate(messages)
-        if m.role == "assistant" and any(
-            tc.get("id") == finish_tcid for tc in (m.tool_calls or [])
-        )
-    )
-    assert messages[finish_call_idx + 1].role == "tool", "finish pair tool must follow finish assistant"
-    assert messages[finish_call_idx + 1].tool_call_id == finish_tcid, "finish pair tool_call_id must match"
+    start = next(i for i, m in enumerate(messages) if "<task_start" in str(m.content))
+    result = next(i for i, m in enumerate(messages) if "<task_result" in str(m.content))
+    child = next(i for i, m in enumerate(messages) if m.content == "child task")
+    finish = next(i for i, m in enumerate(messages) if "<task_finish" in str(m.content))
+    assert start < result < child < finish
+    assert all(not m.tool_calls and m.role != "tool" for m in messages)
+    assert any("child act recap" in str(m.content) for m in messages)

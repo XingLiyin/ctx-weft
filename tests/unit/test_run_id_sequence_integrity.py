@@ -27,6 +27,7 @@ from ctx_weft import RuntimeConfig
 from ctx_weft.core.runtime import SessionStartParams
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
+from ctx_weft.protocols import ToolCall
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._event_helpers import append_one
 from tests._initialization import initialize_all
@@ -88,6 +89,10 @@ class _RouterLLM(MockLLMAdapter):
         if "control__update_task_metadata" in names:  # recognize_intent
             return self._stream(MockResponse(text=""), request)
         # act 首轮：纯文本、无 tool_call → root 任务的纯文本冷 park。
+        if "control__report_observation" in names:
+            return self._stream(MockResponse(tool_calls=[ToolCall(id="review",
+                name="control__report_observation", arguments={"task_status": "continue",
+                    "act_recap": "Asked the user a question."})]), request)
         return self._stream(MockResponse(text="Hi! Anything else?"), request)
 
 

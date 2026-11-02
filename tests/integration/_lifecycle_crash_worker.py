@@ -41,8 +41,13 @@ class LifecycleLLM(_FinishEveryTaskLLM):
             return super().complete(request, stream)
         if "control__report_observation" in names:
             self.judgements += 1
+            if self.mode == "mechanical":
+                async def unavailable():
+                    raise RuntimeError("observer unavailable")
+                    yield
+                return unavailable()
             verdict = ("continue" if self.mode in {"background_retry", "parked_cancel_retry", "parked_interrupt_retry"} or
-                       self.mode == "retry" and self.judgements == 1 else
+                       self.mode in {"retry", "mechanical_retry"} and self.judgements == 1 else
                        "fail" if self.mode == "threshold" else "success")
             return self._stream(MockResponse(tool_calls=[ToolCall(
                 id=self._id("obs"), name="control__report_observation",
@@ -104,8 +109,10 @@ async def worker(directory, mode, cut, recovering=False):
                 from ctx_weft.core.loop.steps.observe import ObserveStep
                 original_execute = ObserveStep.execute
                 async def assert_single_background(self, state, ctx):
-                    assert ctx.execution.mode == ExecutionMode.BACKGROUND
-                    assert ctx.execution.options["judge_task"] is False
+                    expected_mode = (ExecutionMode.FOREGROUND if mode == "mechanical"
+                                     else ExecutionMode.BACKGROUND)
+                    assert ctx.execution.mode == expected_mode
+                    assert ctx.execution.options["judge_task"] is (mode == "mechanical")
                     observe_calls.append(state.run_id)
                     assert len(observe_calls) <= (2 if "budget" in mode else 1)
                     return await original_execute(self, state, ctx)

@@ -29,7 +29,6 @@ from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEventType,
     ProviderContext,
-    ToolCall,
 )
 from ctx_weft.protocols.hitl import PREFACE_NORMAL, UserTurnDelivery
 from ctx_weft.providers.events import InProcessEventBus
@@ -101,8 +100,7 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
     # Assembler 责任不在这个 ActStep fixture 内；用一段已渲染的最小 guidance
     # 保留「只出现在发送 prompt，不落 memory」这个边界条件。
     guidance = (
-        "Write the final reply to the user as normal message text and call "
-        "`control__finish_task` in the same turn."
+        "Write the actual final answer as normal message text."
     )
     prompt = AssembledPrompt(
         system="", messages=[LLMMessage(role="user", content=f"hi\n\n{guidance}")],
@@ -143,8 +141,8 @@ async def test_interactive_plain_text_parks_for_user() -> None:
     assert pend[0].delivery == UserTurnDelivery(task_id="t1", preface=PREFACE_NORMAL)
 
     # guidance 只在发送的 prompt（装配期已拼入），不入 memory
-    sent = llm.last_request.messages[-1].content
-    assert "final reply to the user" in sent and "finish_task" in sent
+    sent = llm.last_act_request.messages[-1].content
+    assert "actual final answer" in sent and "finish_task" not in sent
     recs = await mem.recall_recent(state.scope, [MemoryEventType.LLM_RESPONSE], 10, ctx.provider_ctx)
     assert recs and all("final reply to the user" not in (r.content or "") for r in recs)
 
@@ -166,9 +164,7 @@ async def test_finish_task_finishes_task_end_to_end() -> None:
     resolver.register(make_echo_template())
     # 反转契约：答复写在消息正文，finish_task 无参收尾标记 → outputs = 正文
     llm = MockLLMAdapter(responses=[
-        MockResponse(text="computed: 42", tool_calls=[ToolCall(
-            id="tc1", name="control__finish_task", arguments={},
-        )]),
+        MockResponse(text="computed: 42", tool_calls=[]),
     ])
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     runtime.providers.register_memory(InMemoryMemoryProvider())
@@ -184,9 +180,7 @@ async def test_guidance_injected_into_prompt_not_memory() -> None:
     resolver = InlineAgentTemplateProvider()
     resolver.register(make_echo_template())
     llm = MockLLMAdapter(responses=[
-        MockResponse(text="ok", tool_calls=[ToolCall(
-            id="tc1", name="control__finish_task", arguments={},
-        )]),
+        MockResponse(text="ok", tool_calls=[]),
     ])
     runtime = make_runtime(llm=llm, agent_provider=resolver)
     mem = InMemoryMemoryProvider()
@@ -199,7 +193,7 @@ async def test_guidance_injected_into_prompt_not_memory() -> None:
     # `last_act_request` 而非 `last_request`：2026-09-28 起 root 的收尾也过前台 observe
     # （`_should_use_llm` 删掉了 root 降级），一次 run 的最后一个 request 是观察者的。
     sent = llm.last_act_request.messages[-1].content
-    assert "finish_task" in sent
+    assert "actual final answer" in sent and "finish_task" not in sent
     # memory 的 USER_PROMPT 不含 guidance（仅原始用户输入）
     ctxp = ProviderContext(session_id=state.session.id, agent_id=state.agent.id)
     user_recs = await mem.recall_recent(

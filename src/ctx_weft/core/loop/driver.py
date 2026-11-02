@@ -514,14 +514,8 @@ class StepDriver:
             await _interrupt_checkpoint(state, local_ctx)
             from ctx_weft.core.loop.steps.observe import prepare_foreground_observe
             boundary = local_ctx.execution.options.get("boundary") or state.act_exit_reason or "normal"
-            result = await prepare_foreground_observe(state, local_ctx, boundary,
+            await prepare_foreground_observe(state, local_ctx, boundary,
                 local_ctx.execution.options.get("judge_task", True))
-            if result is not None:
-                await self.start_durable("observe", state, local_ctx, options={
-                    **local_ctx.execution.options, "boundary": local_ctx.execution.options["report_boundary"],
-                    "judge_task": False})
-                outcome = StepOutcome("finalize", state_patch={"observation": result, "verdict": result.verdict})
-                return state.apply_patch(outcome.state_patch), outcome
         return await self._execute_step(step, state, local_ctx, foreground=True)
 
     async def _execute_step(self, step, state, ctx, *, foreground):

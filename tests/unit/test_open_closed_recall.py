@@ -9,6 +9,7 @@
 判据：task.status / finish 对是否存在，不依赖 task 层是否被 supersede。
 """
 from __future__ import annotations
+from ctx_weft.core.assembler.task_memory import task_record_kind
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -141,18 +142,11 @@ async def test_finished_root_task_recall_yields_body_and_finish_pair() -> None:
         f"got {[(b.value.role, b.value.content[:40]) for b in act_blocks]}"
     )
     roles = [b.value.role for b in act_blocks]
-    assert roles == ["assistant", "tool"], f"finish pair must be [assistant, tool]; got {roles}"
+    assert roles == ["user", "user"], f"finish pair must be [assistant, tool]; got {roles}"
 
-    # finish_task tool_call 在 assistant 回合
-    finish_tc = act_blocks[0].value.metadata.get("tool_calls", [])
-    assert finish_tc and finish_tc[0].get("name", "").endswith("finish_task"), (
-        f"finish pair assistant must have finish_task tool_call; got {finish_tc}"
-    )
-
-    # task_summary（process report）在 tool 回合
-    assert task_summary_text in act_blocks[1].value.content, (
-        f"finish pair tool must contain task_summary; got {act_blocks[1].value.content!r}"
-    )
+    assert [task_record_kind(b.value) for b in act_blocks] == ["recap", "finish"]
+    assert all(not b.value.metadata.get("tool_calls") for b in act_blocks)
+    assert task_summary_text in act_blocks[1].value.content
 
     # 验证判据：body 在 task 层未被 supersede（task-resident 设计）
     task_body = await mem.recall_recent(tsc, [T.USER_PROMPT, T.TASK_COMPACT_SUMMARY], 100, _pctx())
@@ -279,7 +273,7 @@ async def test_cross_agent_child_body_isolated_from_parent() -> None:
     # 父可见 dispatch result（黑盒 bubble，conversation turn），含 mem_content、配对 oc_cross、归 parent 单元
     parent_task_recs = await mem.recall_recent(parent_tsc, [T.AGENT_CONVERSATION_TURN], 100, _pctx())
     cross_results = [r for r in parent_task_recs
-                     if r.role == "tool" and r.metadata.get("tool_call_id") == "oc_cross"]
+                     if task_record_kind(r) == "result" and r.metadata.get("task_memory", {}).get("group_id") == "oc_cross"]
     assert cross_results, "cross-agent child must bubble dispatch result (conversation turn) to parent"
     assert cross_results[0].metadata.get("origin_task_id") == parent_task_id
     assert "Process Report:" in cross_results[0].content, (

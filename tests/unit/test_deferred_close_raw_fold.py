@@ -7,6 +7,8 @@ close 时若尚无 LLM 总结（规则 observe 占位，has_llm_summary=False）
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -139,8 +141,8 @@ async def test_slot_hit_folds_raw_immediately() -> None:
     state.extra = {"observe_id": "obs-long-report"}
     await apply_close_report(state, _loop_ctx(mem), ObservationResult("bg_act", "bg_sum"), asyncio.Event())
     turns = await mem.recall_recent(scope, [T.AGENT_CONVERSATION_TURN], 100, _pctx())
-    tool = [r for r in turns if r.role == "tool"]
-    assert tool and tool[0].content == "[task: 'Root' (t1)] bg_sum", \
+    tool = [r for r in turns if task_record_kind(r) == "finish"]
+    assert tool and "bg_sum" in tool[0].content, \
         f"slot 命中 finish tool 应为真报告；实得 {[r.content for r in tool]!r}"
     assert await _active_raw(mem, scope) == [], \
         "真摘要已落地（slot 命中替换后）应立即补删末段 raw"
@@ -237,8 +239,8 @@ async def test_bg_replace_success_folds_raw(monkeypatch, fake_state_ctx) -> None
 
     turns = await ctx.memory.recall_recent(
         state.scope, [T.AGENT_CONVERSATION_TURN], 100, ctx.provider_ctx)
-    asst = [r for r in turns if r.role == "assistant"]
-    assert asst and asst[0].content.startswith("真报告act"), "finish 对应已被 bg 真报告替换"
+    asst = [r for r in turns if task_record_kind(r) == "recap"]
+    assert asst and "真报告act" in asst[0].content, "finish 对应已被 bg 真报告替换"
     raw = await ctx.memory.recall_recent(
         state.scope, [T.LLM_RESPONSE, T.TOOL_RESULT], 100, ctx.provider_ctx)
     assert raw == [], "真摘要落地后应按 raw_fold_scope 补删末段 raw"

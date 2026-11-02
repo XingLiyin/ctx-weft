@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -194,19 +196,11 @@ async def _run_dispatch_and_close(mem, *, restart: str | None):
 
 def _assert_capsule_present(messages) -> None:
     labels = _labels(messages)
-    assert any((getattr(m, "tool_calls", None) or [])
-               and m.tool_calls[0].get("name", "").endswith("finish_task")
-               for m in messages), (
-        f"子任务的 finish 对（assistant control__finish_task）不在父的上下文里 → 胶囊丢失。"
-        f"实际序列：{labels}"
-    )
-    assert any(m.role == "tool" and "子任务过程报告" in (m.content or "") for m in messages), (
-        f"子任务的 Process Report（finish 对 tool 槽）不在父的上下文里。实际序列：{labels}"
-    )
-    assert not any(m.role == "tool" and "is running now" in (m.content or "")
-                   for m in messages), (
-        f"子任务已结束，父的派发 ack 却仍停在 running 态。实际序列：{labels}"
-    )
+    assert any("<task_finish" in (m.content or "") for m in messages), labels
+    assert any("子任务过程报告" in (m.content or "") for m in messages), labels
+    assert not any("is running now" in (m.content or "") for m in messages), labels
+    assert all(not m.tool_calls and m.role != "tool" for m in messages)
+
 
 
 async def _parent_agent_turns(mem):
@@ -247,7 +241,7 @@ async def test_single_active_ack_after_restart_close() -> None:
     await _run_dispatch_and_close(mem, restart="before_close")
 
     acks = [r for r in await _parent_agent_turns(mem)
-            if r.role == "tool" and r.metadata.get("child_task_id") == CHILD]
+            if task_record_kind(r) == "result" and r.metadata.get("child_task_id") == CHILD]
     assert len(acks) == 1, (
         f"本子任务的派发 ack 应恰有一条 active；got {[r.content for r in acks]}"
     )
@@ -266,13 +260,13 @@ async def test_dispatch_pair_records_child_task_id() -> None:
     await ensure_dispatch_frame_at_start(_state(child, _task_scope(CHILD)), ctx)
 
     turns = await _parent_agent_turns(mem)
-    frames = [r for r in turns if r.role == "assistant"]
-    acks = [r for r in turns if r.role == "tool"]
+    frames = [r for r in turns if task_record_kind(r) == "start"]
+    acks = [r for r in turns if task_record_kind(r) == "result"]
     assert len(frames) == 1 and len(acks) == 1, f"start 应恰好铸一对；got {turns!r}"
     assert frames[0].metadata.get("child_task_id") == CHILD
     assert acks[0].metadata.get("child_task_id") == CHILD
     # 配对仍然成立：框的 tool_calls[].id == ack 的 tool_call_id
-    assert frames[0].metadata["tool_calls"][0]["id"] == acks[0].metadata["tool_call_id"]
+    assert task_record_group(frames[0]) == task_record_group(acks[0])
 
 
 # ─── 根因：派发来源在投影/恢复链上丢失 ────────────────────────────────────────

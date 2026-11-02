@@ -9,14 +9,15 @@ from jinja2 import ChoiceLoader, DictLoader, Environment, StrictUndefined, Undef
 
 from ctx_weft.core.assembler import prompts
 from ctx_weft.core.loop.capability_gateway import converge_tool_output
-from ctx_weft.core.loop.task_memory_fold import _final_reply_block, _recap_block
+from ctx_weft.core.assembler.task_memory import render_task_record
 from ctx_weft.core.loop.steps.finalize import _dispatch_ack, _dispatch_running_ack
 
 BASELINE = json.loads(
     (Path(__file__).parents[1] / "fixtures" / "prompt_cleanup.json").read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("name", BASELINE["runtime"])
+@pytest.mark.parametrize("name", [name for name in BASELINE["runtime"]
+    if name not in {"plain_text_needs_finish", "observation_missing_output"}])
 def test_runtime_text_unchanged(name):
     case = BASELINE["runtime"][name]
     name = "final_reply_note" if name == "final_reply_note_untitled" else name
@@ -33,8 +34,10 @@ def test_dispatch_text_unchanged(ref):
 
 @pytest.mark.parametrize("ref", BASELINE["finish"])
 def test_finish_text_unchanged(ref):
-    assert _final_reply_block(ref, "  final result  ") == BASELINE["finish"][ref]["reply"]
-    assert _recap_block(ref) == BASELINE["finish"][ref]["recap"]
+    rendered = render_task_record("final_reply", task_id="t", title=ref, body="final result")
+    assert "final result" in rendered and rendered.endswith("</task_final_reply>")
+    assert "finish_task" not in rendered
+
 
 
 @pytest.mark.parametrize("tail", (0, 4))

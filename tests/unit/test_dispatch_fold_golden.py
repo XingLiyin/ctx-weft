@@ -86,14 +86,13 @@ async def test_capsule_renders_body_and_finish_pair():
     ) in (T.USER_PROMPT, T.TASK_COMPACT_SUMMARY, T.AGENT_CONVERSATION_TURN)]
     roles = [b.value.role for b in history]
     assert len(history) == 4, f"expected 4 history blocks (body + finish pair), got {len(history)}: {roles}"
-    assert roles == ["user", "assistant", "assistant", "tool"], f"got roles={roles}"
+    assert roles == ["user", "assistant", "user", "user"], f"got roles={roles}"
 
     # user block carries original prompt (task layer)
     assert "把 ppt 转 pdf" in history[0].value.content
     # assistant summary block carries compaction content (TASK_COMPACT_SUMMARY, task layer)
     assert "会话目标" in history[1].value.content
-    # finish_task tool_call (agent layer finish pair)
-    finish_tc = history[2].value.metadata.get("tool_calls", [])
-    assert finish_tc and finish_tc[0].get("name", "").endswith("finish_task")
+    assert "<task_recap" in history[2].value.content
+    assert not history[2].value.metadata.get("tool_calls")
     # task_summary（process report）in tool 回合（agent layer）
     assert _task_summary in history[3].value.content

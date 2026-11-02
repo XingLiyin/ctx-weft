@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ctx_weft.core.assembler.task_memory import task_record_kind
+
 import asyncio
 from types import SimpleNamespace
 
@@ -361,7 +363,7 @@ async def test_plain_text_reply_falls_back_to_last_text(monkeypatch, fake_state_
         yield _make_usage_chunk()
 
     monkeypatch.setattr(_obs_mod, "stream_llm_resilient", _text_only)
-    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "plain_text"})
+    await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 
     recs = await ctx.memory.recall_recent(
         state.scope, [MemoryEventType.TASK_COMPACT_SUMMARY], 100, ctx.provider_ctx)
@@ -682,7 +684,7 @@ async def test_replace_finish_report_declares_surviving_placeholder_refs():
 
     agent_addr = MemoryAddress(session_id="s1", agent_id="a1")
     view = await load_records(mem, agent_addr, MemoryScope.AGENT, pctx, kinds=[MemoryKind.CONVERSATION_TURN])
-    recap_rec = next(r for r in view if r.role == "assistant" and "did the thing" in r.content)
+    recap_rec = next(r for r in view if task_record_kind(r) == "recap" and "did the thing" in r.content)
     assert ref in collect_blob_refs(recap_rec), (
         "折叠重写的 finish 对没有声明幸存占位的 ref，GC 会在宽限期后误删"
     )
@@ -789,18 +791,9 @@ async def test_a_rejected_verdict_still_folds_the_segment(monkeypatch, fake_stat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["plain_text", "finish_park"])
-async def test_no_observe_role_downgrades_the_judging_tier_to_recap(
+async def test_no_observe_role_still_judges_the_task(
         monkeypatch, fake_state_ctx, boundary):
-    """模板没有 ROLE → 让位边界也不判，只产段摘要（2026-09-28）。
-
-    判定档的条件是 `_judges(boundary)` **与** `has_observe_role(state)` 相与。没有 observer
-    还去判，等于让 actor 顶着自己的 SOUL 判自己——装配层此前正是这么回退的，现在 observe
-    家族缺 facet 不再回退 act。
-
-    与之配套：`act.py` 里 `finish_park` 那条让位判据也认同一个 `has_observe_role`，所以这两个
-    边界在无 ROLE 的模板上其实只剩 `plain_text` 到得了（让位给用户不需要 observer），
-    `finish_park` 压根不会发生。这里两个都测，钉的是本函数自己的分档不看边界名。
-    """
+    """Without ROLE, the base prompt still judges and terminal success closes once."""
     import dataclasses
 
     state, ctx = fake_state_ctx
@@ -811,8 +804,8 @@ async def test_no_observe_role_downgrades_the_judging_tier_to_recap(
     tm = await _run_judging(monkeypatch, state, ctx, boundary=boundary,
                             verdict="success")
 
-    assert tm.submitted == [], "没有 observer 还是提交了判决"
-    assert len(await _summaries(state, ctx)) == 1, "降成只摘要档之后段摘要仍要产"
+    assert tm.submitted == ["success"], "ROLE absence must not suppress judgement"
+    assert await _summaries(state, ctx) == []
 
 
 @pytest.mark.asyncio

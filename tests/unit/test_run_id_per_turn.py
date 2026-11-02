@@ -174,14 +174,12 @@ class _TurnRouterLLM(MockLLMAdapter):
                 "task_status": "success" if self._act_calls > 1 else "continue",
                 "task_summary": "done" if self._act_calls > 1 else "",
             })])
-        elif "control__finish_task" in names:
+        else:
             self._act_calls += 1
             if self._act_calls == 1:
                 response = MockResponse(text="Hi! Anything else?")
             else:
-                response = MockResponse(text="done", tool_calls=[self._tc("control__finish_task", {})])
-        else:
-            response = MockResponse(text="")
+                response = MockResponse(text="done")
         return self._stream(response, request)
 
 
