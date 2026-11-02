@@ -6,11 +6,11 @@
 {%- endmacro %}
 
 {% macro dispatch_closed(failed, ref) -%}
-子任务 {{ ref }} 在此执行——结果：{% if failed %}失败{% else %}已完成{% endif %}。其执行过程内联在下方，包含最终答复和任务收尾记录。
+子任务 {{ ref }} 在此执行——结果：{% if failed %}失败{% else %}已完成{% endif %}。其执行过程内联在上方，包含最终答复和任务收尾记录。
 {%- endmacro %}
 
 {% macro dispatch_cancelled(reason, ref) -%}
-子任务 {{ ref }} 在完成前被取消（{{ reason }}）；下方的部分执行过程尚未完成。
+子任务 {{ ref }} 在完成前被取消（{{ reason }}）；上方的部分执行过程尚未完成。
 {%- endmacro %}
 
 {% macro cancelled_act_recap() -%}
@@ -22,7 +22,7 @@
 {%- endmacro %}
 
 {% macro threshold_subtask_cancelled(ref) -%}
-子任务 {{ ref }} 在执行途中被取消（触发 session 失败阈值）；下方的部分执行并不完整。
+子任务 {{ ref }} 在执行途中被取消（触发 session 失败阈值）；上方的部分执行并不完整。
 {%- endmacro %}
 
 {% macro threshold_tripped_recap() -%}

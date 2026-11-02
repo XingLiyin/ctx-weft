@@ -665,7 +665,7 @@ async def test_H4_cross_agent_isolation() -> None:
 
 async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None:
     """H8（§2.5, 2026-07-03）：短同 agent 子任务 close → finalize 铸派发框 + 配对静态 ack，
-    框与 ack 同锚 task.started_at；框名取真名 delegate_task；child 合成 finish 对；child raw body 留 child 层。
+    框保留 task.started_at，ack 排在 child 收尾之后；child raw body 留 child 层。
 
     场景：无 eager 框（delegate_task 不再 eager 写），短 child close。
     """
@@ -700,7 +700,7 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
         act_recap="短任务", task_summary="",
     )
 
-    # §2.5(2026-07-03)：铸派发框（真名 delegate_task）+ 配对静态 ack，二者同锚 started_at
+    # Start retains started_at; the terminal result follows the child capsule.
     from ctx_weft.core.loop.steps.finalize import _dispatch_ack
     parent_caps = await mem.recall_recent(parent_agent_scope, [T.AGENT_CONVERSATION_TURN], 200, _pctx())
     frame = [r for r in parent_caps if task_record_kind(r) == "start"]
@@ -709,9 +709,9 @@ async def test_H8_short_same_agent_child_keeps_delegate_and_writes_ack() -> None
     assert ack and _dispatch_ack(task_ref(child_task), "success") in ack[0].content, (
         f"§2.5: static ack must be {_dispatch_ack(task_ref(child_task), 'success')!r}; got {[r.content for r in ack]}"
     )
-    assert frame[0].timestamp == started == ack[0].timestamp, (
-        f"框与 ack 须同锚 started_at；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
-    )
+    assert frame[0].timestamp == started
+    assert ack[0].timestamp > max(r.timestamp for r in parent_caps
+        if r.metadata.get("origin_task_id") == child_id)
 
     # child 自己合成 finish 对（同 agent scope）
     child_caps = parent_caps

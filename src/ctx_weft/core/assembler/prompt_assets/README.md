@@ -33,6 +33,15 @@ This preserves source IDs, timestamps and storage; no database migration or even
 rewrite is needed. Template edits also apply to this legacy read projection.
 TASK conversation records and real business tool calls remain unchanged.
 
+Dispatch labels follow task lifecycle order: start, inline child execution and
+closure, then terminal result before the parent resumes. Running acknowledgements
+stay at the start until replaced. Terminal results use the committed completion
+time, including after recovery; cross-agent results follow the same rule while
+keeping the child's private execution in its own agent scope. Historical results
+anchored to start are projected after a known inline child closure using task IDs
+and metadata, without changing stored rows or parsing rendered tags. When no child
+closure is available, historical timestamps are retained.
+
 Closed tasks have mutually exclusive full and minimal prompt views. A full capsule
 shows its retained task body, recap and final reply; its stored finish report is
 hidden. Short tasks label the original assistant answer using the persisted

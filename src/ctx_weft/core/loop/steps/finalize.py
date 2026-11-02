@@ -12,6 +12,7 @@ from ctx_weft.core.assembler.task_memory import (
 )
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from ctx_weft.core.assembler.prompts import runtime_prompt
@@ -114,13 +115,10 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     identifies the dispatch after transient origin_tool_call_id has been lost."""
     found = await _find_dispatch_frame(memory, parent_scope, task, provider_ctx)
     if found is not None:
-        # 幂等：框已铸（常态——ensure_dispatch_frame_at_start 在子 start 时就铸好了）。
-        # **返回框自己的 ts，而不是按当下 started_at 重算的 ts**：TaskManager 每次派发都刷新
-        # task.started_at，故 retry 过的子任务在 close 时算出的是**末次**派发时刻，而框停在首次。
-        # 用重算值会把终态 ack 写到框之外（漂进子 body 中间），断掉「框与 result 同锚、严格相邻」
-        # 的不变量——渲染虽有 reorder_tool_results_after_calls 兜底，但那是把正确性转嫁给 legalize。
+        # Retry may refresh started_at. Preserve the original frame and running
+        # acknowledgement anchor; terminal results use their completion time.
         return found
-    # 框与 result 的公共锚点：task 真正启动执行的时刻。归一为 aware(UTC)：started_at/created_at
+    # 框与 running ack 的公共锚点：task 真正启动执行的时刻。归一为 aware(UTC)：started_at/created_at
     # 可能来自事件重放而为 naive（历史无 started_at 时回退 created_at 再回退 now）。
     ts = _as_utc(task.started_at or task.created_at or now_utc())
     tool_call_id = task.origin_tool_call_id or generate_id("tcall")
@@ -145,11 +143,13 @@ def _parent_scope_of(state, task) -> MemoryAddress:
 
 
 async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, provider_ctx,
-                               *, replace: bool, tool_call_id: str, operation_id: str = "") -> None:
+                               *, replace: bool, tool_call_id: str, operation_id: str = "",
+                               completed_at: str = "") -> None:
     """Atomically replace the running child acknowledgement with a labeled result.
 
-    Start is idempotent; close/cancel supersedes the previous result. The group
-    and timestamp remain anchored to the start record, including after recovery."""
+    Start is idempotent; close/cancel supersedes the previous result. A terminal
+    result follows the child's closure, rather than sharing the start timestamp.
+    The committed completion time keeps this position stable during recovery."""
     from ctx_weft.protocols import MemoryAddress, MemoryKind, MemoryScope
     recs = await load_records(memory,
         MemoryAddress(session_id=parent_scope.session_id, agent_id=parent_scope.agent_id),
@@ -163,14 +163,22 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
         return
     if stale and not replace:
         return
+    # Closure has at most three slots: recap, final reply, finish. The dispatch
+    # result follows all of them, including when a late report adds a reply slot.
+    result_ts = ts
+    if replace:
+        completion = (datetime.fromisoformat(completed_at) if completed_at
+                      else getattr(task, "finished_at", None) or now_utc())
+        result_ts = _as_utc(completion) + timedelta(microseconds=3)
     # v2 P3d：旧 ack 遗忘 + 终态写入一次原子 fold（stale 空 = 纯写入）
     await memory.fold(stale, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
             content=render_task_record("result", task_id=task.id, title=task.title, body=content),
-            timestamp=ts, role="user", id=result_id,
+            timestamp=result_ts, role="user", id=result_id,
             metadata={"origin_task_id": task.parent_task_id,
                       "child_task_id": task.id,
+                      "dispatch_state": "closed" if replace else "running",
                       "task_memory": task_record_metadata("result", tool_call_id)},
         ),
     ], provider_ctx)
@@ -326,6 +334,8 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     raw_fold_scope = state.scope if (not short and not has_llm_summary) else None
     # 末段 raw 会被折 → 答复须由 finish 对的锚点槽承载；short leaf 不折（原文即胶囊）→ 不塞。
     final_reply = "" if short else _output_text(task.outputs)
+    completed_at = (getattr(state, "extra", {}).get("observe_completion", {}).get("completed_at")
+                    or _as_utc(getattr(task, "finished_at", None) or now_utc()).isoformat())
 
     # 1) bubble 到 parent scope（dispatch marker 所在 scope）
     # 判据只看 parent_task_id + mem_content：origin_tool_call_id 是瞬态字段，重启重建后为 None，
@@ -337,8 +347,8 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
         # 幂等命中；仅对没走过 start 钩子的路径（旧数据 / start 与 close 之间崩溃）才真正补铸。
         # tool 槽用 replace=True：start 时写的是 running 态，此处须**替换**为终态而非新增一条。
         if cross_agent:
-            # 跨 agent（spec 2026-06-28 §2.3）：dispatch result 写成 agent 层普通 conversation turn
-            # （tool 回合），与 start_task / delegate 框靠 tool_call_id 配对、时间戳对齐保证相邻。
+            # Cross-agent results carry the delivered output at completion time;
+            # the child's private body remains in its own agent scope.
             report_prefix = "[outcome=fail] " if outcome == "fail" else ""
             frame_ts, frame_tcid = await _ensure_dispatch_frame(
                 memory, parent_scope, task, ctx.provider_ctx)
@@ -346,6 +356,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                 memory, parent_scope, task, f"{report_prefix}{mem_content}", frame_ts,
                 ctx.provider_ctx, replace=True, tool_call_id=frame_tcid,
                 operation_id=getattr(state, "extra", {}).get("observe_id", ""),
+                completed_at=completed_at,
             )
             events.append(make_event(
                 state, EventType.MEMORY_INGESTED,
@@ -353,14 +364,15 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                          "source": "dispatch_result", "content_length": len(mem_content)},
             ))
         elif same_agent:
-            # 同 agent（spec 2026-06-30 §2.5）：配对 tool result 换终态文案，时间戳对齐框 → 严格
-            # 相邻、排在子 body 之前。子真实产出由内联胶囊 body + 嵌套 finish 对承载。
+            # The terminal result closes the inline child capsule. It no longer
+            # needs tool-call adjacency with the start label.
             frame_ts, frame_tcid = await _ensure_dispatch_frame(
                 memory, parent_scope, task, ctx.provider_ctx)
             await _put_dispatch_result(
                 memory, parent_scope, task, _dispatch_ack(task_ref(task), outcome), frame_ts,
                 ctx.provider_ctx, replace=True, tool_call_id=frame_tcid,
                 operation_id=getattr(state, "extra", {}).get("observe_id", ""),
+                completed_at=completed_at,
             )
             # 嵌套合成子自己的 finish 对（写进共享 agent scope，@close 时刻）
             await _synthesize_dispatch_pair(
@@ -368,7 +380,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                 raw_fold_scope=raw_fold_scope, final_reply=final_reply, preserve_raw=short,
                 summary_available=has_llm_summary,
                 operation_id=getattr(state, "extra", {}).get("observe_id", ""),
-                completed_at=getattr(state, "extra", {}).get("observe_completion", {}).get("completed_at", ""))
+                completed_at=completed_at)
 
     # 2) 自身 finish 对：own root（session 根或跨 agent 根）close 时无条件在 own scope 合成
     if is_own_root or getattr(task, "switched_to_task_id", ""):
@@ -377,7 +389,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
                                         final_reply=final_reply, preserve_raw=short,
                                         summary_available=has_llm_summary,
                                         operation_id=getattr(state, "extra", {}).get("observe_id", ""),
-                                        completed_at=getattr(state, "extra", {}).get("observe_completion", {}).get("completed_at", ""))
+                                        completed_at=completed_at)
         events.append(make_event(
             state, EventType.MEMORY_INGESTED,
             payload={"memory_event_type": MemoryEventType.AGENT_CONVERSATION_TURN.value,
@@ -422,6 +434,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
 
     act_recap = runtime_prompt('cancelled_act_recap')
     task_summary = runtime_prompt('cancelled_task_summary', reason=reason_text)
+    completed_at = _as_utc(task.finished_at or now_utc()).isoformat()
 
     if task.parent_task_id:
         parent_scope = MemoryAddress(
@@ -437,12 +450,13 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
         await _put_dispatch_result(
             memory, parent_scope, task, ack_text, frame_ts, provider_ctx, replace=True,
             tool_call_id=frame_tcid, operation_id=f"cancel:{task.id}",
+            completed_at=completed_at,
         )
         if same_agent:
             await _synthesize_dispatch_pair(
                 memory, parent_scope, task, act_recap, task_summary, "cancelled", provider_ctx,
                 operation_id=f"cancel:{task.id}",
-                completed_at=(task.finished_at.isoformat() if task.finished_at else ""),
+                completed_at=completed_at,
             )
             return
 
@@ -454,7 +468,7 @@ async def synthesize_cancel_closure(memory, session_id: str, task, provider_ctx,
         await _synthesize_dispatch_pair(
             memory, own_scope, task, act_recap, task_summary, "cancelled", provider_ctx,
             operation_id=f"cancel:{task.id}",
-            completed_at=(task.finished_at.isoformat() if task.finished_at else ""),
+            completed_at=completed_at,
         )
 
 

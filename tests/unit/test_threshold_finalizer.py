@@ -122,7 +122,8 @@ async def test_ack_task_running_ack_replaced_with_cancelled_text() -> None:
     assert len(tool_after) == 1
     assert "was cancelled mid-run" in tool_after[0].content
     assert "session failure threshold hit" in tool_after[0].content
-    assert "its partial execution below is incomplete" in tool_after[0].content
+    assert "its partial execution above is incomplete" in tool_after[0].content
+    assert tool_after[0].timestamp > tool_before[0].timestamp
     # 旧的 running ack 被 supersede（不再出现在 active recall 里）
     assert tool_after[0].id != tool_before[0].id
 

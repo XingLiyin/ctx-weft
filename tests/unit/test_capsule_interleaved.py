@@ -158,11 +158,11 @@ async def test_fail_outcome_prefix_in_tool_content():
 
 def test_dispatch_ack_carries_outcome_and_inline_pointer():
     """ack 在 close 时才写，已知 outcome → 让 delegate_task 这个调用解析出终态，
-    而不是永远停在 'started'；并导读下方的内联执行。"""
+    而不是永远停在 'started'；并导读上方的内联执行。"""
     ack = _dispatch_ack("抽取 TokenStore", "success")
     assert "抽取 TokenStore" in ack
     assert "completed" in ack, f"ack must resolve the call to a terminal outcome; got {ack!r}"
-    assert "inlined below" in ack, f"ack must point at the inline execution; got {ack!r}"
+    assert "inlined above" in ack, f"ack must point at the preceding inline execution; got {ack!r}"
     assert "control__finish_task" not in ack
 
 
@@ -329,11 +329,7 @@ async def test_embedded_process_report_in_outputs():
 # ── 端到端相邻性守护：同 agent 派发对 + 子任务胶囊 ────────────────────────────
 
 async def test_e2e_same_agent_subtask_no_400() -> None:
-    """端到端相邻性守护（spec 2026-06-30 §2.5）：parent delegate 同 agent 子任务，close 后经
-    AgentRecallSource + PromptBuilder 历史投影归并，每个 tool message 紧跟其 assistant tool_call，
-    且 delegate → _DISPATCH_ACK 严格相邻、子 body 排在 ack 之后、finish 对相邻。
-    Guards the 400 fix end-to-end.
-    """
+    """Legacy synthetic calls become labels around the child capsule, preserving real tool legality."""
     pctx = _ctx()
     mem = InMemoryMemoryProvider()
 
@@ -376,6 +372,7 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
         metadata={
             "origin_task_id": "P",
             "tool_call_id": origin_tcid,
+            "child_task_id": "C",
         },
     ), pctx)
 
@@ -416,12 +413,12 @@ async def test_e2e_same_agent_subtask_no_400() -> None:
 
     _assert_tool_follows_call(messages)
 
-    # ── delegate → _DISPATCH_ACK strictly adjacent ──
+    # Start precedes the child; its terminal result follows the final reply.
     start = next(i for i, m in enumerate(messages) if "<task_start" in str(m.content))
     result = next(i for i, m in enumerate(messages) if "<task_result" in str(m.content))
     child = next(i for i, m in enumerate(messages) if m.content == "child task")
     finish = next(i for i, m in enumerate(messages) if "<task_final_reply" in str(m.content))
     assert all("<task_finish" not in str(m.content) for m in messages)
-    assert start < result < child < finish
+    assert start < child < finish < result
     assert all(not m.tool_calls and m.role != "tool" for m in messages)
     assert any("child act recap" in str(m.content) for m in messages)

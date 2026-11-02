@@ -189,6 +189,8 @@ def project_task_history(records: Iterable[_Record], *, locale: str = "en") -> l
         )
         metadata = {k: v for k, v in md.items() if k not in {"tool_calls", "tool_call_id"}}
         metadata["task_memory"] = task_record_metadata(kind, group)
+        if kind in {"start", "result"} and task_id:
+            metadata["child_task_id"] = task_id
         projected.append(
             replace(
                 record,
@@ -275,6 +277,19 @@ def capsule_history(records: Iterable[_Record]) -> tuple[list[_Record], list[Tas
         if policy.get("capsule_state") != "lean" and len(members) < policy.get("slot_count", 1):
             continue  # An incomplete close is not a selectable capsule.
         closures[(*_owner(record), md.get("origin_task_id"))] = record
+
+    # Historical terminal results share the dispatch-start timestamp because
+    # they used to be synthetic tool results. Labels have no adjacency rule:
+    # project a known child's result after its closure without rewriting storage.
+    for record in projected:
+        if task_record_kind(record) != "result":
+            continue
+        child = record.metadata.get("child_task_id")
+        closing = closures.get((*_owner(record), child)) if child else None
+        if closing is not None and record.timestamp <= closing.timestamp:
+            by_id[record.id] = replace(
+                record, timestamp=closing.timestamp + timedelta(microseconds=1)
+            )
 
     suppressed = set()
     full_tasks = set()

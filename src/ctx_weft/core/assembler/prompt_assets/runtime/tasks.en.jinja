@@ -6,11 +6,11 @@ Sub-task {{ ref }} is running now — its execution follows below.
 {%- endmacro %}
 
 {% macro dispatch_closed(failed, ref) -%}
-Sub-task {{ ref }} ran here — outcome: {% if failed %}FAILED{% else %}completed{% endif %}. Its execution is inlined below, including its final reply and task report.
+Sub-task {{ ref }} ran here — outcome: {% if failed %}FAILED{% else %}completed{% endif %}. Its execution is inlined above, including its final reply and task report.
 {%- endmacro %}
 
 {% macro dispatch_cancelled(reason, ref) -%}
-Sub-task {{ ref }} was cancelled before completion ({{ reason }}); its partial execution below is incomplete.
+Sub-task {{ ref }} was cancelled before completion ({{ reason }}); its partial execution above is incomplete.
 {%- endmacro %}
 
 {% macro cancelled_act_recap() -%}
@@ -22,7 +22,7 @@ Cancelled ({{ reason }}) — no final output was produced; the partial execution
 {%- endmacro %}
 
 {% macro threshold_subtask_cancelled(ref) -%}
-Sub-task {{ ref }} was cancelled mid-run (session failure threshold hit); its partial execution below is incomplete.
+Sub-task {{ ref }} was cancelled mid-run (session failure threshold hit); its partial execution above is incomplete.
 {%- endmacro %}
 
 {% macro threshold_tripped_recap() -%}

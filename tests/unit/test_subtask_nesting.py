@@ -1,9 +1,6 @@
 """Task 9: sub-task bubble split + same-agent nested capsule.
 
-同 agent child close:
-  - parent scope TASK_DISPATCH_RESULT content == "Sub-task '<title>' scheduled."
-  - parent scope 含 child 的 AGENT_CONVERSATION_TURN (origin_task_id=child.id)
-    排在 dispatch pair 之后
+同 agent child close：start 保留首次启动时间，child 胶囊内联，终态 result 排在胶囊之后。
 
 跨 agent child close:
   - parent scope TASK_DISPATCH_RESULT content == mem_content (含 "Process Report:")
@@ -78,9 +75,7 @@ async def _seed_conv_nonshort(mem, scope) -> None:
 
 
 async def test_same_agent_child_mints_frame_and_writes_ack() -> None:
-    """§2.5(2026-07-03)：同 agent child close → finalize **铸**派发框 + 配对静态 ack，二者**同锚
-    task.started_at**（gateway 不再为 delegate_task eager 写框）→ 框与 result 严格相邻、落在「任务开始
-    执行」时间线上。框名取 task.origin_tool_name（delegate_task 子 = 真名，保真）。"""
+    """Child close writes a start at started_at and a terminal result after its capsule."""
     from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
     mem = InMemoryMemoryProvider()
     child_scope = _sc("c1", "ag1")
@@ -108,14 +103,15 @@ async def test_same_agent_child_mints_frame_and_writes_ack() -> None:
     frame = [r for r in turns if task_record_kind(r) == "start" and task_record_group(r) == 'oc1']
     assert frame, "finalize 须为 delegate_task 子铸一条派发框（真名 delegate_task）"
     assert frame[0].timestamp == started, "框须锚 started_at"
-    # 配对静态 ack，同锚 started_at → 与框同时间戳（严格相邻）
+    # Terminal result follows the child closure; the start retains started_at.
     ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "oc1"]
     assert ack and _dispatch_ack(task_ref(child), "success") in ack[0].content, (
         f"§2.5: static ack content must be {_dispatch_ack(task_ref(child), 'success')!r}; got {[r.content for r in ack]}"
     )
-    assert ack[0].timestamp == started == frame[0].timestamp, (
-        f"框与 result 须同锚 started_at（相邻）；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
-    )
+    assert frame[0].timestamp == started
+    assert ack[0].timestamp > max(r.timestamp for r in turns
+        if r.metadata.get("origin_task_id") == child.id)
+    assert ack[0].metadata["dispatch_state"] == "closed"
 
 
 # ── start 时铸框 + running ack（driver.run 钩子）────────────────────────────
@@ -209,14 +205,11 @@ async def test_close_replaces_running_ack_with_terminal() -> None:
     assert len(acks) == 1, f"同一 tool_call_id 只能有一条 active result；got {[a.content for a in acks]}"
     assert _dispatch_ack(task_ref(child), "success") in acks[0].content
     assert "running" not in acks[0].content, "running 态须被终态替换掉"
-    assert acks[0].timestamp == started, "替换后仍须锚 started_at（与框相邻）"
+    assert acks[0].timestamp > started, "终态 result 须落在完成时刻，不再回填开始时刻"
 
 
-async def test_close_ack_stays_co_anchored_with_frame_after_retry() -> None:
-    """retry 会刷新 task.started_at（TM 每次派发都写）。close 替换 ack 时须沿用**框自己的**
-    时间戳，而不是按当下的 started_at 重算——否则框停在首次 started_at、ack 落到末次，
-    「框与 result 同锚、严格相邻」的不变量断裂，ack 在原始存储里漂进子 body 中间。
-    """
+async def test_close_ack_follows_completion_while_frame_preserves_first_start_after_retry() -> None:
+    """Retry preserves the first start; the terminal result follows the final attempt's closure."""
     from ctx_weft.core.loop.steps.finalize import ensure_dispatch_frame_at_start
 
     mem = InMemoryMemoryProvider()
@@ -243,10 +236,9 @@ async def test_close_ack_stays_co_anchored_with_frame_after_retry() -> None:
     ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "oc1"]
     assert len(frame) == 1 and len(ack) == 1
     assert frame[0].timestamp == first_start, "框须保持首次 started_at，不被 retry 改写"
-    assert ack[0].timestamp == frame[0].timestamp, (
-        f"终态 ack 须与框同锚；frame={frame[0].timestamp} ack={ack[0].timestamp} "
-        f"(retry 后的 started_at={child.started_at})"
-    )
+    assert ack[0].timestamp > max(r.timestamp for r in turns
+        if r.metadata.get("origin_task_id") == child.id)
+    assert ack[0].timestamp > child.started_at
 
 
 async def test_same_agent_child_finish_pair_written_into_parent_scope() -> None:
@@ -338,7 +330,7 @@ async def test_cross_agent_child_bubble_is_conversation_turn() -> None:
 
 async def test_same_agent_close_mints_frame_and_ack_co_anchored() -> None:
     """§2.5(2026-07-03)：同 agent close（_close_one）铸派发框 + 配对静态 ack，
-    框与 ack 同锚 task.started_at（同时间戳 → 相邻），无 eager 框预置；框名取真名 delegate_task。"""
+    框保留 task.started_at，终态 ack 落在子任务收尾之后，无 eager 框预置。"""
     from ctx_weft.core.loop.steps.finalize import _close_one, _dispatch_ack
     from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
 
@@ -364,12 +356,12 @@ async def test_same_agent_close_mints_frame_and_ack_co_anchored() -> None:
     frame = [r for r in turns if task_record_kind(r) == "start" and task_record_group(r) == 'oc1']
     assert frame, "_close_one 须铸派发框（真名 delegate_task）"
 
-    # 配对静态 result：content=_dispatch_ack(title)、tool_call_id 配对、与框同锚 started_at
+    # The paired terminal result follows the child closure.
     ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "oc1"]
     assert ack and _dispatch_ack(task_ref(child), "success") in ack[0].content, f"expected static ack {_dispatch_ack(task_ref(child), 'success')!r}, got {[r.content for r in ack]}"
-    assert frame[0].timestamp == started == ack[0].timestamp, (
-        f"框与 ack 须同锚 started_at；frame={frame[0].timestamp} ack={ack[0].timestamp} started={started}"
-    )
+    assert frame[0].timestamp == started
+    assert ack[0].timestamp > max(r.timestamp for r in turns
+        if r.metadata.get("origin_task_id") == child.id)
 
     # stray-ack guard：no OTHER tool record carries ack content
     assert _dispatch_ack(task_ref(child), "success") not in {
@@ -415,10 +407,8 @@ async def test_ensure_dispatch_frame_mixed_tz_no_crash() -> None:
     assert ts.tzinfo is not None, "naive 框 ts 须被归一为 aware，否则调用方与 aware 比较时 TypeError"
 
 
-async def test_concurrent_same_agent_dispatch_pairs_stay_adjacent() -> None:
-    """多个同 agent delegate_task 各自 close：每对 frame+ack 同锚各自 started_at → 按 composer 的
-    (timestamp, seq_no) 排序严格成对相邻（F0,R0,F1,R1,F2,R2），不再 F,F,F,R,R,R 堆叠错序。
-    再过 legalize_messages 确认 provider 合法（每 assistant tool_use 紧跟其 tool result）。"""
+async def test_overlapping_children_keep_start_order_and_results_follow_their_closures() -> None:
+    """Starts and terminal results follow their actual lifecycle, without synthetic tool adjacency."""
     from ctx_weft.core.loop.llm_gateway import legalize_messages
     from ctx_weft.core.capabilities.control_tools import DELEGATE_TASK_NAME
     from ctx_weft.protocols import LLMMessage
@@ -445,7 +435,12 @@ async def test_concurrent_same_agent_dispatch_pairs_stay_adjacent() -> None:
 
     dispatch = [r for r in recs if task_record_group(r) in dispatch_ids]
     assert [(task_record_kind(r), task_record_group(r)) for r in dispatch] == [
-        (kind, f"oc{i}") for i in range(3) for kind in ("start", "result")]
+        (kind, f"oc{i}") for kind in ("start", "result") for i in range(3)]
+    for i in range(3):
+        result = next(r for r in dispatch if task_record_kind(r) == "result"
+                      and task_record_group(r) == f"oc{i}")
+        assert result.timestamp > max(r.timestamp for r in recs
+            if r.metadata.get("origin_task_id") == f"c{i}")
     assert all(r.role == "user" and not r.metadata.get("tool_calls") for r in dispatch)
     msgs = [LLMMessage(role=r.role, content=r.content) for r in recs]
     assert "\n\n".join(m.content for m in legalize_messages(msgs)) == "\n\n".join(m.content for m in msgs)
@@ -521,10 +516,11 @@ async def test_plan_child_mints_start_task_frame_when_absent() -> None:
     assert frame[0].metadata.get("origin_task_id") == "p1", "frame stays in delegating(p1) unit (留父)"
     assert frame[0].timestamp == created, "frame back-dated to child.created_at for adjacency"
 
-    # the paired ACK result shares the frame's tool_call_id and timestamp
+    # The paired result shares the frame's group, but follows task completion.
     ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "tcall_plan_c1"]
     assert ack, "paired result must carry the same tool_call_id"
-    assert ack[0].timestamp == frame[0].timestamp, "result adjacent to its frame"
+    assert ack[0].timestamp > max(r.timestamp for r in turns
+        if r.metadata.get("origin_task_id") == child.id)
 
 
 async def test_plan_child_frame_anchors_at_started_at() -> None:
@@ -553,7 +549,8 @@ async def test_plan_child_frame_anchors_at_started_at() -> None:
     assert frame[0].timestamp == started, "frame 须锚在 started_at（task manager 真正启动时），非 created_at"
 
     ack = [r for r in turns if task_record_kind(r) == "result" and task_record_group(r) == "tcall_plan_c1"]
-    assert ack and ack[0].timestamp == started, "paired ack 须与 frame 同锚 started_at"
+    assert ack and ack[0].timestamp > max(r.timestamp for r in turns
+        if r.metadata.get("origin_task_id") == child.id)
 
 
 async def test_cross_agent_child_no_nested_capsule_in_parent_scope() -> None:

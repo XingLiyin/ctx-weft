@@ -92,7 +92,7 @@ async def _ingest_delegate_pair(mem, parent_scope, *, tool_call_id, child_title,
     await _ingest(
         mem, T.TASK_DISPATCH_RESULT, parent_scope,
         f"Sub-task '{child_title}' scheduled.", anchor_t, role="tool",
-        tool_call_id=tool_call_id, child_task_id="ignored", title=child_title,
+        tool_call_id=tool_call_id, child_task_id="C", title=child_title,
     )
 
 
@@ -228,9 +228,10 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
 
     expected = [
         "P:UP", "P:LLM",
-        "P:DELEGATE_call", "P:DELEGATE_result",
+        "P:DELEGATE_call",
         "C:UP", "C:SUMMARY", "C:LLM2",
         "C:FINISH_call",
+        "P:DELEGATE_result",
         "P:RESUME",
         "P:FINISH_call",
     ]
@@ -242,13 +243,13 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
     # (1) C 子树严格落在 P delegate 对 与 P 续跑 之间 —— NOT 混入 P 后续回合
     c_subtree = [pos["C:UP"], pos["C:SUMMARY"], pos["C:LLM2"],
                  pos["C:FINISH_call"]]
-    assert pos["P:DELEGATE_result"] < min(c_subtree), "C subtree must start after P's delegate pair"
+    assert pos["P:DELEGATE_call"] < min(c_subtree), "C subtree must start after its start label"
     assert max(c_subtree) < pos["P:RESUME"], (
         "C subtree must end BEFORE P's resume (would mis-order if seq_no-primary / write-time ts)"
     )
 
-    # (2) delegate 对相邻
-    assert pos["P:DELEGATE_result"] == pos["P:DELEGATE_call"] + 1, "delegate pair must be adjacent"
+    # Terminal labels follow the inline execution; only real tools need adjacency.
+    assert max(c_subtree) < pos["P:DELEGATE_result"] < pos["P:RESUME"]
     # Full capsules expose the final reply; their minimal report stays hidden.
     assert "C:FINISH_report" not in pos and "P:FINISH_report" not in pos
 

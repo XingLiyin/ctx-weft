@@ -87,7 +87,9 @@ async def test_same_agent_started_task_ack_replaced_and_nested_finish_pair() -> 
     ack = [r for r in tool_recs if task_record_group(r) == "call-1"]
     assert len(ack) == 1
     assert "Sub-task 'Child c1' (c1) was cancelled before completion (user_cancel)" in ack[0].content
-    assert "its partial execution below is incomplete" in ack[0].content
+    assert "its partial execution above is incomplete" in ack[0].content
+    assert ack[0].timestamp > max(r.timestamp for r in recs
+        if r.metadata.get("origin_task_id") == child.id)
 
     # 嵌套 finish 对（同 agent 共享 scope）：assistant 槽收尾标记 + tool 槽 [outcome=cancelled]
     finish_tool = [r for r in tool_recs if r.metadata.get("origin_task_id") == "c1"]
