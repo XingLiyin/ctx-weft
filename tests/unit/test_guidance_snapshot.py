@@ -1,4 +1,6 @@
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
@@ -91,7 +93,7 @@ async def test_prepare_collects_through_assembler_and_consumes_hint_after_reasse
         settings=NormalTaskSettings(),
     )
     manager = NS(all_tasks=lambda: [task])
-    state = NS(task=task, agent=NS(), session=NS(), scope=NS(), extra={})
+    state = NS(resolved_model=model_snapshot(), task=task, agent=NS(), session=NS(), scope=NS(), extra={})
     snapshots = []
 
     async def assemble(request):

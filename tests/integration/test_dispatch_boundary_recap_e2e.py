@@ -111,7 +111,7 @@ async def test_dispatch_boundary_recap_e2e():
     handle = await runtime.start_session(
         SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="delegate then finish",
-            context_limit=100_000,
+
         )
     )
     await handle.wait_for_finish(timeout=8.0)

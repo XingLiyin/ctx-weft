@@ -14,6 +14,8 @@ fixture（仓里不存在），改用与 Task 2 的 `test_loop_reports_outcome.p
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from types import SimpleNamespace
 
@@ -95,7 +97,7 @@ async def _events_from_park() -> list:
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=LoopConfig())
     scope = MemoryAddress(session_id="s_park_3", task_id="tsk_park_3", agent_id="agt_p3")
-    state = LoopState(run_id="run_p3", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+    state = LoopState(run_id="run_p3", session=session, task=task, agent=agent, scope=scope, resolved_model=model_snapshot(model="mock", account=""))
 
     class _ParkingDriver:
         async def run(
@@ -186,7 +188,7 @@ async def _events_from_cancel() -> list:
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=LoopConfig())
     scope = MemoryAddress(session_id="s_cancel_3", task_id="tsk_cancel_3", agent_id="agt_c3")
-    state = LoopState(run_id="run_c3", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+    state = LoopState(run_id="run_c3", session=session, task=task, agent=agent, scope=scope, resolved_model=model_snapshot(model="mock", account=""))
 
     class _CancellingDriver:
         async def run(
@@ -247,7 +249,7 @@ async def _events_from_crash(exc: BaseException) -> tuple[list, BaseException]:
                  loop_guard=LoopGuard(), memory_config=MemoryConfig(),
                  loop_config=LoopConfig())
     scope = MemoryAddress(session_id="s_crash_3", task_id="tsk_crash_3", agent_id="agt_x3")
-    state = LoopState(run_id="run_x3", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+    state = LoopState(run_id="run_x3", session=session, task=task, agent=agent, scope=scope, resolved_model=model_snapshot(model="mock", account=""))
 
     class _CrashingDriver:
         async def run(

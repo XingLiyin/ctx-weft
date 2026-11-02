@@ -175,7 +175,7 @@ async def test_reply_to_a_terminal_task_opens_no_window() -> None:
     rt = _runtime(llm, hitl_timeout_sec=0)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
@@ -198,7 +198,7 @@ async def test_no_resume_delivery_opens_no_window() -> None:
     rt = _runtime(llm, hitl_timeout_sec=0)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)

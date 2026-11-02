@@ -12,6 +12,9 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -152,7 +155,7 @@ def _request_for(task_id: str, m: InMemoryMemoryProvider) -> tuple[ContextReques
     task = Task(id=task_id, session_id="s1", status="ACTIVE")
     agent = Agent(id="a", session_id="s1", template_id="t")
     session = Session(id="s1", user_prompt="go")
-    req = ContextRequest(
+    req = ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id=task_id, agent_id="a"),
         task=task, agent=agent, session=session, template=None, bound_capabilities=[],
     )
@@ -241,7 +244,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
     )
 
     # (a) Blackboard block alone — old section must be absent.
-    req_no_extra = ContextRequest(
+    req_no_extra = ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     text = "\n".join(
@@ -251,7 +254,7 @@ async def test_composer_renders_subtask_results_with_title() -> None:
     )
 
     # (b) New path: extra["subtasks"] still renders the cue.
-    req_with_extra = ContextRequest(
+    req_with_extra = ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],        extra={"subtasks": [{"task_id": "K1", "title": "Build report", "outcome": "success"}]},
     )
@@ -271,7 +274,7 @@ async def test_composer_splits_subtask_and_predecessor_sections() -> None:
     # what blackboard blocks are present. The judgment cue must still be there.
     task = Task(id="T", session_id="s1", status="ACTIVE", title="Parent")
     session = Session(id="s1", user_prompt="go")
-    req = ContextRequest(
+    req = ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     sub = ContextBlock(
@@ -301,7 +304,7 @@ async def test_composer_no_related_results_when_empty() -> None:
     # The extra["subtasks"] section ("## Your sub-tasks") is also absent when there are none.
     task = Task(id="T", session_id="s1", status="ACTIVE", title="Parent")
     session = Session(id="s1", user_prompt="go")
-    req = ContextRequest(
+    req = ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose="observe", scope=MemoryAddress(session_id="s1", task_id="T", agent_id="a"),
         task=task, agent=None, session=session, template=None, bound_capabilities=[],    )
     msgs = compile_prompt([], req).messages

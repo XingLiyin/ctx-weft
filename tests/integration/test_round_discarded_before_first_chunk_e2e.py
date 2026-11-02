@@ -109,7 +109,7 @@ async def test_pause_before_first_chunk_discards_the_whole_round() -> None:
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="hi",
-        context_limit=_MOCK_CONTEXT_LIMIT, unattended=True))
+         unattended=True))
     sid = handle.session_id
     aid = handle.agent_id
     await asyncio.sleep(0.5)                        # 让第一轮跑完并落终态

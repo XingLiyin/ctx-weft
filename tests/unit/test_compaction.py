@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -84,11 +86,6 @@ class _FakeLLM:
 
 def _agent(cfg: LoopConfig, context_limit: int = 1000) -> Agent:
     a = Agent(id="ag1", session_id="s1", template_id="tpl", loop_config=cfg)
-    a.loop_guard.context_limit = context_limit
-    # 本文件用小尺度 context_limit（如 1000）模拟 token 预算比率，与真实 reserved_output_tokens
-    # 默认值 8192 不在同一量纲（会把 effective_limit 吞成 0）；清零以保留 eff == context_limit
-    # 的既有测试口径（Task 8：compact 触发/目标改用 effective_limit 后需要此项显式对齐）。
-    a.loop_guard.reserved_output_tokens = 0
     return a
 
 
@@ -100,7 +97,7 @@ def _state(active: Task, cfg: LoopConfig, context_limit: int = 1000,
     # 门总是打开）——迁移自旧 count-based _compact_scope 的测试显式传本参数模拟"未达预算"。
     agent.loop_guard.context_tokens = context_limit if context_tokens is None else context_tokens
     return LoopState(run_id="run1", session=session, task=active,
-                     agent=agent, scope=_sc(active.id, "ag1"), resolved_model=SimpleNamespace(model="mock", account=""))
+                     agent=agent, scope=_sc(active.id, "ag1"), resolved_model=model_snapshot(model="mock", account="", context_limit=context_limit))
 
 
 def _loop_ctx(mem, tm, *, with_assembler: bool = False):
@@ -160,9 +157,8 @@ async def test_trigger_no_division_when_limit_or_estimate_zero() -> None:
     mem = InMemoryMemoryProvider()
     cfg = LoopConfig(compact_message_delta=10_000)
     step = PrepareStep()
-    # context_limit == 0 → skip token branch (no ZeroDivision), no growth → False
-    s0 = _state(_active_task(), cfg, context_limit=0)
-    assert await step._should_compact(s0, _loop_ctx(mem, _FakeTM({})), token_estimate=999) is False
+    with pytest.raises(ValueError, match="context_limit"):
+        _state(_active_task(), cfg, context_limit=0)
     # token_estimate == 0 → skip token branch
     s1 = _state(_active_task(), cfg, context_limit=1000)
     assert await step._should_compact(s1, _loop_ctx(mem, _FakeTM({})), token_estimate=0) is False

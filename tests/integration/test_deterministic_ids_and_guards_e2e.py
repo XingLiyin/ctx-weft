@@ -75,7 +75,7 @@ async def test_staged_records_sort_after_everything_already_in_memory() -> None:
     rt = _runtime(llm, hitl_timeout_sec=0)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
@@ -128,7 +128,7 @@ async def test_compact_refuses_while_a_round_is_open() -> None:
     rt = _runtime(llm, hitl_timeout_sec=0)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid, aid = handle.session_id, handle.agent_id
     q1 = await _next_question(rt, sid)
     await initialize_all(rt)
@@ -164,7 +164,7 @@ async def test_only_the_same_tasks_bubble_follows_the_round() -> None:
     rt = _runtime(llm, hitl_timeout_sec=0)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)

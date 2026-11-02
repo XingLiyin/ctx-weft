@@ -51,8 +51,7 @@ def _running_tm(rt: CtxWeftRuntime, session: Session, task_id: str) -> TaskManag
 
 def _tm(bus: InProcessEventBus) -> TaskManager:
     tm = TaskManager(session_id="s1", event_bus=bus, max_concurrent=1)
-    tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x",
-                            token_budget=0))
+    tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x"))
     return tm
 
 
@@ -147,8 +146,7 @@ async def test_register_and_drain_refuses_a_second_tm() -> None:
     同一个 agent 上就会并发出两个 run。"""
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())
-    sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                    token_budget=0)
+    sess = Session(id="s1", tenant_id="default", user_prompt="x")
 
     tm_old = TaskManager(session_id="s1", event_bus=rt._event_bus, max_concurrent=1)
     tm_old.set_runner(StubRunner(tm_old, _noop_runner))
@@ -172,8 +170,7 @@ async def test_evicted_tm_is_no_longer_current() -> None:
     不再是 owner（它迟到的收尾因此变 no-op，见下面两条端到端用例）。"""
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                         agent_provider=InlineAgentTemplateProvider())
-    sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                    token_budget=0)
+    sess = Session(id="s1", tenant_id="default", user_prompt="x")
 
     tm_old = TaskManager(session_id="s1", event_bus=rt._event_bus, max_concurrent=1)
     tm_old.set_runner(StubRunner(tm_old, _noop_runner))
@@ -316,7 +313,7 @@ async def test_slow_prior_turn_bg_observe_does_not_clobber_next_turn() -> None:
     rt._event_bus.subscribe(EventType.SESSION_FINISHED, _capture)
 
     # ── 第 N 轮 "6"：任务完成，但其 background observe 慢 ──
-    sess = Session(id=sid, tenant_id="default", user_prompt="6",  token_budget=0)
+    sess = Session(id=sid, tenant_id="default", user_prompt="6")
     tm = _running_tm(rt, sess, "t6")
     release = asyncio.Event()
 
@@ -367,12 +364,12 @@ async def test_probe_prior_turn_finishing_after_supersession() -> None:
 
     rt._event_bus.subscribe(None, _cap)
 
-    sess6 = Session(id=sid, tenant_id="default", user_prompt="6",  token_budget=0)
+    sess6 = Session(id=sid, tenant_id="default", user_prompt="6")
     tm6 = _running_tm(rt, sess6, "t6")
 
     # 旧 TM 被逐出、新 TM 接管，旧 TM 的任务此后才结束
     rt._evict_session_memory(sid)
-    sess7 = Session(id=sid, tenant_id="default", user_prompt="7",  token_budget=0)
+    sess7 = Session(id=sid, tenant_id="default", user_prompt="7")
     tm7 = _running_tm(rt, sess7, "t7")
     rt._pausing.add(sid)
 

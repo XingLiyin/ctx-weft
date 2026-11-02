@@ -30,8 +30,7 @@ class _Client:
 
 def _fake_resolved_model() -> ResolvedModel:
     c = _Client()
-    return ResolvedModel(client=c, account=c.account, model=c.model,
-                         context_limit=c.context_limit, reserved_output_tokens=c.output_reserve)
+    return ResolvedModel.from_client(c)
 
 
 def _make_runtime_and_session():
@@ -50,7 +49,7 @@ def _make_runtime_and_session():
 
     session = Session(
         id="ses_1", tenant_id="default", user_prompt="x",
-        root_agent_id="agt_1", llm_provider="acct1", llm_model="m1", token_budget=0,
+        root_agent_id="agt_1", llm_provider="acct1", llm_model="m1",
     )
     task = Task(
         id="tsk_1", session_id="ses_1", status="ACTIVE", tenant_id="default",

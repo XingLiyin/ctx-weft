@@ -1,3 +1,5 @@
+
+from tests.model_testkit import model_snapshot
 """A failed generation is revoked before retry; consumers see only fresh state."""
 
 import asyncio
@@ -42,7 +44,7 @@ def state():
     return SimpleNamespace(agent=SimpleNamespace(id="a", loop_guard=None),
                            session=SimpleNamespace(id="s", tenant_id="t", token_used=0),
                            task=SimpleNamespace(id="task"), run_id="run",
-                           sequence_counter=0, resolved_model=SimpleNamespace(model="m", account="acc"))
+                           sequence_counter=0, resolved_model=model_snapshot(model="m", account="acc"))
 
 
 def request():

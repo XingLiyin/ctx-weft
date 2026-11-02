@@ -38,7 +38,7 @@ async def worker(path, cut, recovering):
                 await asyncio.sleep(10)
                 raise AssertionError("recovery did not reach injected crash")
             handle = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="OLD REQUEST", context_limit=100000, unattended=True))
+                template_id="agent:tpl_echo", user_prompt="OLD REQUEST",  unattended=True))
             await asyncio.wait_for(llm.review_started.wait(), 10)
             await rt.pause_agent(handle.agent_id)
             await asyncio.sleep(10)

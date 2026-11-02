@@ -1,3 +1,6 @@
+
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextBlock
@@ -7,7 +10,7 @@ from tests.assembler_testkit import context_from_blocks
 
 def test_core_renders_skill_body_without_adding_usage_instructions():
     body = "Run scripts/convert.py to convert the file."
-    request = SimpleNamespace(
+    request = SimpleNamespace(resolved_model=model_snapshot(20000, 0),
         purpose="act", intent=None, extra={}, template=None,
         task=SimpleNamespace(
             id="task-1", title="Task", description="", user_prompt="convert",

@@ -91,8 +91,7 @@ async def test_crash_retry_then_suspend_order() -> None:
 
     await initialize_all(runtime)
     handle = await runtime.start_session(
-        SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="hi",
-                                  context_limit=_MOCK_CONTEXT_LIMIT))
+        SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="hi"))
     await _wait_for(seen, TASK_INTERRUPTED)
 
     types = [e.type for e in seen]

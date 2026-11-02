@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.driver import StepDriver
@@ -50,7 +52,7 @@ async def test_launch_runs_step_on_snapshot(monkeypatch):
         transcript=[object()],
         verdict=object(),
         extra={"template": SimpleNamespace(), "bound_capabilities": ["CAP"]},
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
 
     class _FakeEventBus:

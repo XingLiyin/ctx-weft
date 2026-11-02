@@ -13,6 +13,9 @@ raw 删掉、也不另产段摘要 —— 答复在胶囊里无处安放。补�
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -269,7 +272,7 @@ async def test_rendered_messages_put_finish_call_on_the_reply() -> None:
     await _close(mem, _task(), scope)
 
     deps = AssemblerDeps(memory=mem, knowledge_providers=[], provider_ctx=_pctx())
-    req = ContextRequest(purpose="act", scope=_sc("t2"), task=None, agent=None, session=None,
+    req = ContextRequest(resolved_model=model_snapshot(100_000, 0), purpose="act", scope=_sc("t2"), task=None, agent=None, session=None,
                          template=None, bound_capabilities=[])
     blocks = await recalled_blocks(req, deps)
     msgs = history_messages(blocks, task_id="t2")

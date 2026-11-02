@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 import dataclasses
 from types import SimpleNamespace
@@ -93,7 +95,7 @@ def _make_observe_state_ctx(task: Task, act_exit_reason: str):
         scope=scope,
         act_exit_reason=act_exit_reason,
         extra={"template": None},
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
 
     class _FakeEventBus:
@@ -263,7 +265,7 @@ async def test_act_soft_interrupt_fires_for_root(monkeypatch):
     )
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope, prompt_inputs=scripted_inputs(prompt),
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     llm = MockLLMAdapter(responses=[MockResponse(text="partial")])
     ctx = LoopContext(
@@ -318,7 +320,7 @@ async def test_act_soft_interrupt_child_task_schedules_recap(monkeypatch):
     )
     state = LoopState(
         run_id="r1", session=session, task=child, agent=agent, scope=scope, prompt_inputs=scripted_inputs(prompt),
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     llm = MockLLMAdapter(responses=[MockResponse(text="partial")])
     ctx = LoopContext(
@@ -365,7 +367,7 @@ async def test_act_plain_text_pause_fires_for_root(monkeypatch):
 
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope,
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=SimpleNamespace(compile=compiled_test_inputs), llm=None, memory=mem, event_bus=bus,
@@ -412,7 +414,7 @@ async def test_act_plain_text_pause_child_task_fires(monkeypatch):
 
     state = LoopState(
         run_id="r1", session=session, task=child, agent=agent, scope=scope,
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=SimpleNamespace(compile=compiled_test_inputs), llm=None, memory=mem, event_bus=bus,
@@ -439,7 +441,7 @@ def _make_suspend_state_ctx(task: Task):
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None},
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
 
     class _FakeEventBus:

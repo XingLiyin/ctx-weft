@@ -161,8 +161,7 @@ async def test_repeated_edit_retract_finish_restart_and_next_task(tmp_path, entr
             rt = runtime(store, memory, llm, short)
             await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
-                context_limit=100000))
+                template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True))
             await asyncio.wait_for(llm.old_review.wait(), 10)
             await rt.pause_agent(h.agent_id)
             tm = rt._task_managers[SID]
@@ -221,8 +220,7 @@ async def test_immediate_input_from_confirmed_pause_notice_remains_retractable(t
             rt = runtime(store, memory, llm, False)
             await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
-                context_limit=100000))
+                template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True))
             await asyncio.wait_for(llm.old_review.wait(), 10)
             old = []
             rejected = []
@@ -274,8 +272,7 @@ async def test_resume_after_input_commit_failure_finishes_and_accepts_next_work(
             rt = runtime(store, memory, llm, False)
             await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
-                context_limit=100000))
+                template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True))
             await asyncio.wait_for(llm.old_review.wait(), 10)
             await rt.pause_agent(h.agent_id)
             await idle(rt)
@@ -413,8 +410,7 @@ async def test_uncertain_input_then_repeated_finish_failure_retains_original_run
             rt = runtime(store, memory, llm, False)
             await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
-                context_limit=100000))
+                template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True))
             await asyncio.wait_for(llm.old_review.wait(), 10)
             await rt.pause_agent(h.agent_id)
             await idle(rt)

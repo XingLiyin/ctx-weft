@@ -1,6 +1,8 @@
 """run_observe_react：跑 ReAct，仅 terminal_tool_name 被调用时终止；不写 task 状态。"""
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import pytest
@@ -100,7 +102,7 @@ def _make_state():
         agent=agent,
         scope=scope,
         extra={"template": None, "bound_capabilities": []},
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     return state
 

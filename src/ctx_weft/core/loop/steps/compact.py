@@ -44,7 +44,6 @@ from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text, image_tokens
-from ctx_weft.core.utils.estimate import effective_limit
 from ctx_weft.protocols import (
     MemoryAddress,
     MemoryEvent,
@@ -200,6 +199,7 @@ async def summarize_for_compact(
         task=state.task,
         agent=agent,
         session=state.session,
+        resolved_model=state.resolved_model,
         template=state.extra.get("template"),
         bound_capabilities=state.extra.get("bound_capabilities", []),
         token_counter=ctx.llm.tokenizer.count,
@@ -412,9 +412,7 @@ async def maybe_compact_before_dispatch(
     ratio = getattr(agent.loop_config, "predispatch_compact_token_ratio", 0.0)
     if ratio <= 0:
         return []
-    context_limit = agent.loop_guard.context_limit
-    reserve = getattr(agent.loop_guard, "reserved_output_tokens", 0)
-    eff = effective_limit(context_limit, reserve)
+    eff = state.resolved_model.effective_input_limit
     tokens = prompt_tokens or agent.loop_guard.context_tokens
     if eff <= 0 or tokens <= 0:
         return []
@@ -740,16 +738,14 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int) -
 
 
 async def escalating_compact(
-    state: LoopState, ctx: LoopContext, *, token_estimate: int, trigger: str = "compact"
+    state: LoopState, ctx: LoopContext, *, token_estimate: int, trigger: str = "compact", force: bool = False
 ) -> list[Any]:
     """预算驱动升级式 compact（替 _compact_scope）：L0.5 图片降级 → L1 agent 折 → L2 rich→lean → L3 坍当前 task，
     每级后用 _active_memory_tokens 的增量从 token_estimate 累减，降到 target 以下即停。
     级间不完整重装配（Q4=c，调用方进 act 前重装配一次校正）。无 context_limit 或已达标 → []。"""
     agent = state.agent
     lc = agent.loop_config
-    context_limit = agent.loop_guard.context_limit
-    reserve = getattr(agent.loop_guard, "reserved_output_tokens", 0)
-    eff = effective_limit(context_limit, reserve)
+    eff = state.resolved_model.effective_input_limit
     if eff <= 0:
         return []
     target_ratio = lc.compact_target_ratio if getattr(lc, "compact_target_ratio", 0.0) > 0 \
@@ -761,7 +757,7 @@ async def escalating_compact(
     keep_recent_images = getattr(lc, "compact_keep_recent_images", 2)
 
     est = token_estimate
-    if est < target_tokens:
+    if est < target_tokens and not force:
         return []
     # MemoryCompactStarted：有 event_bus 时立即 live 发（folds 含 LLM 摘要、耗时数秒；随批次事后发
     # 会让前端状态条错过整个「压缩中」窗口）。无 bus（单测）时退回塞进返回批次，保持既有契约与用例。
@@ -822,7 +818,7 @@ async def escalating_compact(
             events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
                 "superseded_count": n, "demoted_images": n, "layer": "task",
                 "source": "demote_images", "trigger": trigger, "freed_tokens": freed}))
-    if est < target_tokens:
+    if est < target_tokens and not force:
         return _finish(events)
 
     # L1 · agent 折（仅当有可折顶层单元）
@@ -841,7 +837,7 @@ async def escalating_compact(
             events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
                 "superseded_count": n, "layer": "agent", "source": "root_experience",
                 "trigger": trigger, "freed_tokens": freed}))
-    if est < target_tokens:
+    if est < target_tokens and not force:
         return _finish(events)
 
     # L2 · 保留的同 agent rich 胶囊降级 lean（无 LLM）——**从最老一颗开始逐颗降，每降一颗
@@ -852,7 +848,7 @@ async def escalating_compact(
     # 的不变量成立；事件仍按级聚合成一条，`MemoryCompactFinished.levels` 不因颗数膨胀。
     l2_n = l2_freed = l2_capsules = 0
     for oid in await _kept_origin_ids(state, ctx, keep_last):
-        if est < target_tokens:
+        if est < target_tokens and not force:
             break
         n, freed = await _apply(demote_kept_capsules(state, ctx, {oid}))
         if n:
@@ -863,7 +859,7 @@ async def escalating_compact(
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
             "superseded_count": l2_n, "layer": "agent", "source": "demote_lean",
             "trigger": trigger, "freed_tokens": l2_freed, "demoted_capsules": l2_capsules}))
-    if est < target_tokens:
+    if est < target_tokens and not force:
         return _finish(events)
 
     # L3 · 坍缩当前 task（段摘要坍成更少，保 collapse_keep 条；仅当有 task 层材料可折）
@@ -898,5 +894,5 @@ class CompactStep(Step):
             next_step=None,
             events=await escalating_compact(
                 state, ctx, token_estimate=state.agent.loop_guard.context_tokens,
-                trigger="compact"),
+                trigger="compact", force=state.extra.get("force_compact", False)),
         )

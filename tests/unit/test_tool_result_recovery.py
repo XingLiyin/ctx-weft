@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
@@ -124,7 +126,7 @@ def _harness(provider, *, store=None, threshold=1000, sink=True):
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=scope,
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
 
     ctx = LoopContext(

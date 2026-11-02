@@ -66,7 +66,7 @@ async def test_cancel_tree_preserves_queued_work_and_child_agent_reuse(tmp_path,
             rt.providers.register_memory(memory)
             await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000, unattended=True))
+                template_id="agent:tpl_echo", user_prompt="TREE ROOT",  unattended=True))
             await asyncio.wait_for(llm.grandchild_started.wait(), 10)
             tm = rt._task_managers[SID]
             other = await rt.dispatch_task(SID, "UNRELATED RUN", agent_id=h.agent_id,

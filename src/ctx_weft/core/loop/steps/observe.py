@@ -226,7 +226,8 @@ class ObserveStep(Step):
             extra["subtasks"] = self._subtask_handles(state, ctx)
         request = ContextRequest(
             purpose="observe", scope=state.scope, task=context_task, agent=state.agent,
-            session=state.session, template=state.extra.get("template"),
+            session=state.session,
+            resolved_model=state.resolved_model, template=state.extra.get("template"),
             bound_capabilities=bound, token_counter=ctx.llm.tokenizer.count,
             extra=extra, intent=ReviewIntent(judge_task=judge_task, terminal_only=boundary == "task_switch"),
         )

@@ -119,8 +119,7 @@ async def test_pause_on_the_very_first_message_parks_and_stays_usable() -> None:
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="第一句就想撤回",
-        context_limit=_MOCK_CONTEXT_LIMIT))
+        template_id="agent:tpl_echo", user_prompt="第一句就想撤回"))
     sid, aid = handle.session_id, handle.agent_id
 
     # ① 请求已发出、还没有任何 chunk
@@ -193,8 +192,7 @@ async def test_pause_immediately_after_start_before_the_run_is_dispatched() -> N
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="立刻就撤",
-        context_limit=_MOCK_CONTEXT_LIMIT))
+        template_id="agent:tpl_echo", user_prompt="立刻就撤"))
     sid, aid = handle.session_id, handle.agent_id
 
     # **不等** llm.stalled：抢在 run 派发之前/之中按停。
@@ -238,7 +236,7 @@ async def test_new_task_branch_recognizes_intent_after_commit(pause_before_commi
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="第一句",
-        context_limit=_MOCK_CONTEXT_LIMIT, unattended=True))
+         unattended=True))
     sid, aid = handle.session_id, handle.agent_id
     await asyncio.sleep(0.8)
 

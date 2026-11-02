@@ -38,8 +38,7 @@ def _runtime() -> CtxWeftRuntime:
 async def _warm(rt, session_id):
     await initialize_all(rt)
     if session_id not in rt._task_managers:
-        await rt.create_session(template_id="agent:tpl_echo", session_id=session_id,
-                                context_limit=100_000)
+        await rt.create_session(template_id="agent:tpl_echo", session_id=session_id)
 
 
 def _runtime_with_recorded_resume() -> tuple[CtxWeftRuntime, list[tuple]]:

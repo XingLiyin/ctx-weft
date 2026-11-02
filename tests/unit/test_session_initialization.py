@@ -164,7 +164,7 @@ async def test_execution_entry_initializes_before_loading(monkeypatch, entry):
             with pytest.raises(UnfinishedTasksError):
                 await rt.start_session(SessionStartParams.create(
                     session_id=h.session_id, resume=True, template_id="agent:tpl_echo",
-                    user_prompt="next", context_limit=100000))
+                    user_prompt="next"))
     assert loaded and not rt._initializing_sessions
 
 

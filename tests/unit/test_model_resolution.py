@@ -73,15 +73,15 @@ async def test_explicit_choice_wins():
     assert (rm.account, rm.model) == ("acct_x", "mdl_x")
 
 
-async def test_window_comes_from_client_and_is_stamped_into_loop_guard():
+async def test_window_comes_from_client_in_immutable_snapshot():
     reg = _reg(resolver=lambda a, m: _Client(context_limit=42, output_reserve=7))
     agent, _ = await reg.instantiate(
         template_id=TPL, session_id="s1", tenant_id="default")
     got, rm = reg.materialize(
         agent.id, session_id=agent.session_id, tenant_id=agent.tenant_id)
     assert rm.context_limit == 42
-    assert got.loop_guard.context_limit == 42
-    assert got.loop_guard.reserved_output_tokens == 7
+    assert not hasattr(got.loop_guard, "context_limit")
+    assert rm.reserved_output_tokens == 7
 
 
 async def test_child_inherits_parent_choice():

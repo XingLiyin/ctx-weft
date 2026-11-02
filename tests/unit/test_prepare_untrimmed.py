@@ -1,3 +1,6 @@
+
+from tests.model_testkit import model_snapshot
+
 """Compact sees full inputs; only the sending gateway enforces the prompt budget."""
 
 from datetime import UTC, datetime, timedelta
@@ -34,13 +37,13 @@ async def harness(*, current_is_large=False):
             role="user", content=body, timestamp=now,
             metadata={"task_id": task_id}), provider_ctx)
         now += timedelta(seconds=1)
-    session = Session(id="s", user_prompt="", context_limit=6000, reserved_output_tokens=256)
+    session = Session(id="s", user_prompt="")
     task = Task(id="current", session_id="s", status="ACTIVE", title="Current task",
                 user_prompt_in_memory=True)
     agent = Agent(id="a", session_id="s", template_id="none",
-                  loop_guard=LoopGuard(context_limit=6000, reserved_output_tokens=256))
+                  loop_guard=LoopGuard())
     state = LoopState(run_id="r", session=session, task=task, agent=agent, scope=scope,
-                      resolved_model=NS(model="mock", account=""))
+                      resolved_model=model_snapshot(model="mock", account="", context_limit=6000, output_reserve=256))
     ctx = LoopContext(
         assembler=ContextAssembler([AgentRecallSource()], AssemblerDeps(memory, [], provider_ctx)),
         memory=memory, provider_ctx=provider_ctx, event_bus=NS(emit=AsyncMock()),
@@ -49,7 +52,7 @@ async def harness(*, current_is_large=False):
 
 
 async def assemble(state, ctx):
-    return await ctx.assembler.assemble(ContextRequest(
+    return await ctx.assembler.assemble(ContextRequest(resolved_model=state.resolved_model,
         purpose="act", scope=state.scope, task=state.task, agent=state.agent,
         session=state.session, template=None, bound_capabilities=[]))
 
@@ -59,7 +62,7 @@ async def test_compact_estimates_history_that_sending_would_discard(monkeypatch,
     state, ctx = await harness()
     initial = await assemble(state, ctx)
     bounded = await ctx.assembler.compile(initial, token_counter=len)
-    threshold = (state.session.context_limit - state.session.reserved_output_tokens) * 0.8
+    threshold = state.resolved_model.effective_input_limit * 0.8
     assert _estimate_assembled_tokens(bounded, len) < threshold
     assert "OLD_HISTORY" not in str(bounded.messages)
     state.agent.loop_guard.context_tokens = baseline
@@ -77,7 +80,7 @@ async def test_compact_estimates_history_that_sending_would_discard(monkeypatch,
     untrimmed = inputs._compiled_base[-1]
     assert untrimmed.token_budget == 0
     assert "OLD_HISTORY" in str(untrimmed.messages)
-    assert untrimmed.token_count > state.session.context_limit
+    assert untrimmed.token_count > state.resolved_model.context_limit
     request = await build_llm_request(ctx, state, inputs)
     assert inputs._compiled_base[-1].token_budget == 5744
     assert "OLD_HISTORY" not in str(request.messages)
@@ -92,7 +95,7 @@ async def test_required_overflow_can_be_compacted_before_sending(monkeypatch):
     state, ctx = await harness(current_is_large=True)
 
     async def compact(state, ctx, *, token_estimate, trigger):
-        assert token_estimate > state.session.context_limit
+        assert token_estimate > state.resolved_model.context_limit
         await ctx.memory.fold(["current", "previous"], [MemoryEvent(
             id="summary", kind=MemoryKind.SUMMARY, scope=MemoryScope.TASK, address=state.scope,
             role="user", content="COMPACTED summary", timestamp=datetime.now(UTC),
@@ -116,7 +119,7 @@ async def test_untrimmed_cache_cannot_bypass_required_overflow_at_gateway():
     state, ctx = await harness(current_is_large=True)
     inputs = await assemble(state, ctx)
     untrimmed = await ctx.assembler.compile(inputs, token_counter=len, trim=False, reuse=True)
-    assert untrimmed.token_count > state.session.context_limit
+    assert untrimmed.token_count > state.resolved_model.context_limit
     with pytest.raises(ContextOverflowError):
         await build_llm_request(ctx, state, inputs)
     ctx.event_bus.emit.assert_not_awaited()

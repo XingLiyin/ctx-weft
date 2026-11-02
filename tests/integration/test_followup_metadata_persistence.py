@@ -32,7 +32,7 @@ async def test_followup_metadata_survives_cold_recovery(tmp_path, snapshot_phase
             await initialize_all(rt)
             first = await rt.start_session(SessionStartParams.create(
                 session_id=sid, template_id="agent:tpl_echo", user_prompt="First request",
-                context_limit=100_000, unattended=True,
+                 unattended=True,
             ))
             await first.wait_for_finish(timeout=10)
             tm = rt._task_managers[sid]

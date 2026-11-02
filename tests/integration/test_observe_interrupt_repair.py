@@ -72,7 +72,7 @@ async def drained(rt, sid=SID):
 async def start(rt, llm):
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(session_id=SID,
-        template_id="agent:tpl_echo", user_prompt="OLD REQUEST", unattended=True, context_limit=100000))
+        template_id="agent:tpl_echo", user_prompt="OLD REQUEST", unattended=True))
     await asyncio.wait_for(llm.review_started.wait(), 10)
     return handle
 
@@ -377,7 +377,7 @@ async def test_same_agent_child_has_durable_recap_and_new_turn(tmp_path, monkeyp
             rt.providers.register_memory(memory)
             await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="ROOT DELEGATE", unattended=True, context_limit=100000))
+                template_id="agent:tpl_echo", user_prompt="ROOT DELEGATE", unattended=True))
             await asyncio.wait_for(llm.started.wait(), 10)
             tm = rt._task_managers[SID]
             child = next(t for t in tm.all_tasks() if t.parent_task_id)

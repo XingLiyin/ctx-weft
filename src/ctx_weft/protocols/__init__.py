@@ -94,6 +94,7 @@ from ctx_weft.protocols.knowledge import (
 )
 from ctx_weft.protocols.llm import (
     RAW_ARGS_KEY,
+    OutputPolicy,
     # adapter 契约：实现一个 LLM adapter 所需的全部类型
     LLMCallError,
     LLMChunk,
@@ -148,6 +149,7 @@ from ctx_weft.protocols.template import (
 )
 
 __all__ = [
+    "OutputPolicy",
     # Capability
     "AgentCapability",
     "AgentCapabilityProvider",

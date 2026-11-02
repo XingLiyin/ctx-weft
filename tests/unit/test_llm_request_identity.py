@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.llm_gateway import resolve_llm_identity
@@ -75,7 +77,7 @@ def _make_state(
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
-        resolved_model=SimpleNamespace(model=model, account=account),
+        resolved_model=model_snapshot(model=model, account=account),
         # act 走真实 llm_gateway.stream_llm_resilient（task 4 后 LLM_REQUEST_STARTED/
         # PROMPT_SENT 由 gateway 发射，且只在 origin==LOOP_ACT 时发射，见该函数文档字符串）。
         origin=origin,

@@ -29,7 +29,7 @@ def _task(tid: str, status: str = "PENDING") -> Task:
 def _tm_with_session() -> tuple[TaskManager, Session]:
     tm = TaskManager(session_id="s1")
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                    token_budget=0, root_agent_id="agr")
+                     root_agent_id="agr")
     tm.set_session(sess)
     tm.set_runner(_StubRunner())
     return tm, sess
@@ -69,7 +69,7 @@ async def test_abandon_pending_resumes_suspended_parent_of_queued_children():
     # 父任务永不重排、会话滞留 RUNNING 且无气泡。abandon_pending 须补触发重排检查。
     tm = TaskManager(session_id="s1", max_concurrent=0)   # drain 空转，便于观察队列
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                    token_budget=0, root_agent_id="agr")
+                     root_agent_id="agr")
     tm.set_session(sess)
     tm.set_runner(_StubRunner())
     tm.register_task(_task("tp", status="SUSPENDED"))
@@ -88,7 +88,7 @@ async def test_abandon_pending_no_resume_while_sibling_still_running():
     # 兄弟仍在途：弃子只清排队的那部分，父任务重排留给在途兄弟的 on_task_finished 接力。
     tm = TaskManager(session_id="s1", max_concurrent=0)
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                    token_budget=0, root_agent_id="agr")
+                     root_agent_id="agr")
     tm.set_session(sess)
     tm.set_runner(_StubRunner())
     tm.register_task(_task("tp", status="SUSPENDED"))

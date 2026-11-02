@@ -361,7 +361,7 @@ async def test_all_three_entry_points_reject_malformed_base64_before_any_put():
     with pytest.raises(InvalidContentError):
         await initialize_all(rt)
         await rt.start_session(SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt=bad, context_limit=128_000,
+            template_id="agent:tpl_echo", user_prompt=bad,
         ))
     assert store.put_calls == 0
     assert memory._events == []

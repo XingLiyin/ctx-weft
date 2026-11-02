@@ -144,7 +144,7 @@ async def worker(path, cut, recovering=False):
                     await asyncio.gather(*list(tm._background_asyncio_tasks))
                 raise AssertionError("recovery did not reach the crash injection")
             handle = await rt.start_session(SessionStartParams.create(session_id="tree-session",
-                template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000, unattended=True))
+                template_id="agent:tpl_echo", user_prompt="TREE ROOT",  unattended=True))
             root_task, root_agent = handle.task_id, handle.agent_id
             await asyncio.wait_for(llm.grandchild_started.wait(), 10)
             tm = rt._task_managers["tree-session"]

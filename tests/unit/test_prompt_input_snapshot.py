@@ -1,3 +1,6 @@
+
+from tests.model_testkit import model_snapshot
+
 """Historical prompts use saved inputs, including folded memory and live tools."""
 import json
 from copy import deepcopy
@@ -99,7 +102,7 @@ async def assembled(memory, purpose="act", *, staged=False, counter=None):
             for block in blocks:
                 yield block
 
-    request = ContextRequest(
+    request = ContextRequest(resolved_model=model_snapshot(100000, 1000),
         purpose=purpose, scope=ADDRESS, task=task, agent=NS(id="a"),
         session=NS(context_limit=100_000, reserved_output_tokens=1000),
         template=template, bound_capabilities=[],
@@ -278,7 +281,7 @@ async def test_task_multimodal_content_already_in_memory_keeps_only_its_id(memor
     await memory.ingest(MemoryEvent(
         id="image-input", address=ADDRESS, content=content, timestamp=NOW, role="user",
         kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK), CTX)
-    request = ContextRequest(
+    request = ContextRequest(resolved_model=model_snapshot(100000, 0),
         purpose="act", scope=ADDRESS,
         task=NS(id="t", title="image task", user_prompt=content, user_prompt_in_memory=True),
         agent=NS(id="a"), session=NS(context_limit=100_000, reserved_output_tokens=0),

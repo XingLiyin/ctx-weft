@@ -158,8 +158,7 @@ async def ot05_worker(workdir: Path) -> dict:
         rt.providers.register_memory(memory)
         await initialize_all(rt)
         handle = await rt.start_session(SessionStartParams.create(
-            template_id="agent:tpl_verify", user_prompt="do the effect",
-            context_limit=100_000))
+            template_id="agent:tpl_verify", user_prompt="do the effect"))
         (workdir / "ids.json").write_text(json.dumps({
             "session_id": handle.session_id, "agent_id": handle.agent_id,
         }), encoding="utf-8")

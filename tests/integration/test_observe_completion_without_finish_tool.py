@@ -66,7 +66,7 @@ async def test_normal_reply_is_reviewed_then_closed(role, unattended, fail):
         SessionStartParams.create(
             template_id="agent:tpl_echo",
             user_prompt="Deliver the answer",
-            context_limit=100_000,
+
             unattended=unattended,
         )
     )
@@ -109,7 +109,7 @@ async def test_valid_negative_review_is_not_replaced_by_fallback(verdict):
     rt.providers.register_memory(InMemoryMemoryProvider())
     handle = await rt.start_session(
         SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt="Work", context_limit=100_000
+            template_id="agent:tpl_echo", user_prompt="Work"
         )
     )
     tm = rt._task_managers[handle.session_id]

@@ -75,7 +75,7 @@ async def test_session_created_emitted_before_task_created() -> None:
         ),
         event_bus=bus,
     )
-    await sm.create_session(template_id="agent:tpl", user_prompt="你好", context_limit=1000)
+    await sm.create_session(template_id="agent:tpl", user_prompt="你好")
 
     assert EventType.SESSION_CREATED in order
     assert EventType.AGENT_INSTANTIATED in order

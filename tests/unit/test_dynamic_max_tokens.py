@@ -6,6 +6,8 @@ request.prompt_token_estimate → 网关 apply_dynamic_max_tokens 纯消费。�
 
 from __future__ import annotations
 
+from ctx_weft.core.orchestrator.model import ResolvedModel
+
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.llm_gateway import (
@@ -18,6 +20,7 @@ from ctx_weft.core.loop.llm_gateway import (
 )
 from ctx_weft.core.utils.estimate import dynamic_max_tokens, estimate_tokens
 from ctx_weft.protocols import LLMMessage, LLMRequest
+from ctx_weft.protocols import OutputPolicy
 from ctx_weft.protocols.context import ImagePart, TextPart
 from ctx_weft.providers.llm import ModelCapabilities, ModelLimits
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -53,7 +56,7 @@ def test_ceiling_clamps_when_configured_smaller():
 def test_floor_when_window_nearly_full():
     # 剩余 < floor → 被 floor 兜住
     got = dynamic_max_tokens(200_000, 199_500, ceiling=200_000, margin=4096, floor=1024)
-    assert got == 1024
+    assert got == 500  # The floor must not exceed the physical remaining window.
 
 
 # ── helper: request_prompt_estimate（caller 侧 used 估算）────────────────────────
@@ -213,14 +216,15 @@ def _ctx(llm, config=None):
     return SimpleNamespace(llm=llm, config=config)
 
 
-def _llm(context_limit=200_000, output_ceiling=None):
-    return SimpleNamespace(context_limit=context_limit, output_ceiling=output_ceiling)
+def _llm(context_limit=200_000, output_ceiling=None, output_policy=OutputPolicy()):
+    return SimpleNamespace(context_limit=context_limit, output_ceiling=output_ceiling,
+                           output_reserve=0, output_policy=output_policy)
 
 
 def test_apply_soft_cap_binds_when_window_has_room():
     # 窗口有余量：ceiling = 软顶 0.2*200k = 40k（不再整窗放输出）
     req = _req(prompt_token_estimate=100)
-    apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
+    apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
     assert req.max_tokens == 40_000
 
 
@@ -228,49 +232,48 @@ def test_apply_tail_regime_when_window_tight():
     # used 大到 L-used-margin 跌破软顶 → 回落紧缩段 context-used-margin；
     # margin 比例制：max(8192, 5%*170_000=8500) = 8500
     req = _req(prompt_token_estimate=170_000)
-    apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
+    apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
     assert req.max_tokens == 200_000 - 170_000 - 8500  # 21500 < 40k 软顶
 
 
 def test_apply_fixed_margin_floors_when_ratio_smaller():
     # 5%*155_000=7750 < 8192 → 固定 margin 兜底
     req = _req(prompt_token_estimate=155_000)
-    apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
+    apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
     assert req.max_tokens == 200_000 - 155_000 - 8192  # 36808 < 40k 软顶
 
 
 def test_apply_margin_ratio_configurable():
     # config 提高比例 → margin 随之放大
-    cfg = SimpleNamespace(dynamic_max_tokens_margin_ratio=0.1)
     req = _req(prompt_token_estimate=170_000)
-    apply_dynamic_max_tokens(_ctx(_llm(), config=cfg), req, _guard(context_tokens=0))
+    apply_dynamic_max_tokens(_ctx(_llm(output_policy=OutputPolicy(margin_ratio=0.1))), req, ResolvedModel.from_client(_llm(output_policy=OutputPolicy(margin_ratio=0.1))))
     assert req.max_tokens == 200_000 - 170_000 - 17_000
 
 
 def test_apply_output_min_floors_soft_cap_on_small_window():
     # 小窗口：0.2*16k=3200 < 4096 → 软顶兜到 4096
     req = _req(prompt_token_estimate=100)
-    apply_dynamic_max_tokens(_ctx(_llm(context_limit=16_000)), req, _guard(context_limit=16_000))
+    apply_dynamic_max_tokens(_ctx(_llm(context_limit=16_000)), req, ResolvedModel.from_client(_llm(context_limit=16000)))
     assert req.max_tokens == 4096
 
 
 def test_apply_hard_ceiling_above_soft_clamped_to_soft():
     # 显式 output_ceiling 高于软顶 → 被软顶夹下（min 语义）
     req = _req(prompt_token_estimate=100)
-    apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=64_000)), req, _guard(context_tokens=0))
+    apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=64_000)), req, ResolvedModel.from_client(_llm(output_ceiling=64000)))
     assert req.max_tokens == 40_000  # min(64k, 0.2*200k)
 
 
 def test_apply_noop_when_estimate_missing():
     # caller 未挂估算 → 网关不设 max_tokens（feature off，无旧回退自估）
     req = _req()  # prompt_token_estimate=None
-    apply_dynamic_max_tokens(_ctx(_llm()), req, _guard(context_tokens=0))
+    apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
     assert req.max_tokens is None
 
 
 def test_apply_respects_explicit_max_tokens():
     req = _req(max_tokens=16, prompt_token_estimate=100)
-    apply_dynamic_max_tokens(_ctx(_llm()), req, _guard())
+    apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
     assert req.max_tokens == 16  # 不覆盖显式值
 
 
@@ -284,7 +287,7 @@ def test_apply_soft_cap_default_when_ceiling_unset():
     # output_ceiling 缺省(None) → ceiling = 软顶 0.2*50k = 10k（不再是整窗）
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(
-        _ctx(_llm(context_limit=50_000, output_ceiling=None)), req, _guard(context_limit=50_000)
+        _ctx(_llm(context_limit=50_000, output_ceiling=None)), req, ResolvedModel.from_client(_llm(context_limit=50000, output_ceiling=None))
     )
     assert req.max_tokens == 10_000
 
@@ -292,7 +295,7 @@ def test_apply_soft_cap_default_when_ceiling_unset():
 def test_apply_hard_ceiling_below_soft_wins():
     # 硬上限 8192 低于软顶 40k → 取硬上限（Anthropic 场景）
     req = _req(prompt_token_estimate=100)
-    apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=8192)), req, _guard(context_tokens=0))
+    apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=8192)), req, ResolvedModel.from_client(_llm(output_ceiling=8192)))
     assert req.max_tokens == 8192
 
 
@@ -350,7 +353,7 @@ def test_model_config_fields_default_none():
 
 def test_default_output_reserve_scales_with_window():
     # max(L//16, 4096)：小窗兜到 4096、大窗按比例放大
-    assert default_output_reserve(8_000) == 4096  # 8000//16=500 → 4096 兜底
+    assert default_output_reserve(8_000) == 4000  # 8000//16=500 → 4096 兜底
     assert default_output_reserve(128_000) == 8_000  # 128000//16
     assert default_output_reserve(1_000_000) == 62_500
 

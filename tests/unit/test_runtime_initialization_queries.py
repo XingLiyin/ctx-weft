@@ -100,7 +100,7 @@ def runtime(store=None, *, max_concurrent=0):
 
 async def container(rt, sid="s1"):
     await initialize_all(rt)
-    return await rt.create_session(template_id="agent:tpl_echo", context_limit=100_000, session_id=sid)
+    return await rt.create_session(template_id="agent:tpl_echo",  session_id=sid)
 
 
 async def append(store, sid, *specs):
@@ -209,7 +209,7 @@ async def test_wait_does_not_bypass_deferred_recap_on_terminal_event(monkeypatch
 
 async def test_new_sessions_do_not_require_global_initialize():
     rt = runtime()
-    h = await rt.create_session(template_id="agent:tpl_echo", context_limit=1000)
+    h = await rt.create_session(template_id="agent:tpl_echo")
     assert h.session_id in rt._initialized_sessions
     assert await rt.initialize(h.session_id) is None
     assert (await rt.get_session(h.session_id)).loaded
@@ -425,10 +425,10 @@ async def test_cold_existing_id_cannot_be_created_twice():
     h = await container(rt)
     assert rt.forget_session(h.session_id)
     with pytest.raises(SessionAlreadyExistsError):
-        await rt.create_session(template_id="agent:tpl_echo", context_limit=1000, session_id=h.session_id)
+        await rt.create_session(template_id="agent:tpl_echo",  session_id=h.session_id)
     with pytest.raises(SessionAlreadyExistsError):
         await rt.start_session(SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt="duplicate", context_limit=1000,
+            template_id="agent:tpl_echo", user_prompt="duplicate",
             session_id=h.session_id))
 
 
@@ -511,7 +511,7 @@ async def test_wait_after_terminal_and_repeated_wait_are_immediate():
     rt._config = RuntimeConfig()
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="finish", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="finish",
         unattended=True))
     await handle.wait_for_finish(timeout=5)
     await handle.wait_for_finish(timeout=0.1)

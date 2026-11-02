@@ -51,14 +51,14 @@ def _content():
 
 async def test_session_start_params_accepts_parts():
     p = SessionStartParams.create(
-        template_id="t", user_prompt=_content(), context_limit=1000,
+        template_id="t", user_prompt=_content(),
     )
     assert p.user_prompt == _content()
 
 
 async def test_session_start_params_still_accepts_str():
     p = SessionStartParams.create(
-        template_id="t", user_prompt="纯文本", context_limit=1000,
+        template_id="t", user_prompt="纯文本",
     )
     assert p.user_prompt == "纯文本"
 
@@ -170,7 +170,7 @@ async def test_create_session_without_jsonable_falls_back_to_the_text_prompt():
     sm = _session_registry(bus)
 
     await sm.create_session(
-        template_id="agent:tpl_echo", user_prompt="你好", context_limit=1000,
+        template_id="agent:tpl_echo", user_prompt="你好",
     )
 
     created = next(e for e in bus.events if e.type == "SessionCreated")
@@ -189,7 +189,7 @@ async def test_create_session_without_jsonable_raises_on_multimodal_prompt():
 
     with pytest.raises(ValueError):
         await sm.create_session(
-            template_id="agent:tpl_echo", user_prompt=_content(), context_limit=1000,
+            template_id="agent:tpl_echo", user_prompt=_content(),
         )
 
     # 关键：拒绝必须发生在**发事件之前**。`push_task` 的守卫也会 raise，但那时

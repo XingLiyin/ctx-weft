@@ -182,7 +182,7 @@ async def test_subagent_runs_its_own_loop_and_result_flows_back():
         SessionStartParams.create(
             template_id="agent:tpl_echo",
             user_prompt="delegate the star census",
-            context_limit=100_000,
+
         )
     )
     session_id = handle.session_id

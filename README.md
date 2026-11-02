@@ -618,17 +618,25 @@ from ctx_weft import SessionStartParams
 params = SessionStartParams.create(
     template_id="agent:planner_agent",  # 必需；规范形式 provider:name
     user_prompt="研究并撰写量子计算报告", # 必需
-    session_id=None,                    # None=新建；传 id=恢复（见下）
+    session_id=None,                    # None=生成新 id；恢复需 resume=True
     initial_task=None,                  # 可选，dict → 反序列化为 TaskSettings（见下）
     tenant_id="default",
     llm_account=None, llm_model="claude-sonnet-4-6",
-    token_budget=200_000,
 )
 handle = await runtime.start_session(params)   # 立即返回，任务在后台 drain
 final_state = await handle.wait_for_finish(timeout=300.0)
 ```
 
-**恢复已有会话**：给 `session_id` 传已存在的 id 即进入 resume，runtime 从事件存储重建
+Token 预算全部由所选 LLM 配置提供：`limit.context` 是总窗口，`output_reserve` 是输入侧输出预留，
+`limit.output` 是单次输出硬上限，`output_policy` 配置输出软上限和估算安全余量。
+Session 和 `SessionStartParams` 不接受 `context_limit`、`reserved_output_tokens` 或 `token_budget`。
+每次派发解析不可变的 `ResolvedModel`，直接携带 client、模型身份、窗口和输出策略；
+prepare、assembler、compact、act 和 gateway 共用这份预算。
+`effective_input_limit = context_limit - output_reserve`，压缩比例以它为分母。
+`set_agent_llm` / `set_session_llm` 在下一次派发生效，当前 run（包括返回 prepare）继续使用原快照。
+恢复旧会话时忽略事件与快照中遗留的 session 预算，新 run 使用当前 LLM 配置。
+
+**恢复已有会话**：传已有 `session_id` 并设置 `resume=True`，runtime 从事件存储重建
 `root_agent_id`，把新 `user_prompt` 作为后续输入续跑：
 
 ```python
@@ -636,6 +644,7 @@ params = SessionStartParams.create(
     template_id="agent:planner_agent",
     user_prompt="补充一节关于纠错码的内容",
     session_id="ses_01HXXXX",          # 复用已有 session
+    resume=True,
 )
 handle = await runtime.start_session(params)
 ```

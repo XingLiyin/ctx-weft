@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from types import SimpleNamespace
 
@@ -50,7 +52,7 @@ def _make_state_and_task():
     session = Session(id="s1", tenant_id="default", user_prompt="hi")
     agent = SimpleNamespace(id="ag1")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
-    state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+    state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope, resolved_model=model_snapshot(model="mock", account=""))
     return state, task, agent
 
 

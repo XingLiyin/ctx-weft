@@ -67,8 +67,7 @@ async def test_observe_pause_closes_stream_and_replaces_prompt(tmp_path, short, 
             rt = runtime(store, memory, llm, short)
             await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="OLD REQUEST", unattended=True,
-                context_limit=100000))
+                template_id="agent:tpl_echo", user_prompt="OLD REQUEST", unattended=True))
             await asyncio.wait_for(llm.review_started.wait(), 10)
             await rt.pause_agent(handle.agent_id)
             await asyncio.wait_for(llm.review_closed.wait(), 5)

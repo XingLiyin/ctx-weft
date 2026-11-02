@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.driver import COMPACT_NOOP_KEY, CONTEXT_RECOVERY_COUNT_KEY
+from tests.model_testkit import model_snapshot
 from ctx_weft.core.loop.steps.act import _account_tokens, _can_recover_context
 from ctx_weft.core.models.agent import LoopGuard
 from ctx_weft.core.utils.estimate import effective_limit
@@ -96,10 +97,11 @@ class _FakeMemory:
 
 def _acct_state(*, context_limit=100_000, reserve=0, loop_config=...):
     lc = LoopConfig() if loop_config is ... else loop_config
-    guard = LoopGuard(context_limit=context_limit, reserved_output_tokens=reserve)
+    guard = LoopGuard()
     return SimpleNamespace(
         agent=SimpleNamespace(id="a1", loop_guard=guard, loop_config=lc),
         session=SimpleNamespace(token_used=0),
+        resolved_model=model_snapshot(context_limit=context_limit, output_reserve=reserve),
         scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
     )
 
@@ -109,16 +111,9 @@ def _ctx():
 
 
 @pytest.mark.asyncio
-async def test_no_stop_when_effective_limit_is_zero():
-    """预留吃光整个窗口（eff <= 0）→ 永不停机。
-
-    停机意味着「结束本段 act」，而 eff<=0 时**每一轮**都会越线，等于任务寸步难行。
-    这种配置的正路是在装配期响亮失败（ContextOverflowError），不是在这里静默绞杀。
-    """
-    state = _acct_state(context_limit=1000, reserve=1000)
-    assert effective_limit(1000, 1000) == 0
-    hit = await _account_tokens(state, _ctx(), LLMUsage(prompt_tokens=999_999))
-    assert hit is False
+async def test_invalid_reserve_is_rejected_before_running():
+    with pytest.raises(ValueError, match="reserved_output_tokens"):
+        _acct_state(context_limit=1000, reserve=1000)
 
 
 @pytest.mark.asyncio

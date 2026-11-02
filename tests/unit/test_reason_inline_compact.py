@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.prepare import PrepareStep
@@ -50,7 +52,7 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
                               context_limit=1000)
     task = SimpleNamespace(id="t1", parent_task_id="p", title="T",
                            settings=SimpleNamespace(skill_name="", purpose="act"))
-    state = SimpleNamespace(agent=agent, session=session, task=task,
+    state = SimpleNamespace(resolved_model=model_snapshot(context_limit=1000), agent=agent, session=session, task=task,
                             scope=SimpleNamespace(), extra={"template": None},
                             run_id="r1", sequence_counter=0)
 
@@ -121,7 +123,7 @@ async def test_reason_stashes_bound_capabilities(monkeypatch):
                               context_limit=1000)
     task = SimpleNamespace(id="t1", parent_task_id="p", title="T",
                            settings=SimpleNamespace(skill_name="", purpose="act"))
-    state = SimpleNamespace(agent=agent, session=session, task=task,
+    state = SimpleNamespace(resolved_model=model_snapshot(context_limit=1000), agent=agent, session=session, task=task,
                             scope=SimpleNamespace(), extra={"template": None},
                             run_id="r1", sequence_counter=0)
 

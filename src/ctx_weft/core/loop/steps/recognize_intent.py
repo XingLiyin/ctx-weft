@@ -80,6 +80,7 @@ class RecognizeIntentStep(Step):
             task=target_task,
             agent=state.agent,
             session=state.session,
+            resolved_model=state.resolved_model,
             template=state.extra.get("template"),
             bound_capabilities=bound,
             token_counter=ctx.llm.tokenizer.count,

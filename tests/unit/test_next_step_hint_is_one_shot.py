@@ -11,6 +11,9 @@ run 已取消）压根不调 `report_observation`，覆写就不会发生，上�
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +30,7 @@ def _task(hint: str | None) -> Task:
 
 
 async def _guidance(task: Task) -> str:
-    request = SimpleNamespace(
+    request = SimpleNamespace(resolved_model=model_snapshot(20000, 0),
         purpose="act", task=task, extra={}, intent=None, template=None,
         session=SimpleNamespace(context_limit=20_000, reserved_output_tokens=0),
     )

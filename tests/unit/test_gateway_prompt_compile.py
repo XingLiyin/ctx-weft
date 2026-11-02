@@ -1,3 +1,5 @@
+
+from tests.model_testkit import model_snapshot
 """Compile once per base; preserve live continuations and historical event inputs."""
 
 import json
@@ -32,7 +34,7 @@ async def setup(purpose="act"):
     state = LoopState(
         run_id="run", session=request.session, task=request.task, agent=request.agent,
         scope=ADDRESS, extra={"template": request.template},
-        resolved_model=NS(model="mock", account=""), origin=EventOrigin.LOOP_ACT)
+        resolved_model=model_snapshot(model="mock", account=""), origin=EventOrigin.LOOP_ACT)
     events = []
 
     async def emit(event):

@@ -82,7 +82,7 @@ async def test_storage_failure_isolates_session_no_fake_success():
     with pytest.raises(PersistenceUnavailableError):
         await initialize_all(runtime)
         await runtime.start_session(SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt="hello", context_limit=100_000,
+            template_id="agent:tpl_echo", user_prompt="hello",
         ))
 
     # 健康表已标记（会话 id 在事件里、由健康表留存；此处断言非空 + 原因含故障类名）
@@ -118,7 +118,7 @@ async def test_sql_drop_table_isolates_and_stops_scheduling(tmp_path):
         runtime.event_bus.subscribe(None, _observe)
         await initialize_all(runtime)
         handle = await runtime.start_session(SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt="hello", context_limit=100_000,
+            template_id="agent:tpl_echo", user_prompt="hello",
         ))
         with pytest.raises(PersistenceUnavailableError):
             await handle.wait_for_finish(timeout=15.0)
@@ -145,7 +145,7 @@ async def test_best_effort_keeps_old_swallow_contract():
     runtime.event_bus.subscribe(None, _observe)
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hello", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hello",
     ))
     state = await handle.wait_for_finish(timeout=10.0)
     assert state is not None and state.task.status == "FINISHED"

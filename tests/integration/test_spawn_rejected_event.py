@@ -73,7 +73,7 @@ async def test_depth_limit_emits_spawn_rejected(runtime_factory):
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
             user_prompt="delegate to a researcher",
-            context_limit=100_000,
+
         )
     )
     rejected = await _wait_for_event(runtime, handle.session_id, EventType.SPAWN_REJECTED)
@@ -94,7 +94,7 @@ async def test_spawn_rejected_names_the_parent_not_a_phantom_child(runtime_facto
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
             user_prompt="delegate to a researcher",
-            context_limit=100_000,
+
         )
     )
     rejected = await _wait_for_event(runtime, handle.session_id, EventType.SPAWN_REJECTED)
@@ -114,7 +114,7 @@ async def test_rejected_spawn_produces_no_agent_instantiated(runtime_factory):
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
             user_prompt="delegate to a researcher",
-            context_limit=100_000,
+
         )
     )
     rejected = await _wait_for_event(runtime, handle.session_id, EventType.SPAWN_REJECTED)

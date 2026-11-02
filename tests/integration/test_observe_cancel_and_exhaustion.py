@@ -127,7 +127,7 @@ async def test_public_cancel_does_not_overwrite_an_already_committed_verdict(tmp
             rt, _ = make_lifecycle_runtime(store, memory, "finish_park")
             await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(
-                session_id="crash-session", template_id="agent:tpl_echo", user_prompt="work", context_limit=100000))
+                session_id="crash-session", template_id="agent:tpl_echo", user_prompt="work"))
             await asyncio.wait_for(committed.wait(), 10)
             rows = await store.read_range("crash-session")
             assert any(r.event.type == EventType.OBSERVE_COMPLETED and r.event.payload["accepted"] for r in rows)

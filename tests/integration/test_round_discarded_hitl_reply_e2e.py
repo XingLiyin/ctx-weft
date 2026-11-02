@@ -119,8 +119,7 @@ async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi",
-        context_limit=_MOCK_CONTEXT_LIMIT))
+        template_id="agent:tpl_echo", user_prompt="hi"))
     sid, aid = handle.session_id, handle.agent_id
 
     # interactive 的 root task 说完一段纯文本就 park 出一个 wait 气泡 —— 这就是 D 类的起点。
@@ -244,8 +243,7 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi",
-        context_limit=_MOCK_CONTEXT_LIMIT))
+        template_id="agent:tpl_echo", user_prompt="hi"))
     sid, aid = handle.session_id, handle.agent_id
     bubble = await _wait_for_wait_bubble(rt, sid)
     task_id = bubble.task_id

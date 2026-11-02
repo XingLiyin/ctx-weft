@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import (
@@ -96,7 +99,7 @@ def test_tools_fn_exception_falls_back_to_snapshot() -> None:
 
 def _req(purpose: str) -> ContextRequest:
     session = SimpleNamespace(id="s1", context_limit=100_000, reserved_output_tokens=1024)
-    return ContextRequest(
+    return ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose=purpose,
         scope=SimpleNamespace(session_id="s1", task_id="tsk_1", agent_id="agt_1"),
         task=SimpleNamespace(

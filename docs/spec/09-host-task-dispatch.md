@@ -481,13 +481,10 @@ V3 是**显式旋钮才报错**：`inherit_memory` 默认就是 `True`，`use_su
 async def create_session(
     self, *,
     template_id: str,
-    context_limit: int,
     session_id: str | None = None,
     tenant_id: str = "default",
     llm_account: str | None = None,
     llm_model: str | None = None,
-    token_budget: int = 200_000,
-    reserved_output_tokens: int = 8192,
 ) -> SessionHandle: ...
 ```
 

@@ -77,7 +77,7 @@ from ctx_weft.core.orchestrator.task.queue import QueueEntry
 from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.models.status import TERMINAL_TASK_STATUSES
 from ctx_weft.core.registry import ProviderRegistry
-from ctx_weft.core.models.agent import Agent, LoopGuard
+from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import PORT_NONE, NormalTaskSettings, Task, default_port_for
 from ctx_weft.core.models.errors import (
@@ -264,13 +264,10 @@ class SessionStartParams:
     template_id: str
     user_prompt: "str | list[ContentPart]"
     initial_task_settings: NormalTaskSettings
-    context_limit: int
     session_id: str | None = None
     tenant_id: str = "default"
     llm_account: str | None = None
     llm_model: str | None = None
-    token_budget: int = 200_000
-    reserved_output_tokens: int = 8192
     resume: bool = False
     # 这一轮没有人看顾（后台自治作业）：透传到 root task 的 `Task.unattended`，并强制
     # 它不 park。见 `Task.unattended` / `HitlService.open`。
@@ -285,14 +282,11 @@ class SessionStartParams:
         template_id: str,
         user_prompt: "str | list[ContentPart]",
         *,
-        context_limit: int,
         session_id: str | None = None,
         initial_task: dict | None = None,
         tenant_id: str = "default",
         llm_account: str | None = None,
         llm_model: str | None = None,
-        token_budget: int = 200_000,
-        reserved_output_tokens: int = 8192,
         resume: bool = False,
         unattended: bool = False,
         port_key: str | None = None,
@@ -303,12 +297,9 @@ class SessionStartParams:
             user_prompt=user_prompt,
             session_id=session_id,
             initial_task_settings=deserialize_settings(initial_task),
-            context_limit=context_limit,
             tenant_id=tenant_id,
             llm_account=llm_account,
             llm_model=llm_model,
-            token_budget=token_budget,
-            reserved_output_tokens=reserved_output_tokens,
             resume=resume,
             unattended=unattended,
             port_key=port_key,
@@ -1552,9 +1543,7 @@ class CtxWeftRuntime:
                 template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
                 llm=ModelChoice(account=llm_account or "", model=llm_model or ""),
             )
-            # 这次实际要用的 (client, 身份, 窗口)——agent.loop_guard 已由 instantiate()
-            # 内部的 materialize() 按同一份 choice 解出并 stamp，此处只是再取一份供
-            # session 窗口对齐 + _execute_task 使用（不缓存，现解现弃）。
+            # Bind the model and immutable token budget for this run.
             resolved_model = lm.resolve_model(agent.id)
 
             session = Session(
@@ -1566,16 +1555,6 @@ class CtxWeftRuntime:
                 llm_model=llm_model or "",
                 created_at=now_utc(),
             )
-            session.context_limit = resolved_model.context_limit
-            session.reserved_output_tokens = resolved_model.reserved_output_tokens
-            # instantiate() 刻意不解模型（惰性不变量，见 agent_lifecycle_manager.py 的
-            # _DEFAULT_CONTEXT_LIMIT 注释）；这条 compat 路径立刻要跑真实的一次 dispatch，
-            # 在此显式 stamp 上面已经解出的 resolved_model。
-            import dataclasses as _dc
-            agent = _dc.replace(agent, loop_guard=LoopGuard(
-                context_limit=resolved_model.context_limit,
-                reserved_output_tokens=resolved_model.reserved_output_tokens,
-            ))
             task = Task(
                 id=generate_id("tsk"),
                 session_id=sid,
@@ -1659,13 +1638,10 @@ class CtxWeftRuntime:
         self,
         *,
         template_id: str,
-        context_limit: int,
         session_id: str | None = None,
         tenant_id: str = "default",
         llm_account: str | None = None,
         llm_model: str | None = None,
-        token_budget: int = 200_000,
-        reserved_output_tokens: int = 8192,
     ) -> SessionHandle:
         """建一条**容器会话**：实例化 root agent、发 `SESSION_CREATED`，但**不推 root
         task**（spec/09 §11）。会话里的活全部由后续 `dispatch_task` 派进来。
@@ -1716,9 +1692,6 @@ class CtxWeftRuntime:
                 llm_model=llm_model,
                 llm_account=llm_account,
                 session_id=session_id,
-                context_limit=context_limit,
-                token_budget=token_budget,
-                reserved_output_tokens=reserved_output_tokens,
                 with_root_task=False,
             )
             # 模板在 create_session 内部已解析并校验过一次（入口即拒、不落库），这里
@@ -1799,9 +1772,6 @@ class CtxWeftRuntime:
                 llm_account=params.llm_account,
                 initial_task_settings=params.initial_task_settings,
                 session_id=params.session_id,
-                context_limit=params.context_limit,
-                token_budget=params.token_budget,
-                reserved_output_tokens=params.reserved_output_tokens,
                 user_prompt_event_jsonable=user_prompt_event_jsonable,
                 unattended=params.unattended,
                 port_key=params.port_key,
@@ -2845,7 +2815,6 @@ class CtxWeftRuntime:
         传进来，于是一个子 agent 被打断的段 recap 会用 root 的 identity 重跑——而 recap
         的产物是要写回那个 agent 记忆的。同 `_SessionTaskRunner._template_of` 的口径。
         """
-        import dataclasses as _dc
 
         from ctx_weft.core.loop.steps.observe import blocks_actor_recovery
         try:
@@ -2868,12 +2837,6 @@ class CtxWeftRuntime:
             lm.register_session(session.id, tenant_id=session.tenant_id)
             agent, rm = lm.materialize(
                 agent_id, session_id=session.id, tenant_id=session.tenant_id)
-            # 窗口以 session.context_limit/reserved_output_tokens 为准（host 配置的预算
-            # 天花板，独立于 ModelChoice）——同 _SessionTaskRunner.assemble 的口径。
-            agent = _dc.replace(agent, loop_guard=LoopGuard(
-                context_limit=session.context_limit,
-                reserved_output_tokens=session.reserved_output_tokens,
-            ))
             template = await self._template_lookup.get_template(
                 agent.template_id, None,
                 ctx=ProviderContext(session_id=session.id, tenant_id=session.tenant_id),
@@ -3209,7 +3172,6 @@ class CtxWeftRuntime:
         from ctx_weft.core.control.reducers import rebuild_view
         from ctx_weft.core.models.errors import SessionBusyError
         from ctx_weft.core.loop.steps.compact import CompactStep
-        from ctx_weft.core.models.agent import LoopGuard
         from ctx_weft.core.models.task import NormalTaskSettings, Task
         from ctx_weft.protocols import MemoryAddress, ProviderContext
 
@@ -3256,16 +3218,9 @@ class CtxWeftRuntime:
             template = await self._template_lookup.get_template(
                 agent.template_id, None, ctx=pctx,
             )
-            # 手动 compact_agent 是「强制立即压」的一次性操作，不受预算门控（escalating_compact
-            # 按 token_estimate vs target_tokens 判断是否需要压）——context_tokens=context_limit
-            # 使门总是打开，交给各级内部的可折性判断决定实际动多少。
+            # Manual compaction explicitly bypasses the budget trigger; usage stays factual.
             agent = _dc.replace(
                 agent,
-                loop_guard=LoopGuard(
-                    context_limit=session.context_limit,
-                    context_tokens=session.context_limit,
-                    reserved_output_tokens=session.reserved_output_tokens,
-                ),
                 # 跨重启 registry 为空时 materialize 的回落只给得出默认
                 # memory_config/loop_config；用刚取到的真实 template 覆盖，
                 # 与旧 instantiate_agent(existing_agent_id=...) 每次按 template 现算一致。
@@ -3303,7 +3258,7 @@ class CtxWeftRuntime:
                 task=task,
                 agent=agent,
                 scope=scope,
-                extra={"template": template},
+                extra={"template": template, "force_compact": True},
                 resolved_model=rm,
                 # 孤儿 run：不走 StepDriver.run，构造时显式钉住 origin——下面两条
                 # RUN_STARTED/RUN_FINISHED 已各自显式覆盖为 RUNTIME，这里补的是
@@ -3402,7 +3357,7 @@ class CtxWeftRuntime:
                 session = view.sessions[session_id]
             detail = SessionDetail(
                 session.id, session.root_agent_id or "",
-                session.goal, session.token_budget, session.created_at,
+                session.goal, session.created_at,
             )
             return self._query_result(detail, "memory" if loaded else "events", loaded, position)
 
@@ -5531,7 +5486,6 @@ class _SessionTaskRunner:
 
     async def assemble(self, task_id: str) -> "AgentBinding | None":
         """决定并实例化执行 agent + memory 预备 + reconcile 探测（原 _resolve）。"""
-        import dataclasses as _dc
 
         t = self._task_manager.get_task(task_id)
         if t is None:
@@ -5581,14 +5535,6 @@ class _SessionTaskRunner:
                 # 同一个值：settings 可能没带模板（那时旧代码回落会话模板），而 agent
                 # 的出身早已由 `AgentInstantiated` 钉死——record 才是真相。
                 tmpl = await self._template_of(agent, ctx)
-            # 窗口仍以 session.context_limit/reserved_output_tokens 为准——那是
-            # host 经 SessionStartParams 显式配置的预算天花板（必填字段，独立于
-            # ModelChoice/rm），与「用哪个模型」是两件事：host 完全可能故意配一个
-            # 小于模型真实窗口的预算。rm 只贡献 client/身份，不覆盖这里。
-            agent = _dc.replace(agent, loop_guard=LoopGuard(
-                context_limit=self._session.context_limit,
-                reserved_output_tokens=self._session.reserved_output_tokens,
-            ))
             t.assigned_agent_id = agent.id
             if s.inherit_memory and not t.user_prompt_in_memory:
                 # 继承源三级，**显式优先**（spec/09 §6）：
@@ -5626,12 +5572,6 @@ class _SessionTaskRunner:
                 effective_agent_id(t, self._session.root_agent_id or ""),
                 session_id=sess_id, tenant_id=tenant_id,
             )
-            # 见上面 subagent 分支同一条注释：窗口以 session 配置为准，rm 只贡献
-            # client/身份。
-            agent = _dc.replace(agent, loop_guard=LoopGuard(
-                context_limit=self._session.context_limit,
-                reserved_output_tokens=self._session.reserved_output_tokens,
-            ))
             # **模板跟着执行 agent，不跟着 session**（2026-09-30 修）。从前这里是
             # `template=self._template`（建 runner 时按会话模板解出的那份）：root task
             # 恰好对，而 `send_message` 投给一个 park 中的子 agent 时，开出的新 task

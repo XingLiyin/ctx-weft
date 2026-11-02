@@ -354,7 +354,7 @@ ActStep 一次工具调用（最终走 `CapabilityGateway.invoke` `:236`）的�
 | `NormalTaskSettings(use_subagent=True)` | 无 assigned → `ALM.instantiate`（解析 `subagent_template` 限定名；发 AgentSpawned/SpawnRejected/AgentInstantiated；深度超限上抛 `SpawnDepthExceeded`）；已有 assigned → `materialize`（水合，零事件） | `_reconcile_or` → `prepare` / `reconcile` |
 | 其它（普通任务） | **创建者**的 agent scope（`effective_agent_id`，`core/orchestrator/task/runner.py:59`——非 subagent 任务延续创建者对话，不污染 root） | 同上 |
 
-两支都套 session 窗口的 `LoopGuard`（context_limit / reserved_output_tokens 以 SessionStartParams 为准，模型只贡献 client/身份）。
+两支都在派发时解析 `ResolvedModel`，它直接包含 client、实际模型身份、窗口、输出预留和输出策略。窗口、输出预留与输出策略全部来自 LLM 配置；Session 不保存预算，LoopGuard 只保存运行时计数。模型切换在下一次派发生效，当前 run 共用同一份预算快照。
 
 记忆相关副作用（仅 subagent 路径，`inherit_memory=True`）：`_copy_memory_for_inherit`（`core/runtime.py:146`）——**镜像父 agent 当前召回视图**（TASK+AGENT 双层 load_view 归并）→ 逐条以 CONVERSATION_TURN/AGENT re-ingest 进 child scope（`:199`-`:208`）；root 轮直派 subagent 时回退 `_latest_prior_root_task`（`:127`）。（旧 `_flush_tracking_memory` 已删除。）
 

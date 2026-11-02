@@ -1,6 +1,9 @@
 """Goal switches hand execution off while the old goal receives terminal review."""
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 import asyncio
 from types import SimpleNamespace as NS
 
@@ -258,7 +261,7 @@ async def test_runtime_new_goal_runs_before_old_review_and_late_review_keeps_age
 
     rt.event_bus.subscribe(None, record)
     await initialize_all(rt)
-    handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="switch to new request", context_limit=100_000))
+    handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="switch to new request"))
     try:
         await asyncio.wait_for(new_started.wait(), 5)
         await asyncio.wait_for(review_started.wait(), 5)
@@ -296,7 +299,7 @@ def test_switch_review_prompt_uses_terminal_contract(locale, monkeypatch):
     from ctx_weft.core.assembler.builder import PromptBuilder
     from tests.assembler_testkit import context_from_blocks
     monkeypatch.setattr(prompts, "render_purpose", partial(prompts.render_purpose, locale=locale))
-    request = NS(
+    request = NS(resolved_model=model_snapshot(100000, 0),
         purpose="observe", intent=ReviewIntent(terminal_only=True),
         extra={"observe_boundary": "task_switch", "locale": locale},
         task=Task(id="t1", session_id="s1", status="REVIEWING", user_prompt_in_memory=True),
@@ -467,7 +470,7 @@ async def test_subtask_replacement_completes_parent_before_old_review(monkeypatc
 
     rt.event_bus.subscribe(None, record)
     await initialize_all(rt)
-    handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="parent goal", context_limit=100_000))
+    handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo", user_prompt="parent goal"))
     try:
         await asyncio.wait_for(replacement_done.wait(), 5)
         tm = rt._task_managers[handle.session_id]

@@ -88,7 +88,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="please run ls",
     ))
     sid = handle.session_id
 
@@ -141,7 +141,7 @@ async def test_task_human_resolved_emitted_via_task_manager() -> None:
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hi",
     ))
     sid = handle.session_id
 

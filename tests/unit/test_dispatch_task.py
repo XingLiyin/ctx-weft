@@ -69,7 +69,7 @@ async def _runtime_with_session(*, responses: list[MockResponse] | None = None):
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="root turn", context_limit=180_000,
+        template_id="agent:tpl_echo", user_prompt="root turn",
     ))
     await handle.wait_for_finish(timeout=10.0)
     return rt, handle.session_id, handle.agent_id, events
@@ -419,7 +419,7 @@ async def test_dispatch_works_where_resume_is_blocked_by_unfinished_tasks():
     # root task 是 interactive 的（`_make_root_task_manager` 的口径）→ 纯文本即 park
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="root turn", context_limit=180_000,
+        template_id="agent:tpl_echo", user_prompt="root turn",
     ))
     sid, parked = handle.session_id, handle
     for _ in range(300):        # park 发生在 act 内部，等它落定
@@ -435,7 +435,7 @@ async def test_dispatch_works_where_resume_is_blocked_by_unfinished_tasks():
         await initialize_all(rt)
         await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="another turn",
-            context_limit=180_000, session_id=sid, resume=True,
+             session_id=sid, resume=True,
         ))
 
     # 派发这条路开着，且不发 SessionResumed
@@ -507,7 +507,7 @@ async def _container(**kw):
     rt.event_bus.subscribe(None, _cap)
     await initialize_all(rt)
     sh = await rt.create_session(
-        template_id="agent:tpl_echo", context_limit=180_000, **kw)
+        template_id="agent:tpl_echo",  **kw)
     return rt, sh, events
 
 
@@ -560,7 +560,7 @@ async def test_container_session_rejects_duplicate_session_id():
     assert sh.session_id == "ses_fixed"
     with pytest.raises(SessionAlreadyExistsError):
         await initialize_all(rt)
-        await rt.create_session(template_id="agent:tpl_echo", context_limit=180_000,
+        await rt.create_session(template_id="agent:tpl_echo",
                                 session_id="ses_fixed")
 
 

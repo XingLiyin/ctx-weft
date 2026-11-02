@@ -66,7 +66,7 @@ async def _run_first_round(rt) -> tuple[str, str, str]:
     """起一个 session 并等第一轮真正收尾（含 `_fire_session_done` 的 gather）。"""
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="first question", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="first question",
     ))
     sid, first = handle.session_id, handle.task_id
 
@@ -124,7 +124,7 @@ def _live_owner(rt, ran: list[str]) -> TaskManager:
         parent_agent_id=None, spawn_depth=0, memory_config=None, loop_config=None,
     )
     session = Session(id="ses_1", tenant_id="default", user_prompt="x",
-                      root_agent_id="agt", token_budget=0)
+                      root_agent_id="agt")
     tm = TaskManager(session_id="ses_1", event_bus=rt.event_bus, max_concurrent=1)
     tm.set_session(session)
 
@@ -192,7 +192,7 @@ async def test_start_session_refuses_to_create_a_session_id_that_already_exists(
     with pytest.raises(SessionAlreadyExistsError):
         await initialize_all(rt)
         await rt.start_session(SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt="again", context_limit=100_000,
+            template_id="agent:tpl_echo", user_prompt="again",
             session_id=sid,
         ))
 
@@ -209,7 +209,7 @@ async def test_start_session_resume_pushes_into_the_live_task_manager():
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="second question", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="second question",
         session_id=sid, resume=True,
     ))
 
@@ -236,7 +236,7 @@ async def test_start_session_resume_sees_unfinished_work_that_is_only_in_memory(
         await initialize_all(rt)
         await rt.start_session(SessionStartParams.create(
             template_id="agent:tpl_echo", user_prompt="second question",
-            context_limit=100_000, session_id=sid, resume=True,
+             session_id=sid, resume=True,
         ))
 
 

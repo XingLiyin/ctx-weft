@@ -1,3 +1,5 @@
+
+from tests.model_testkit import model_snapshot
 # ctx-weft/tests/unit/test_escalating_compact.py
 from types import SimpleNamespace
 import pytest
@@ -14,7 +16,7 @@ def _state(ratio_trigger=0.8, ratio_target=0.6, limit=1000):
             compact_keep_last=6, collapse_keep_last=3,
             compact_token_ratio=ratio_trigger, compact_target_ratio=ratio_target),
         loop_guard=SimpleNamespace(context_limit=limit))
-    return SimpleNamespace(scope=SimpleNamespace(), task=SimpleNamespace(id="t1"),
+    return SimpleNamespace(resolved_model=model_snapshot(context_limit=limit), scope=SimpleNamespace(), task=SimpleNamespace(id="t1"),
                            agent=agent, session=SimpleNamespace(id="s1", tenant_id="tn"),
                            extra={}, run_id="r1", sequence_counter=0)
 
@@ -56,11 +58,9 @@ async def test_escalates_l1_l2_l3(monkeypatch):
     assert calls == ["L1", "L2", "L3"]
 
 
-async def test_noop_when_no_context_limit(monkeypatch):
-    st = _state(limit=0)
-    events = await cm.escalating_compact(st, SimpleNamespace(memory=None, provider_ctx=None),
-                                         token_estimate=900, trigger="compact")
-    assert events == []
+async def test_invalid_window_rejected_before_compaction():
+    with pytest.raises(ValueError, match="context_limit"):
+        _state(limit=0)
 
 
 async def test_finished_event_aggregates(monkeypatch):

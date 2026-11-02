@@ -7,6 +7,7 @@ import logging
 import time
 
 from ctx_weft.core.utils.estimate import default_output_reserve
+from ctx_weft.protocols.llm import OutputPolicy
 from ctx_weft.protocols import ImagePart, LLMClient, LLMMessage, LLMRequest, TextPart
 from ctx_weft.providers.llm.config import (
     LLMAccount,
@@ -36,6 +37,7 @@ class _FixedModelClient:
         output_reserve: int,
         output_ceiling: int | None = None,
         account: str = "",
+        output_policy: OutputPolicy = OutputPolicy(),
     ) -> None:
         self._adapter = adapter
         self._model = model
@@ -43,6 +45,7 @@ class _FixedModelClient:
         self._output_reserve = output_reserve
         self._output_ceiling = output_ceiling
         self._account = account
+        self.output_policy = output_policy
 
     @property
     def model(self) -> str:
@@ -211,6 +214,7 @@ class LLMProvider:
             reserve,
             cfg.limit.output,
             account=acc.name,
+            output_policy=cfg.output_policy,
         )
 
     def _get_adapter(self, account: LLMAccount, model: ModelConfig) -> LLMClient:

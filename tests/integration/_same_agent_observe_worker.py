@@ -126,7 +126,7 @@ async def worker(path, order, size, cut, recovering=False):
                 tm = rt._task_managers["child-session"]
             else:
                 handle = await rt.start_session(SessionStartParams.create(session_id="child-session",
-                    template_id="agent:tpl_echo", user_prompt="delegate then finish", context_limit=100000,
+                    template_id="agent:tpl_echo", user_prompt="delegate then finish",
                     unattended=True))
                 await handle.wait_for_finish(timeout=20)
                 tm = rt._task_managers["child-session"]

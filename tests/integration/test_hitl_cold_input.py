@@ -19,6 +19,8 @@ the answer the human already gave never reaches the model and the task re-hangs.
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -112,7 +114,7 @@ async def test_cold_input_reconcile_writes_tool_result() -> None:
     scope = MemoryAddress(session_id=session_id, task_id=task_id, agent_id=agent_id)
     agent = SimpleNamespace(id=agent_id, template_id="tmpl_a", session_id=session_id)
     state = LoopState(run_id="run_1", session=session, task=task, agent=agent, scope=scope,
-                      extra={"template": make_echo_template()}, resolved_model=SimpleNamespace(model="mock", account=""))
+                      extra={"template": make_echo_template()}, resolved_model=model_snapshot(model="mock", account=""))
 
     pctx = ProviderContext(
         session_id=session_id,

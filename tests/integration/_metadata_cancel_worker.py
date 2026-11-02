@@ -110,7 +110,7 @@ async def worker(path, mode, cut):
                     await allow_return.wait()
             rt.event_bus.subscribe(None, notice)
             h = await rt.start_session(SessionStartParams.create(session_id=SID, template_id="agent:tpl_echo",
-                user_prompt="help with this file", context_limit=100000))
+                user_prompt="help with this file"))
             tm = rt._task_managers[SID]
             if cold_reply:
                 await wait_until(lambda: any(p.form == "wait" for p in rt.hitl_registry.list_pending(session_id=SID)))

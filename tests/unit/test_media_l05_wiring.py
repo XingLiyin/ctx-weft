@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -100,7 +102,7 @@ def _state(*, target_ratio=0.5, limit=10000, collapse_keep=99, keep_recent_image
             compact_token_ratio=0.8, compact_target_ratio=target_ratio,
             compact_keep_recent_images=keep_recent_images),
         loop_guard=SimpleNamespace(context_limit=limit))
-    return SimpleNamespace(scope=_SCOPE, task=SimpleNamespace(id="t1"), agent=agent,
+    return SimpleNamespace(resolved_model=model_snapshot(context_limit=limit), scope=_SCOPE, task=SimpleNamespace(id="t1"), agent=agent,
                            session=SimpleNamespace(id="s1", tenant_id="tn"),
                            extra={}, run_id="r1", sequence_counter=0)
 

@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from types import SimpleNamespace
 
@@ -81,7 +83,7 @@ def _env():
         run_id="r1", session=session, task=task,
         agent=SimpleNamespace(id=_AGENT_ID, template_id="tmpl_a", session_id="s1"),
         scope=scope,
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=InMemoryMemoryProvider(), event_bus=bus,

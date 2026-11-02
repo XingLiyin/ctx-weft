@@ -307,7 +307,7 @@ async def test_wait_for_finish_returns_after_deferred_fold_lands():
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="say hello", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="say hello",
     ))
     await handle.wait_for_finish(timeout=8.0)
 
@@ -351,7 +351,7 @@ async def test_start_session_returns_turn_handle():
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hi",
     ))
     await handle.wait_for_finish(timeout=5.0)
 

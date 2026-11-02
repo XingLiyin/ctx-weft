@@ -140,7 +140,7 @@ async def worker(path, stage, fault, recovering=False):
             observe.prepare_foreground_observe = prepare
             await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(session_id="tree-session",
-                template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000, unattended=True))
+                template_id="agent:tpl_echo", user_prompt="TREE ROOT",  unattended=True))
             root = handle.agent_id
             await asyncio.wait_for(llm.grandchild_started.wait() if stage == "active" else entered.wait(), 10)
             tm = rt._task_managers["tree-session"]

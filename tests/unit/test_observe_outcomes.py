@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import pytest
@@ -367,7 +369,7 @@ def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
         act_exit_reason=exit_reason,
         transcript=[SimpleNamespace(tool_calls=[])] if transcript is None else transcript,
         extra={"template": template},
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
 
     class _Bus:

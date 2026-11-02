@@ -1,11 +1,3 @@
-"""resume_session must propagate context_limit from the persisted SessionView.
-
-Fix 1 regression guard: before the fix, resume_session built Session(...)
-without passing context_limit, so it silently fell back to the model-level
-default (180_000) regardless of what was stored in the event at session
-creation time.  After the fix it must round-trip any non-default value.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -44,7 +36,7 @@ def _ev(seq: int, sid: str, type_: EventType, **payload) -> Event:
     )
 
 
-async def test_resume_session_preserves_context_limit() -> None:
+async def test_resume_session_ignores_legacy_context_limit() -> None:
     """Session built by resume_session carries context_limit from persisted event."""
     bus = InProcessEventBus()
     store = InMemoryEventStore()
@@ -75,6 +67,6 @@ async def test_resume_session_preserves_context_limit() -> None:
         task_manager=sm._new_task_manager(Session(id=sid, user_prompt="")),
     )
 
-    assert session.context_limit == NON_DEFAULT_CONTEXT_LIMIT, (
-        f"Expected context_limit={NON_DEFAULT_CONTEXT_LIMIT}, got {session.context_limit}"
-    )
+    assert not hasattr(session, "context_limit")
+    assert not hasattr(session, "reserved_output_tokens")
+    assert not hasattr(session, "token_budget")

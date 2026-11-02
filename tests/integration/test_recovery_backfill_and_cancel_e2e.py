@@ -122,7 +122,7 @@ async def test_cancel_session_closes_open_rounds_and_finalizes_claimed_replies()
     rt = _runtime(llm, hitl_timeout_sec=0)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
@@ -155,7 +155,7 @@ async def test_forget_session_refuses_while_a_round_is_open() -> None:
     rt = _runtime(llm, hitl_timeout_sec=0)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
     q1 = await _next_question(rt, sid)
     await asyncio.sleep(0.2)
@@ -180,7 +180,7 @@ async def test_quiescence_accounts_for_open_rounds_and_claimed_replies() -> None
     rt = _runtime(llm)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
     # interactive 的 root task 说完一段纯文本就 park 出 wait 气泡；取消整条会话让它彻底静止
     # （光收口气泡不够——agent 还停在 waiting_human）。

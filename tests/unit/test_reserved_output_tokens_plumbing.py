@@ -1,15 +1,13 @@
+
+from tests.model_testkit import model_snapshot
 from ctx_weft.core.models.agent import LoopGuard
-from ctx_weft.core.models.session import Session
-from ctx_weft.core.control.types import SessionView
 
 
-def test_defaults_are_8192():
-    assert LoopGuard().reserved_output_tokens == 8192
-    s = Session(id="s", user_prompt="hi")
-    assert s.reserved_output_tokens == 8192
-    assert SessionView(id="s").reserved_output_tokens == 8192
+def test_counters_have_no_budget():
+    guard = LoopGuard()
+    assert not hasattr(guard, "context_limit")
+    assert not hasattr(guard, "reserved_output_tokens")
 
 
-def test_loopguard_carries_reserve():
-    g = LoopGuard(context_limit=100_000, reserved_output_tokens=4096)
-    assert g.reserved_output_tokens == 4096
+def test_budget_reserves_output_space():
+    assert model_snapshot(100_000, 4096).effective_input_limit == 95_904

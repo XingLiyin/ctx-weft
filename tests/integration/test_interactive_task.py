@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import pytest
@@ -88,7 +90,7 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
     bus = InProcessEventBus()
     mem = InMemoryMemoryProvider()
     hitl_service, hitl = make_hitl(bus)
-    session = Session(id="s1", tenant_id="default", user_prompt="hi",  token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     task = Task(
         id="t1", session_id="s1", status="ACTIVE",
         title="Greet", description="say hi politely",
@@ -108,7 +110,7 @@ def _act_state_ctx(unattended: bool, llm: MockLLMAdapter, *,
     )
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope, prompt_inputs=scripted_inputs(prompt),
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
         extra={"template": _template(observe_role=observe_role)},
     )
     ctx = LoopContext(

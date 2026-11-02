@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 import json
 import sqlite3
@@ -156,7 +158,7 @@ async def test_ot06_finished_but_memory_write_crashed_backfills(tmp_path):
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="t1", status="ACTIVE"),
         agent=SimpleNamespace(id="a1", template_id="t"), scope=scope,
-        resolved_model=SimpleNamespace(model="m", account=""), sequence_counter=0)
+        resolved_model=model_snapshot(model="m", account=""), sequence_counter=0)
     ctx = LoopContext(assembler=None, llm=None, memory=mem, event_bus=bus,
                       provider_ctx=pctx, event_store=event_store)
     cache = CapabilityCache()
@@ -211,7 +213,7 @@ async def test_ot14_delegate_completed_reentry_no_duplicate_children():
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=parent_task, agent=SimpleNamespace(id="a1", template_id="t"),
         scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
-        resolved_model=SimpleNamespace(model="m", account=""),
+        resolved_model=model_snapshot(model="m", account=""),
         sequence_counter=0,
     )
 

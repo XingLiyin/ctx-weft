@@ -198,7 +198,7 @@ async def test_start_session_plain_text_does_not_eagerly_resolve_llm():
         SessionStartParams.create(
             template_id="agent:tpl_echo",
             user_prompt="纯文本，没有图片",
-            context_limit=100_000,
+
         )
     )
     assert handle is not None, (
@@ -238,7 +238,7 @@ async def test_start_session_plain_text_resolver_never_called():
         SessionStartParams.create(
             template_id="agent:tpl_echo",
             user_prompt="纯文本，没有图片",
-            context_limit=100_000,
+
         )
     )
     assert calls == [], (
@@ -284,7 +284,7 @@ async def test_start_session_dict_text_does_not_eagerly_resolve_llm():
             SessionStartParams.create(
                 template_id="agent:tpl_echo",
                 user_prompt=[{"type": "text", "text": "hello"}],
-                context_limit=100_000,
+
             )
         )
     assert calls == [], (

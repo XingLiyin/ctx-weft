@@ -205,7 +205,7 @@ class _StubTaskManager:
 
 def _session() -> Session:
     return Session(id=SID, tenant_id="default", user_prompt="x",
-                   token_budget=0, root_agent_id=ROOT, context_limit=180_000)
+                    root_agent_id=ROOT)
 
 
 async def _runner(rt, task: Task) -> _SessionTaskRunner:

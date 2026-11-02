@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +43,7 @@ def _state(*, ratio=0.8, context_limit=100000):
         loop_config=SimpleNamespace(compact_token_ratio=ratio),
         loop_guard=SimpleNamespace(context_limit=context_limit),
     )
-    return SimpleNamespace(agent=agent, scope=_scope())
+    return SimpleNamespace(agent=agent, scope=_scope(), resolved_model=model_snapshot(context_limit=context_limit))
 
 
 async def test_below_ratio_no_trigger() -> None:

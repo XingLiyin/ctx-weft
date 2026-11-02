@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.model_testkit import model_snapshot
 from ctx_weft.core.loop.steps.act import _account_tokens
 from ctx_weft.core.models.agent import LoopGuard
 from ctx_weft.core.utils.estimate import effective_limit
@@ -31,11 +32,12 @@ STOP_RATIO = LoopConfig().context_limit_stop_ratio
 
 
 def _state(*, context_limit=100_000, reserved_output_tokens=8192):
-    guard = LoopGuard(context_limit=context_limit, reserved_output_tokens=reserved_output_tokens)
+    guard = LoopGuard()
     agent = SimpleNamespace(id="a1", loop_guard=guard, loop_config=LoopConfig())
     session = SimpleNamespace(token_used=0)
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="a1")
-    return SimpleNamespace(agent=agent, session=session, scope=scope)
+    return SimpleNamespace(agent=agent, session=session, scope=scope,
+        resolved_model=model_snapshot(context_limit=context_limit, output_reserve=reserved_output_tokens))
 
 
 def _ctx():

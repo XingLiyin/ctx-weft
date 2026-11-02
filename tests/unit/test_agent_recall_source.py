@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -38,7 +41,7 @@ def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
 
 async def _collect(mem, scope) -> list:
     deps = AssemblerDeps(memory=mem, knowledge_providers=[], provider_ctx=_ctx())
-    req = ContextRequest(purpose="act", scope=scope, task=None, agent=None, session=None,
+    req = ContextRequest(resolved_model=model_snapshot(100_000, 0), purpose="act", scope=scope, task=None, agent=None, session=None,
                          template=None, bound_capabilities=[])
     blocks = [b async for b in AgentRecallSource().fetch(req, deps)]
     records = {r.id: r for r in await mem.read_records([b.memory_id for b in blocks], _ctx())}

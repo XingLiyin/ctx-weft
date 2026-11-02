@@ -55,7 +55,7 @@ async def test_hot_approval_session_events_all_carry_the_sessions_tenant() -> No
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="please run ls",
         tenant_id=TENANT,
     ))
     sid = handle.session_id
@@ -102,7 +102,7 @@ async def test_recovery_queue_signal_carries_the_recovered_sessions_tenant() -> 
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="please run ls",
         tenant_id=TENANT,
     ))
     sid = handle.session_id

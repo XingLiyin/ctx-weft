@@ -129,7 +129,7 @@ def _make_rt(llm) -> CtxWeftRuntime:
 
 async def _run_session(rt, prompt="go"):
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt=prompt, context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt=prompt))
     return await handle.wait_for_finish(timeout=60)
 
 
@@ -144,7 +144,7 @@ async def _scenario_single_session(n_tools=100):
     t0 = time.perf_counter()
     for _ in range(n_tools):
         handle = await rt.start_session(SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+            template_id="agent:tpl_echo", user_prompt="go"))
         await handle.wait_for_finish(timeout=30)
     return (time.perf_counter() - t0) / n_tools * 1000  # ms/session
 

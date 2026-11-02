@@ -1,3 +1,5 @@
+
+from tests.model_testkit import model_snapshot
 import json
 
 from ctx_weft.core.utils.content import content_to_text, redact_content_for_event
@@ -103,7 +105,7 @@ def _make_state(*, origin: str = EventOrigin.LOOP_ACT):
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
         # act 走真实 llm_gateway.stream_llm_resilient（task 4 后 LLM_PROMPT_SENT 由 gateway
         # 发射，且只在 origin==LOOP_ACT 时发射）。
         origin=origin,
@@ -217,7 +219,7 @@ async def test_recognize_intent_prompt_event_keeps_text_not_empty():
                                loop_guard=SimpleNamespace(context_limit=100_000, context_tokens=0)),
         scope=MemoryAddress(session_id="s1", task_id="t1", agent_id="a1"),
         extra={"template": SimpleNamespace(), "bound_capabilities": [cap]},
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
         origin=EventOrigin.LOOP_RECOGNIZE_INTENT,
     )
 

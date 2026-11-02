@@ -15,6 +15,8 @@ approval 的冷路径短路。三者都随重设计消失或换了归属：
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import pytest
@@ -87,7 +89,7 @@ async def test_run_loop_catches_park_returns_awaiting_human() -> None:
         loop_config=LoopConfig(),
     )
     scope = MemoryAddress(session_id="s_park_1", task_id="tsk_park_1", agent_id="agt_p1")
-    state = LoopState(run_id="run_p1", session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+    state = LoopState(run_id="run_p1", session=session, task=task, agent=agent, scope=scope, resolved_model=model_snapshot(model="mock", account=""))
 
     # ── stub driver that raises HitlPark immediately ──────────────────────────
     class _ParkingDriver:

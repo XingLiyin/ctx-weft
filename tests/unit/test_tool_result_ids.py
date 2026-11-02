@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import ast
 import pathlib
 
@@ -123,7 +125,7 @@ async def test_bare_wire_ids_get_distinct_records_and_are_not_reconcluded():
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="t1", status="ACTIVE", parent_task_id=None),
         agent=SimpleNamespace(id="a1", template_id="t"), scope=scope,
-        resolved_model=SimpleNamespace(model="m", account=""), sequence_counter=0)
+        resolved_model=model_snapshot(model="m", account=""), sequence_counter=0)
     ctx = LoopContext(assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),
                       provider_ctx=pctx)
     cache = CapabilityCache(); cache.put("a1", [tool._cap()])

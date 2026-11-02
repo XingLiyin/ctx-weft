@@ -106,7 +106,7 @@ async def test_send_message_works_after_the_session_was_released():
     rt = _make_runtime()
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="first question", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="first question",
     ))
     sid, aid, first_task = handle.session_id, handle.agent_id, handle.task_id
 
@@ -154,7 +154,7 @@ async def test_send_message_self_heals_after_an_explicit_forget_session():
     rt = _make_runtime()
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="first question", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="first question",
     ))
     sid, aid, first_task = handle.session_id, handle.agent_id, handle.task_id
 
@@ -200,7 +200,7 @@ async def test_send_message_without_session_id_refuses_instead_of_sweeping():
     rt = _make_runtime()
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="first question", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="first question",
     ))
     sid, aid, first_task = handle.session_id, handle.agent_id, handle.task_id
 

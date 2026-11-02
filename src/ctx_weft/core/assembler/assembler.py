@@ -26,6 +26,7 @@ from ctx_weft.protocols.knowledge import KnowledgeProvider
 if TYPE_CHECKING:
     from ctx_weft.core.assembler.context import PromptContext
     from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.orchestrator.model import ResolvedModel
     from ctx_weft.core.models.agent import Agent
     from ctx_weft.core.models.session import Session
     from ctx_weft.core.models.task import Task
@@ -94,6 +95,7 @@ class ContextRequest:
     session: Session
     template: AgentTemplate | None
     bound_capabilities: list[Any]
+    resolved_model: ResolvedModel
     token_counter: Callable[[str], int] = estimate_tokens
     extra: dict[str, Any] = field(default_factory=dict)
     # Optional compilation options; their purpose must match the request.

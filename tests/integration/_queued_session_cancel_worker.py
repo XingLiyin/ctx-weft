@@ -55,7 +55,7 @@ async def worker(path, fault, recovering=False):
                 owner = view.tasks[target].assigned_agent_id
             else:
                 handle = await rt.start_session(SessionStartParams.create(session_id=SID,
-                    template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000,
+                    template_id="agent:tpl_echo", user_prompt="TREE ROOT",
                     unattended=True))
                 await asyncio.wait_for(llm.grandchild_started.wait(), 15)
                 tm = rt._task_managers[SID]

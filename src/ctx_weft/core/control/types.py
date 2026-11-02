@@ -31,9 +31,6 @@ class SessionView:
     llm_model: str = ""
     llm_account: str = ""
     tenant_id: str = "default"
-    token_budget: int = 200_000
-    context_limit: int = 180_000
-    reserved_output_tokens: int = 8192
     failure_counter: int = 0
     #: 本轮是否已熔断（`FailureThresholdHit` 置位，`SessionResumed` 清零）。
     #: `failure_counter` 的折叠据此判断一条 `TaskFailed` 是不是「熔断自己发的那条」

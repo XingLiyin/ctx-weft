@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -137,7 +139,7 @@ async def fake_state_ctx():
         extra={"template": _template_with_role(), "bound_capabilities": []},
         # resolve_llm_identity 的真值来源（批次 B）：这里从不真的发 LLM 请求
         # （complete() 被各测试自行打桩），但仍给个占位，防止误触真实调用时 AttributeError。
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
 
     # Fake task_manager with no-op track_background

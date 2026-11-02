@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -66,7 +68,7 @@ async def _run_compact(mem) -> None:
     session = SimpleNamespace(id="s1", tenant_id="default", goal="")
     state = LoopState(run_id="r1", session=session, task=task, agent=agent,
                       scope=_scope(), extra={"template": None, "bound_capabilities": []},
-                      transcript=[], resolved_model=SimpleNamespace(model="mock", account=""))
+                      transcript=[], resolved_model=model_snapshot(model="mock", account="", context_limit=1000))
     ctx = LoopContext(assembler=_FakeAssembler(), llm=_FakeLLM(), memory=mem,
                       event_bus=InProcessEventBus(), provider_ctx=_pctx())
     await CompactStep().execute(state, ctx)
@@ -134,7 +136,7 @@ async def test_finalize_retry_no_process_report_no_user_message() -> None:
         scope=MemoryAddress(session_id="s1", task_id="T1", agent_id="ag1"),
         verdict=SimpleNamespace(task_outcome="continue", act_recap="missing X; do Y next",
                                 task_summary=""),
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account="", context_limit=1000),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem,

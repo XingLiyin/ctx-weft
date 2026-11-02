@@ -40,7 +40,7 @@ def _task(tid: str, status: str = "PENDING") -> Task:
 def _wire(rt) -> tuple[TaskManager, Session]:
     tm = TaskManager(session_id="s1")
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                    token_budget=0, root_agent_id="agr")
+                     root_agent_id="agr")
     tm.set_session(sess)
     tm.set_runner(_StubRunner())
     rt._task_managers["s1"] = tm
@@ -134,7 +134,7 @@ class _StubExecTM:
 
 def _exec_runner(rt, tm, *, root_agent_id="agr") -> _SessionTaskRunner:
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                    token_budget=0, root_agent_id=root_agent_id)
+                     root_agent_id=root_agent_id)
     return _SessionTaskRunner(
         runtime=rt, session=sess,
         lm=None, memory=None,
@@ -193,7 +193,7 @@ async def test_pause_session_keeps_queued_root_task():
     rt = _rt()
     tm = TaskManager(session_id="s1", max_concurrent=1)
     sess = Session(id="s1", tenant_id="default", user_prompt="x",
-                    token_budget=0, root_agent_id="agr")
+                     root_agent_id="agr")
     tm.set_session(sess)
     tm.set_runner(_StubRunner())
     rt._task_managers["s1"] = tm

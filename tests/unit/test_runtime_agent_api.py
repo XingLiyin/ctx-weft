@@ -299,7 +299,7 @@ async def test_start_session_agent_id_is_addressable_root_agent():
     handle = await rt.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt="hi",
-        context_limit=100_000,
+
     ))
     await handle.wait_for_finish(timeout=5.0)
 
@@ -332,7 +332,7 @@ async def test_summary_carries_created_at_for_live_agents():
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hi",
     ))
     await initialize_all(rt)
     [summary] = [a for a in [item.data for item in await rt.list_agents(session_id=handle.session_id)]

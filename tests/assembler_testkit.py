@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.builder import PromptBuilder, _history_facts
@@ -44,7 +47,8 @@ def prompt_request(*, task_id: str = "t1", purpose: str = "act", **overrides):
             unattended=False,
         ),
         agent=SimpleNamespace(id="agent-1"),
-        session=SimpleNamespace(context_limit=100_000, reserved_output_tokens=0),
+        session=SimpleNamespace(),
+        resolved_model=model_snapshot(100_000, 0),
         template=None,
         extra={},
         token_counter=len,

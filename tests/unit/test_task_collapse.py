@@ -1,3 +1,5 @@
+
+from tests.model_testkit import model_snapshot
 from datetime import datetime, timedelta, UTC
 from types import SimpleNamespace
 
@@ -116,7 +118,7 @@ async def test_escalating_compact_l3_uses_collapse_keep_last(monkeypatch):
             compact_keep_last=6, collapse_keep_last=2,
             compact_token_ratio=0.1, compact_target_ratio=0.0),
         id="a", loop_guard=SimpleNamespace(context_limit=1000, context_tokens=1000))
-    state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"), agent=agent,
+    state = SimpleNamespace(resolved_model=model_snapshot(context_limit=1000), scope=scope, task=SimpleNamespace(id="t1"), agent=agent,
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             extra={}, run_id="run1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(),
@@ -152,7 +154,7 @@ async def test_escalating_l3_fires_on_segment_only_accumulation(monkeypatch):
             compact_keep_last=6, collapse_keep_last=2,
             compact_token_ratio=0.1, compact_target_ratio=0.01),
         loop_guard=SimpleNamespace(context_limit=1000, context_tokens=1000))
-    state = SimpleNamespace(scope=scope, task=SimpleNamespace(id="t1"), agent=agent,
+    state = SimpleNamespace(resolved_model=model_snapshot(context_limit=1000), scope=scope, task=SimpleNamespace(id="t1"), agent=agent,
                             session=SimpleNamespace(id="s", tenant_id="tn"),
                             extra={}, run_id="r1", sequence_counter=0)
     ctx = SimpleNamespace(memory=mem, provider_ctx=_ctx(), task_manager=None, event_bus=None,

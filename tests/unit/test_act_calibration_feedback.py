@@ -11,6 +11,8 @@ max(full, ctx_tokens) floor 成上一轮真实值；若拿 floor 后的值回喂
 """
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import ctx_weft.core.loop.steps.act as _act_mod
@@ -81,7 +83,7 @@ def _make_state(*, context_tokens: int = 0):
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
-        resolved_model=SimpleNamespace(model="deepseek-v4-pro", account="deepseek-rj"),
+        resolved_model=model_snapshot(model="deepseek-v4-pro", account="deepseek-rj"),
     )
 
 

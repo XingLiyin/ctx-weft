@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -101,7 +103,7 @@ def _harness(tool, *, authorizer=None, sink=False):
         run_id="run_1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="t1", status="ACTIVE", parent_task_id=None),
         agent=SimpleNamespace(id="a1", template_id="tpl"), scope=scope,
-        resolved_model=SimpleNamespace(model="m", account=""), sequence_counter=0)
+        resolved_model=model_snapshot(model="m", account=""), sequence_counter=0)
 
 
     ctx = LoopContext(assembler=None, llm=None, memory=mem, event_bus=bus,

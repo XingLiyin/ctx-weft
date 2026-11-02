@@ -23,6 +23,8 @@ Knowledge / Template 并列）。包含两个**相互独立**的扩展点：
 
 from __future__ import annotations
 
+import math
+
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
@@ -361,6 +363,28 @@ class Tokenizer(Protocol):
     def observe(self, estimated: int, actual: int) -> None: ...
 
 
+@dataclass(frozen=True)
+class OutputPolicy:
+    """Model-specific policy for allocating the remaining window to output."""
+
+    margin: int = 8192
+    margin_ratio: float = 0.05
+    floor: int = 1024
+    output_ratio: float = 0.2
+    output_min: int = 4096
+
+    def __post_init__(self) -> None:
+        for name in ("margin", "floor", "output_min"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"output_policy.{name} must be a non-negative integer")
+        for name in ("margin_ratio", "output_ratio"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"output_policy.{name} must be between 0 and 1")
+
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     """LLM 调用统一门面。adapter 实现这个协议；core 只依赖此抽象。"""
@@ -374,7 +398,7 @@ class LLMClient(Protocol):
     @property
     @abstractmethod
     def output_reserve(self) -> int:
-        """输入侧为输出预留的 token 量 → 喂 session.reserved_output_tokens
+        """输入侧为输出预留的 token 量 → run 的 ResolvedModel.reserved_output_tokens
         （→ effective_limit → 装配预算 / compact 触发 / 限额停机）。**不**参与 per-request
         的输出上限（client.output_ceiling，配置来自 ModelConfig.limit.output）。
         经 ModelConfig.output_reserve 配置，未配时按窗口尺寸取默认
@@ -384,6 +408,9 @@ class LLMClient(Protocol):
     # 可选（duck-typed，非协议必需）：output_ceiling -> int | None
     #   单次输出的收紧上限（per-request max_tokens 的硬天花板）。网关经 getattr 读取，
     #   缺省/None → 回退 context_limit。实现方（_FixedModelClient）可提供；未提供者网关自动回退。
+
+    # Optional: output_policy -> OutputPolicy. Defaults are model configuration defaults;
+    # resolution freezes them into ResolvedModel for this run, never into Session.
 
     # ⚠️ **core 对模态能力零判断**（spec 2026-08-28-multimodal-adapter-dispatch）。
     #   core 会把 `list[ContentPart]`（含 ImagePart）原样透传到 complete()，实现方

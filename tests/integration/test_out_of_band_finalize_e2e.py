@@ -15,6 +15,8 @@ park 在 `ActStep` 里抛 `HitlPark`，driver 到不了 observe/finalize。于�
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import pytest
@@ -61,8 +63,7 @@ async def _fixture(*, parent: str | None = "t_parent"):
     mem = InMemoryMemoryProvider()
     hitl_service, hitl_registry = make_hitl(bus)
 
-    session = Session(id=_SID, tenant_id="default", user_prompt="hi",
-                      token_budget=0)
+    session = Session(id=_SID, tenant_id="default", user_prompt="hi")
     task = Task(
         id="t_child", session_id=_SID, status="AWAITING_HUMAN",
         title="查资料", description="查一下甲的资料",
@@ -73,7 +74,7 @@ async def _fixture(*, parent: str | None = "t_parent"):
     scope = MemoryAddress(session_id=_SID, task_id=task.id, agent_id="ag_child")
     state = LoopState(
         run_id="r_bg", session=session, task=task, agent=agent, scope=scope,
-        prompt_inputs=None, resolved_model=SimpleNamespace(model="mock", account=""),
+        prompt_inputs=None, resolved_model=model_snapshot(model="mock", account=""),
     )
     state.extra["final_body"] = "甲的资料是这样的"
     state.extra["final_summary"] = "查了三处来源"

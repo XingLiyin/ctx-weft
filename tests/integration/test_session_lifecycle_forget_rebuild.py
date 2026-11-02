@@ -105,7 +105,7 @@ async def _wait_until(predicate, timeout=10.0, interval=0.02):
 async def _run_one_round(rt: CtxWeftRuntime):
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hi",
     ))
     sid, aid, tid = handle.session_id, handle.agent_id, handle.task_id
 

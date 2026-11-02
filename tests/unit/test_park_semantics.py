@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import inspect
 from types import SimpleNamespace
 
@@ -77,7 +79,7 @@ def _env(*, unattended: bool, llm=None):
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
     state = LoopState(
         run_id="r1", session=session, task=task, agent=agent, scope=scope,
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=SimpleNamespace(compile=compiled_test_inputs), llm=llm, memory=InMemoryMemoryProvider(), event_bus=bus,

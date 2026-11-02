@@ -11,6 +11,9 @@ title 分支短路，永远走不到 user_prompt 分支。必须走 ``start_sess
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 import base64
 
 import pytest
@@ -124,7 +127,7 @@ async def test_multimodal_prompt_completes_one_actor_round_without_crashing() ->
         SessionStartParams.create(
             template_id="agent:tpl_echo",
             user_prompt=_MULTIMODAL_PROMPT,
-            context_limit=100_000,
+
         )
     )
     state = await handle.wait_for_finish(timeout=5.0)
@@ -213,7 +216,7 @@ async def _run_and_collect_context_assembled_tokens(user_prompt) -> int:
         SessionStartParams.create(
             template_id="agent:tpl_echo",
             user_prompt=user_prompt,
-            context_limit=100_000,
+
         )
     )
     state = await handle.wait_for_finish(timeout=5.0)
@@ -319,7 +322,7 @@ async def test_multimodal_prompt_reaches_wire_payload_as_image_block() -> None:
         SessionStartParams.create(
             template_id="agent:tpl_echo",
             user_prompt=_MULTIMODAL_PROMPT,
-            context_limit=100_000,
+
         )
     )
     state = await handle.wait_for_finish(timeout=5.0)  # 1) 不抛异常
@@ -407,7 +410,7 @@ async def _run_multimodal_session(*, blob_store=None, session_id: str | None = N
             template_id="agent:tpl_echo",
             user_prompt=_MULTIMODAL_PROMPT,
             session_id=session_id,
-            context_limit=100_000,
+
         )
     )
     state = await handle.wait_for_finish(timeout=5.0)
@@ -546,7 +549,7 @@ async def test_compact_assembly_carries_no_image_while_act_still_does() -> None:
     assembler = runtime._build_assembler(memory, ctxp)
 
     def _request(purpose: str, extra: dict) -> ContextRequest:
-        return ContextRequest(
+        return ContextRequest(resolved_model=model_snapshot(100_000, 0),
             purpose=purpose,
             scope=state.scope,
             task=state.task,
@@ -618,7 +621,7 @@ async def _run_text_only_session(*, blob_store):
         SessionStartParams.create(
             template_id="agent:tpl_echo",
             user_prompt=_MULTIMODAL_PROMPT,
-            context_limit=100_000,
+
         )
     )
     state = await handle.wait_for_finish(timeout=5.0)
@@ -763,7 +766,7 @@ async def test_event_refs_and_memory_refs_are_independent(runtime_with_two_blob_
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_MULTIMODAL_PROMPT,
-        context_limit=100_000,
+
     ))
     state = await handle.wait_for_finish(timeout=5.0)
     assert state is not None
@@ -823,7 +826,7 @@ async def test_event_blob_anchors_to_the_real_session_when_only_event_store_exis
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_MULTIMODAL_PROMPT,
-        context_limit=100_000,
+
     ))
     state = await handle.wait_for_finish(timeout=5.0)
     assert state is not None

@@ -76,7 +76,7 @@ async def worker(path, stage, fault, cut):
             await initialize_all(rt)
             root_handle = await rt.start_session(SessionStartParams.create(session_id="tree-session",
                 template_id="agent:tpl_echo", user_prompt="FIRST" if stage == "batch" else "TREE ROOT",
-                context_limit=100000, unattended=True))
+                 unattended=True))
             tm = rt._task_managers["tree-session"]
             if stage == "batch":
                 await root_handle.wait_for_finish(timeout=15)

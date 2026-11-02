@@ -290,7 +290,7 @@ async def check_settled(rt, store, *, legacy_hitl=None):
 async def prepare(rt, a, store, memory, scenario, variant):
     h = await rt.start_session(SessionStartParams.create(session_id=SID,
         template_id="agent:tpl_echo", user_prompt="Prepare the release checklist. " + PROJECT,
-        unattended=scenario != "approval", context_limit=100000))
+        unattended=scenario != "approval"))
     data = {"root": h.agent_id, "task": h.task_id, "agents": [h.agent_id], "tasks": [h.task_id]}
     if scenario in {"resume", "model"}:
         await asyncio.wait_for(a.started.wait(), 10)

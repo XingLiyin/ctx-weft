@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
@@ -56,7 +58,7 @@ def _state(bound):
         task=SimpleNamespace(id="t1", title="", settings=SimpleNamespace()),
         scope=SimpleNamespace(session_id="s1", task_id="t1", agent_id="a1"),
         extra={"template": SimpleNamespace(), "bound_capabilities": bound},
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
 
 

@@ -38,8 +38,7 @@ async def run(path, entry, snapshot, recovering):
             else:
                 await initialize_all(rt)
                 h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                    template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True,
-                    context_limit=100000))
+                    template_id="agent:tpl_echo", user_prompt="INITIAL_REQUEST", unattended=True))
                 await asyncio.wait_for(llm.old_review.wait(), 10)
                 await rt.pause_agent(h.agent_id)
                 await idle(rt)

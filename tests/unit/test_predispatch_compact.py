@@ -7,7 +7,10 @@ CompactStep 同构）。本文件聚焦门控：ratio=0 / 未达阈值 / 无 con
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import datetime, timedelta, timezone
+import pytest
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
@@ -132,7 +135,7 @@ def _state(*, ratio, context_limit=1000, context_tokens=0, keep_last=2, compact_
         extra={"template": None, "bound_capabilities": []},
         # resolve_llm_identity 的真值来源（task-4 复审第二轮：summarize_for_compact
         # 不再读 agent.runtime.get("llm_model")，那个键正常任务执行永远不会被写入）。
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account="", context_limit=context_limit),
     )
 
 
@@ -193,13 +196,9 @@ async def test_falls_back_to_loop_guard_tokens_when_prompt_tokens_zero():
     assert len(out) == 3  # started + compacted + finished（收尾聚合）
 
 
-async def test_skips_when_no_context_limit():
-    mem = _FakeMemory(task_count=10)
-    out = await maybe_compact_before_dispatch(
-        _state(ratio=0.6, context_limit=0), _ctx(mem), prompt_tokens=800)
-    assert out == []
-    assert mem.ingested == []
-    assert mem.superseded == []
+async def test_invalid_window_rejected_before_dispatch():
+    with pytest.raises(ValueError, match="context_limit"):
+        _state(ratio=0.6, context_limit=0)
 
 
 async def test_predispatch_uses_escalating_compact(monkeypatch):

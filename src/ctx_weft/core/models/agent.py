@@ -26,8 +26,6 @@ class LoopGuard:
     turns_used: int = 0
     context_tokens: int = 0
     context_message_count: int = 0
-    context_limit: int = 180_000
-    reserved_output_tokens: int = 8192
     # spec: tool-schema-budget——瞬态（不进持久快照）：上次发送请求的工具面指纹与估算。
     # 增量估算在指纹变化时计入 schema 差值（新面估算 − 上次面估算；真实基线已含旧面）。
     last_tools_signature: str = ""

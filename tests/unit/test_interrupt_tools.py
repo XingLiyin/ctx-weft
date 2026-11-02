@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -85,7 +87,7 @@ def _harness(llm, provider):
     gw = CapabilityGateway(
         capability_cache=cache, capability_providers=[provider], memory=mem, event_bus=bus,
     )
-    session = Session(id="s1", tenant_id="default", user_prompt="hi",  token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="hi")
     task = Task(id="t1", session_id="s1", status="ACTIVE", title="T", settings=NormalTaskSettings())
     agent = Agent(id="ag1", session_id="s1", template_id="t")
     scope = MemoryAddress(session_id="s1", task_id="t1", agent_id="ag1")
@@ -93,7 +95,7 @@ def _harness(llm, provider):
                              tools=[], token_count=1)
     state = LoopState(run_id="r1", session=session, task=task, agent=agent, scope=scope,
                       prompt_inputs=scripted_inputs(prompt),
-                      resolved_model=SimpleNamespace(model="mock", account=""))
+                      resolved_model=model_snapshot(model="mock", account=""))
     pause = PauseToken()
     ctx = LoopContext(
         assembler=SimpleNamespace(compile=compiled_test_inputs), llm=llm, memory=mem, event_bus=bus,

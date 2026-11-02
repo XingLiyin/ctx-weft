@@ -117,7 +117,7 @@ async def test_delegate_same_batch_e2e():
     await initialize_all(runtime)
     handle = await runtime.start_session(
         SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt="root request", context_limit=100_000,
+            template_id="agent:tpl_echo", user_prompt="root request",
         )
     )
     session_id = handle.session_id

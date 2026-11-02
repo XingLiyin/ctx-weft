@@ -89,7 +89,7 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
     from ctx_weft.core.runtime import SessionStartParams
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="第一轮", context_limit=200_000,
+        template_id="agent:tpl_echo", user_prompt="第一轮",
     ))
     await handle.wait_for_finish(timeout=30)
     agent_id = handle.agent_id

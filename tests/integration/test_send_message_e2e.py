@@ -137,7 +137,7 @@ async def test_send_message_injects_into_suspended_parent_and_survives_child_wak
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
             user_prompt="delegate to a researcher",
-            context_limit=100_000,
+
         )
     )
     session_id = handle.session_id

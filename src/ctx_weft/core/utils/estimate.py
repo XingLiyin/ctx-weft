@@ -78,13 +78,13 @@ def effective_limit(context_limit: int, reserved_output_tokens: int) -> int:
 
 
 def default_output_reserve(context_limit: int) -> int:
-    """未显式配置时的输出预留默认 = max(context_limit // 16, 4096)。
+    """未显式配置时按窗口的 1/16 预留，至少 4096，至多窗口的一半。
 
     按窗口尺寸取（固定 6.25% 比例）而非固定值：小上下文模型不至被固定 8192 吞光
     （effective_limit 归零），大模型自动放大；固定比例 → compact 触发点在各模型上统一
     （约 75% 原始窗口）。下限 4096 与输出软顶 output_min 对齐。
     """
-    return max(context_limit // 16, 4096)
+    return min(max(context_limit // 16, 4096), max(0, context_limit // 2))
 
 
 def dynamic_max_tokens(
@@ -95,14 +95,15 @@ def dynamic_max_tokens(
     margin: int = 8192,
     floor: int = 1024,
 ) -> int:
-    """按当前窗口占用实时算请求 max_tokens：clamp(context_limit − used − margin, floor, ceiling)。
+    """按当前窗口占用算输出上限；floor 始终受物理剩余空间与 ceiling 约束。
 
     used = caller 估算的本请求真实 prompt token（真实基线 + 本轮增量，见
     gateway.request_prompt_estimate）——纯算术在此，不做估算。ceiling 默认由调用方传
     context_limit（剩余窗口全给输出）；配小则作收紧上限（如 Anthropic 硬输出上限）。
     """
     remaining = context_limit - used - margin
-    return max(floor, min(ceiling, remaining))
+    available = max(0, context_limit - used)
+    return min(ceiling, available, max(floor, remaining))
 
 
 # 一条消息/记录里文本 content 之外的计费补偿项（都往大了取，堵低估致 400 的洞）。

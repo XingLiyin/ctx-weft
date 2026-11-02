@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from ctx_weft.protocols.llm import OutputPolicy
+
 # ``openai`` is retained for persisted configurations from before the split.
 # It must always resolve to the compatible adapter, never to the official SDK.
 LLMProtocol = Literal["openai", "openai-compatible", "openai-official", "anthropic"]
@@ -21,6 +23,8 @@ class ModelLimits:
             raise ValueError("limit.context must be a positive integer")
         if self.output is not None and (type(self.output) is not int or self.output <= 0):
             raise ValueError("limit.output must be a positive integer or None")
+        if self.output is not None and self.output > self.context:
+            raise ValueError("limit.output must not exceed limit.context")
 
 
 @dataclass
@@ -42,6 +46,7 @@ class ModelConfig:
     limit: ModelLimits
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
     output_reserve: int | None = None
+    output_policy: OutputPolicy = field(default_factory=OutputPolicy)
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -54,6 +59,10 @@ class ModelConfig:
             type(self.output_reserve) is not int or self.output_reserve < 0
         ):
             raise ValueError("output_reserve must be a non-negative integer or None")
+        if self.output_reserve is not None and self.output_reserve >= self.limit.context:
+            raise ValueError("output_reserve must be smaller than limit.context")
+        if not isinstance(self.output_policy, OutputPolicy):
+            raise ValueError("output_policy must be an OutputPolicy")
 
 
 @dataclass

@@ -311,7 +311,7 @@ async def worker(directory, mode, cut, recovering=False):
                 return
             handle = await rt.start_session(SessionStartParams.create(
                 session_id="crash-session", template_id="agent:tpl_echo",
-                user_prompt="perform work", context_limit=100_000,
+                user_prompt="perform work",
                 unattended=mode.startswith(("handoff_", "exhausted_")) or mode in {"threshold", "interrupt", "foreground", "mechanical", "mechanical_retry", "retry"}))
             root_task_id = handle.task_id
             if mode == "accepted_interrupt":

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import UTC, datetime
 
 from ctx_weft.protocols.events import Event, EventOrigin
@@ -172,7 +174,7 @@ async def test_every_emitted_event_has_nonempty_origin():
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hi",
     ))
     await _poll(lambda: bool(rt.hitl_registry.list_pending(session_id=handle.session_id)))
     # background observe / recognize_intent 是 fire-and-forget：主 run 的
@@ -280,7 +282,7 @@ async def test_capability_gateway_events_have_loop_capability_gateway_origin():
     state = LoopState(
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
-        scope=scope, resolved_model=SimpleNamespace(model="mock", account=""),
+        scope=scope, resolved_model=model_snapshot(model="mock", account=""),
     )
     bus = InProcessEventBus()
     ctx = LoopContext(

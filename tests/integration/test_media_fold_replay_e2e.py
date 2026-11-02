@@ -408,7 +408,7 @@ async def _run_session(*, llm, blob_store, batch_with_echo: bool = False,
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=_prompt() if prompt is None else prompt,
-        context_limit=6000, reserved_output_tokens=0, unattended=True))
+          unattended=True))
     # 不经 wait_for_finish：见 _wait_task_terminal docstring，只等 task 到终态。
     state = await _wait_task_terminal(handle, timeout=20.0)
     assert state is not None

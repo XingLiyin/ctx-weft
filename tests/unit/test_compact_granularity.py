@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -245,7 +247,7 @@ def _escalating_state(*, limit, target):
             compact_keep_last=6, collapse_keep_last=3, compact_token_ratio=0.8,
             compact_target_ratio=target, compact_keep_recent_images=2),
         loop_guard=SimpleNamespace(context_limit=limit))
-    return SimpleNamespace(scope=_ROOT, task=SimpleNamespace(id="root"), agent=agent,
+    return SimpleNamespace(resolved_model=model_snapshot(context_limit=limit), scope=_ROOT, task=SimpleNamespace(id="root"), agent=agent,
                            session=SimpleNamespace(id="s1", tenant_id="tn"),
                            extra={}, run_id="r1", sequence_counter=0)
 

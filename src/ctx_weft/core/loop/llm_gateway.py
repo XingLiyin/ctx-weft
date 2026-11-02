@@ -56,6 +56,7 @@ from ctx_weft.core.utils.estimate import (
     estimate_content_tokens,
     estimate_tool_calls_tokens,
 )
+from ctx_weft.core.orchestrator.model import ResolvedModel
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
 from ctx_weft.protocols.events import EventType
 
@@ -406,50 +407,34 @@ def request_prompt_estimate(tokenizer, request: "LLMRequest", loop_guard, baseli
     return max(full, ctx_tokens)
 
 
-def apply_dynamic_max_tokens(ctx, request: "LLMRequest", loop_guard) -> None:
-    """发送前按窗口就地写入 request.max_tokens（纯消费者，不自估）。
-
-    仅当未显式设值（``max_tokens is None``）、有 loop_guard、且 caller 已挂
-    ``prompt_token_estimate``（used，由 :func:`request_prompt_estimate` 算好）时生效——
-    三者缺一即不动 max_tokens。天花板取 llm.output_ceiling（duck-type，缺省/None → 回退
-    llm.context_limit）；margin/floor 从 ctx.config 取，缺省回退安全值。
-    """
-    if request.max_tokens is not None or loop_guard is None:
+def apply_dynamic_max_tokens(ctx, request: "LLMRequest", resolved_model: ResolvedModel | None) -> None:
+    """Allocate output using the same immutable resolved model as assembly/compact."""
+    if resolved_model is None:
         return
     used = request.prompt_token_estimate
+    hard_cap = resolved_model.output_ceiling or resolved_model.context_limit
     if used is None:
+        if request.max_tokens is not None:
+            request.max_tokens = min(request.max_tokens, hard_cap)
         return
-    # spec: tool-schema-budget——发送前超限不硬拒（明示决策，design D4）：估算存在误差，
-    # 硬拒会误伤真实可发请求；超限信号转为 max_tokens 按含工具面的 used 自然收紧 +
-    # WARNING 留痕 + 既有 compact 比例机制在下轮 prepare 触发压缩。provider 400 仍是
-    # 最终防线（且自愈退避在）。
-    reserve = max(0, getattr(loop_guard, "reserved_output_tokens", 0))
-    eff_window = max(0, loop_guard.context_limit - reserve)
-    if used > eff_window:
-        logger.warning(
-            "prompt estimate %d exceeds effective window %d "
-            "(tools_signature=%s, tools_est=%d) — request proceeds with tightened "
-            "max_tokens; compaction will trigger on next prepare if the ratio holds",
-            used, eff_window,
-            getattr(loop_guard, "last_tools_signature", ""),
-            getattr(loop_guard, "last_tools_est", 0))
-    llm = ctx.llm
-    # margin 比例制：固定值只兜小 prompt 的估算残差，误差随体量按比例放大 → margin 也按比例。
-    margin = max(
-        int(_cfg_val(ctx, "dynamic_max_tokens_margin", 8192)),
-        int(_cfg_val(ctx, "dynamic_max_tokens_margin_ratio", 0.05) * used),
-    )
-    floor = int(_cfg_val(ctx, "dynamic_max_tokens_floor", 1024))
-    # 软顶：按 context_limit 比例封顶（不低于 output_min），再与硬上限 output_ceiling 取小。
-    # 常态封住"整窗放输出"（省 token + 防 max_tokens 超模型输出上限的 400）；used 越大到
-    # L-used-margin 跌破软顶时自然回落到紧缩段。
-    ratio = float(_cfg_val(ctx, "dynamic_max_tokens_output_ratio", 0.2))
-    min_out = int(_cfg_val(ctx, "dynamic_max_tokens_output_min", 4096))
-    soft_cap = max(int(ratio * llm.context_limit), min_out)
-    hard_cap = getattr(llm, "output_ceiling", None) or llm.context_limit
-    ceiling = min(hard_cap, soft_cap)
+    if used >= resolved_model.context_limit:
+        from ctx_weft.core.models.errors import ContextOverflowError
+        raise ContextOverflowError(
+            "Prompt estimate leaves no space for model output",
+            required=used + 1, effective_limit=resolved_model.effective_input_limit,
+            context_limit=resolved_model.context_limit, reserved_output_tokens=resolved_model.reserved_output_tokens,
+        )
+    if used > resolved_model.effective_input_limit:
+        logger.warning("prompt estimate %d exceeds effective window %d; tightening max_tokens",
+                       used, resolved_model.effective_input_limit)
+    if request.max_tokens is not None:
+        request.max_tokens = min(request.max_tokens, hard_cap, resolved_model.context_limit - used)
+        return
+    policy = resolved_model.output_policy
+    margin = max(policy.margin, int(policy.margin_ratio * used))
+    soft_cap = max(1, int(policy.output_ratio * resolved_model.context_limit), policy.output_min)
     request.max_tokens = dynamic_max_tokens(
-        loop_guard.context_limit, used, ceiling, margin=margin, floor=floor,
+        resolved_model.context_limit, used, min(hard_cap, soft_cap), margin=margin, floor=max(1, policy.floor),
     )
 
 
@@ -623,7 +608,9 @@ async def build_llm_request(ctx, state, inputs: PromptContext, *,
         tool_refs=tool_refs if tool_refs is not None else getattr(prompt, "tool_refs", []),
         capability_errors=list(getattr(prompt, "capability_errors", [])))
     request.prompt_token_estimate = request_prompt_estimate(
-        ctx.llm.tokenizer, request, getattr(state.agent, "loop_guard", None), baseline_msg_count)
+        ctx.llm.tokenizer, request,
+        getattr(state.agent, "loop_guard", None) if inputs.purpose == "act" else None,
+        baseline_msg_count if inputs.purpose == "act" else None)
     return request
 
 
@@ -751,8 +738,10 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
             ])
         await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload=prompt_payload))
 
-    loop_guard = getattr(getattr(state, "agent", None), "loop_guard", None)
-    apply_dynamic_max_tokens(ctx, request, loop_guard)
+    # Direct gateway callers have no run state; snapshot their configured client once.
+    resolved_model = (state.resolved_model if state is not None else
+                      ResolvedModel.from_client(ctx.llm) if request.prompt_token_estimate is not None else None)
+    apply_dynamic_max_tokens(ctx, request, resolved_model)
 
     max_attempts = max(1, int(_cfg_val(ctx, "llm_self_heal_max_attempts", _DEFAULT_MAX_ATTEMPTS)))
     max_duration = _cfg_val(ctx, "llm_self_heal_max_duration_sec", _DEFAULT_MAX_DURATION_SEC)

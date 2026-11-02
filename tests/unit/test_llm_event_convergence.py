@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import inspect
 from types import SimpleNamespace
 
@@ -106,7 +108,7 @@ def _make_state():
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
-        resolved_model=SimpleNamespace(model="mock-model", account="mock-acct"),
+        resolved_model=model_snapshot(model="mock-model", account="mock-acct"),
         origin=EventOrigin.LOOP_ACT,
     )
 
@@ -231,7 +233,7 @@ def _make_compact_state(*, origin: str = EventOrigin.LOOP_COMPACT):
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": []},
-        resolved_model=SimpleNamespace(model="mock-model", account="mock-acct"),
+        resolved_model=model_snapshot(model="mock-model", account="mock-acct"),
         origin=origin,
     )
 
@@ -301,7 +303,7 @@ async def test_compact_events_carry_resolved_model_not_mock_sentinel():
     bus = _RecordingBus()
     state = _make_compact_state()
     state.agent.runtime = {}  # 正常任务执行下 agent.runtime 就是这样——不含 llm_model
-    state.resolved_model = SimpleNamespace(model="claude-real-model", account="acct-real")
+    state.resolved_model = model_snapshot(model="claude-real-model", account="acct-real")
     ctx = _make_compact_ctx(bus)
 
     await summarize_for_compact(state, ctx, scope="task")
@@ -334,7 +336,7 @@ async def test_compact_sends_resolved_model_to_llm_client_not_mock_sentinel():
 
     state = _make_compact_state()
     state.agent.runtime = {}  # 正常任务执行下 agent.runtime 就是这样——不含 llm_model
-    state.resolved_model = SimpleNamespace(model="claude-real-model", account="acct-real")
+    state.resolved_model = model_snapshot(model="claude-real-model", account="acct-real")
     llm = _FakeLLM()
     ctx = _make_compact_ctx(_RecordingBus(), llm=llm)
 
@@ -559,7 +561,7 @@ def _make_recognize_intent_state():
     return LoopState(
         run_id="run-test", session=session, task=task, agent=agent, scope=scope,
         extra={"template": None, "bound_capabilities": [cap]},
-        resolved_model=SimpleNamespace(model="mock-model", account="mock-acct"),
+        resolved_model=model_snapshot(model="mock-model", account="mock-acct"),
         origin=EventOrigin.LOOP_RECOGNIZE_INTENT,
     )
 
@@ -845,8 +847,10 @@ async def test_recognize_intent_gateway_max_tokens_failure_still_pairs_events():
 
     bus = _RecordingBus()
     state = _make_recognize_intent_state()
-    ctx = _make_recognize_intent_ctx(
-        bus, config=SimpleNamespace(dynamic_max_tokens_margin="not-a-number"))
+    ctx = _make_recognize_intent_ctx(bus)
+    from dataclasses import replace
+    # A valid small model cannot fit this scripted prompt. Failure happens after STARTED.
+    state.resolved_model = replace(state.resolved_model, context_limit=1, reserved_output_tokens=0, output_ceiling=None)
 
     outcome = await RecognizeIntentStep().execute(state, ctx)
 
@@ -872,7 +876,7 @@ async def test_background_observe_origin_pinned_on_refold_guard_early_exit(
     """re-fold 幂等护栏早退（非 close 边界、视图内无 active raw）：函数体内已经发出的
     RUN_STARTED/OBSERVE_STARTED，以及 finally 里的 OBSERVE_APPLIED/RUN_FINISHED，
     origin 必须全部是 loop.background_observe——即使调用方快照带进来的是别的 origin。"""
-    
+
     state, ctx = fake_state_ctx
     state.origin = EventOrigin.LOOP_OBSERVE  # 模拟调用方快照带进来的「错误」origin
 
@@ -896,7 +900,7 @@ async def test_background_observe_origin_pinned_on_short_segment_early_exit(fake
     """短段免折早退（is_short_segment 命中，同 test_task_recap_refold_guard.py 里
     test_short_segment_kept_raw_no_llm_call 的 fixture 配置：默认 threshold=400、
     种子 raw 远低于此）：同上，origin 必须全部是 loop.background_observe。"""
-    
+
     state, ctx = fake_state_ctx
     state.origin = EventOrigin.LOOP_ACT  # 模拟 act.py interrupt 边界快照带进来的「错误」origin
 

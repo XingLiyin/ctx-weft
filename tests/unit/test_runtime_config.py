@@ -7,7 +7,7 @@ def test_defaults_match_legacy():
     assert c.hitl_max_resolved == 1000
     assert c.task_max_concurrent == 4
     assert c.task_max_retries == 3
-    assert c.default_token_budget == 200_000
+    assert not hasattr(c, "default_token_budget")
 
 
 def test_overrides():

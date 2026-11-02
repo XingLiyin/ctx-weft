@@ -11,6 +11,8 @@ Two levels of tests:
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -87,6 +89,7 @@ def _state(exit_reason: str = "max_turns") -> SimpleNamespace:
     )
     return SimpleNamespace(
         run_id="r1",
+        resolved_model=model_snapshot(context_limit=10000),
         sequence_counter=0,
         agent=agent,
         session=SimpleNamespace(id="s1", tenant_id="default"),

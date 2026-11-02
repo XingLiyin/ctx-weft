@@ -39,7 +39,7 @@ async def setup_queue(store, memory, *, snapshots=False):
     rt.providers.register_memory(memory)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(session_id=SID,
-        template_id="agent:tpl_echo", user_prompt="TREE ROOT", context_limit=100000, unattended=True))
+        template_id="agent:tpl_echo", user_prompt="TREE ROOT",  unattended=True))
     await asyncio.wait_for(llm.grandchild_started.wait(), 15)
     tm = rt._task_managers[SID]
     await wait_until(lambda: not tm.open_round_task_ids)
@@ -221,7 +221,7 @@ async def test_terminal_receipt_repair_releases_slot_and_wakes_report(tmp_path, 
 
             store.read_range, store.append_batch = read_range, append
             handle = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="finish", context_limit=100000, unattended=True))
+                template_id="agent:tpl_echo", user_prompt="finish",  unattended=True))
             tm = rt._task_managers[SID]
             await wait_until(lambda: rt.storage_health(SID) is not None and not tm._dispatch_tasks)
             assert handle.task_id in tm.running_task_ids()

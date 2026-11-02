@@ -14,8 +14,7 @@ pytestmark = pytest.mark.asyncio
 
 def _tm() -> TaskManager:
     tm = TaskManager(session_id="s1", event_bus=InProcessEventBus(), max_concurrent=1)
-    tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x",
-                            token_budget=0))
+    tm.set_session(Session(id="s1", tenant_id="default", user_prompt="x"))
     return tm
 
 

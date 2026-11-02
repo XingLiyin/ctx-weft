@@ -1,3 +1,5 @@
+
+from tests.model_testkit import model_snapshot
 """Unit tests for stream_llm_resilient backoff self-heal."""
 import asyncio
 from types import SimpleNamespace
@@ -102,7 +104,7 @@ def _state():
     .resolved_model / .sequence_counter 才不会在 resolve_llm_identity/req_id 处炸。"""
     return SimpleNamespace(
         agent=SimpleNamespace(id="a1", loop_guard=None),
-        resolved_model=SimpleNamespace(model="m", account="acct"),
+        resolved_model=model_snapshot(model="m", account="acct"),
         run_id="run-test", sequence_counter=0,
         origin="",
     )

@@ -88,7 +88,7 @@ async def test_reply_during_the_settle_window_still_wakes_the_task(gated_step) -
                            gate.wrap(getattr(TaskManager, gated_step))):
         await initialize_all(rt)
         handle = await rt.start_session(SessionStartParams.create(
-            template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+            template_id="agent:tpl_echo", user_prompt="go"))
         sid = handle.session_id
 
         seen: list[tuple[str, str]] = []
@@ -160,7 +160,7 @@ async def test_parking_without_an_answer_is_not_requeued() -> None:
     rt = _runtime(llm)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)

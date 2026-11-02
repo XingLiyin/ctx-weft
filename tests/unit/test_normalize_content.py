@@ -324,7 +324,7 @@ async def test_start_session_externalizes_under_the_real_session_id():
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=[TextPart(text="看"), ImagePart(data=_PNG, media_type="image/png")],
-        context_limit=100_000,
+
     ))
     try:
         assert store.put_calls == 1
@@ -345,7 +345,7 @@ async def test_start_session_plain_text_never_touches_store():
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt="hello",
-        context_limit=100_000,
+
     ))
     try:
         assert store.put_calls == 0

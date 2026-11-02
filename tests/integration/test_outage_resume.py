@@ -154,7 +154,7 @@ def _new_params(prompt: str = "hi") -> SessionStartParams:
     return SessionStartParams.create(
         template_id="agent:tpl_echo",
         user_prompt=prompt,
-        context_limit=_MOCK_CONTEXT_LIMIT,
+
     )
 
 

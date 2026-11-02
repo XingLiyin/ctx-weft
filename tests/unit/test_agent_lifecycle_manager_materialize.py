@@ -73,8 +73,10 @@ async def test_materialize_carries_template_config():
     assert got.memory_config == tmpl.memory_config
     assert got.loop_config == tmpl.loop_config
     # 窗口从 client 派生（批次 B）
-    assert got.loop_guard.context_limit == rm.context_limit
-    assert got.loop_guard.reserved_output_tokens == rm.reserved_output_tokens
+    assert rm.context_limit == 200_000
+    assert not hasattr(got.loop_guard, "context_limit")
+    assert rm.reserved_output_tokens == 8192
+    assert not hasattr(got.loop_guard, "reserved_output_tokens")
 
 
 async def test_materialize_is_a_fresh_object_each_call():

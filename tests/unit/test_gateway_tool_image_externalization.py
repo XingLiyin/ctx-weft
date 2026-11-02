@@ -10,6 +10,8 @@ gateway 这条路一直没有「把字节存起来」这一步。第三方 provi
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import base64
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -74,7 +76,7 @@ async def _run(parts: list, *, store: MemoryBlobStore | None):
     state = LoopState(
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
-        scope=scope, resolved_model=SimpleNamespace(model="mock", account=""),
+        scope=scope, resolved_model=model_snapshot(model="mock", account=""),
     )
     ctxp = ProviderContext(session_id="s1", tenant_id="default",
                            task_id="tsk_1", agent_id="agt_1")

@@ -9,6 +9,8 @@ task 侧的同一守卫在 `TaskManager.apply_run_outcome`（终态已坐实 →
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import asyncio
@@ -50,7 +52,7 @@ def _build_state_and_ctx(runtime: CtxWeftRuntime, task: Task):
     session = Session(id="s1", user_prompt="hi")
     agent = Agent(id="agt1", session_id="s1", template_id="tpl", loop_guard=LoopGuard())
     scope = MemoryAddress(session_id="s1", task_id=task.id, agent_id="agt1")
-    state = LoopState(run_id=generate_id("run"), session=session, task=task, agent=agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+    state = LoopState(run_id=generate_id("run"), session=session, task=task, agent=agent, scope=scope, resolved_model=model_snapshot(model="mock", account=""))
     provider_ctx = ProviderContext(session_id="s1", tenant_id="default", task_id=task.id, agent_id="agt1")
     ctx = LoopContext(
         assembler=None, llm=runtime._resolve_llm(), memory=runtime.providers.get_memory(),

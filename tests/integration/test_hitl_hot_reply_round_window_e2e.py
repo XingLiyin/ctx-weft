@@ -126,7 +126,7 @@ async def test_second_hot_question_is_visible_to_live_subscribers() -> None:
     rt = _runtime(llm, hitl_timeout_sec=None)            # 永不驱逐 = 恒走热路径
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
 
     # host 的 SSE 走的就是普通（非 provisional）订阅：窗口里的事件它收不到。
@@ -172,7 +172,7 @@ async def test_ask_user_reply_is_retracted_by_pause_before_first_chunk(hitl_time
     rt = _runtime(llm, hitl_timeout_sec=hitl_timeout_sec)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)
@@ -231,7 +231,7 @@ async def test_replying_to_an_already_resolved_request_opens_no_window() -> None
     rt = _runtime(llm, hitl_timeout_sec=None)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)
@@ -257,7 +257,7 @@ async def test_reply_is_committed_when_the_round_ends_without_a_chunk(hitl_timeo
     rt = _runtime(llm, hitl_timeout_sec=hitl_timeout_sec)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)
@@ -306,7 +306,7 @@ async def test_ask_user_reply_enters_memory_only_after_hitl_resolved(hitl_timeou
     rt.providers.register_memory(spy)
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     sid = handle.session_id
 
     q1 = await _next_question(rt, sid)

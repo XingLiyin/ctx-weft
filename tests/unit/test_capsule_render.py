@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -57,7 +60,7 @@ def _ev(type_, scope, content, t, role=None, **meta) -> MemoryEvent:
 
 async def _collect(mem, scope) -> list:
     deps = AssemblerDeps(memory=mem, knowledge_providers=[], provider_ctx=_ctx())
-    req = ContextRequest(
+    req = ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose="act",
         scope=scope,
         task=None,

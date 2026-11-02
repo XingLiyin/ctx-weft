@@ -16,6 +16,9 @@
 
 from __future__ import annotations
 
+
+from tests.model_testkit import model_snapshot
+
 import base64
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -256,6 +259,7 @@ def _assembler_request():
                            outputs=None, unattended=False)
     template = SimpleNamespace(identity={"act": SimpleNamespace(text="ACT-SOUL", style=None)})
     return prompt_request(task_id="t1", task=task, template=template,
+                          resolved_model=model_snapshot(_CONTEXT_LIMIT, _RESERVE),
                           session=SimpleNamespace(
                               context_limit=_CONTEXT_LIMIT,
                               reserved_output_tokens=_RESERVE,
@@ -280,7 +284,7 @@ def _images_in(prompt) -> int:
 
 async def _should_compact(total_tokens: int) -> bool:
     """走真实的 PrepareStep._should_compact，而不是复述它的算式。"""
-    state = SimpleNamespace(agent=SimpleNamespace(
+    state = SimpleNamespace(resolved_model=model_snapshot(context_limit=_CONTEXT_LIMIT, output_reserve=_RESERVE), agent=SimpleNamespace(
         loop_config=SimpleNamespace(compact_token_ratio=_COMPACT_RATIO),
         loop_guard=SimpleNamespace(context_limit=_CONTEXT_LIMIT,
                                    reserved_output_tokens=_RESERVE),

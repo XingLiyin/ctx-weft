@@ -135,12 +135,9 @@ class SessionRegistry:
         self,
         template_id: str,
         user_prompt: "str | list[ContentPart]",
-        context_limit: int,
         tenant_id: str = "default",
         llm_model: str | None = None,
         llm_account: str | None = None,
-        token_budget: int = 200_000,
-        reserved_output_tokens: int = 8192,
         session_id: str | None = None,
         initial_task_settings: NormalTaskSettings | None = None,
         user_prompt_event_jsonable: "str | list[dict] | None" = None,
@@ -204,8 +201,6 @@ class SessionRegistry:
             root_agent_id=agent_id,
             llm_provider=llm_account or "",
             llm_model=llm_model or "",
-            context_limit=context_limit,
-            reserved_output_tokens=reserved_output_tokens,
             created_at=now_utc(),
         )
         logger.info("Session %s created (template=%s, agent=%s)", sid, template_id, agent_id)
@@ -234,9 +229,6 @@ class SessionRegistry:
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
             "tenant_id": tenant_id,
-            "token_budget": token_budget,
-            "context_limit": context_limit,
-            "reserved_output_tokens": reserved_output_tokens,
         })
         # 登记 record + 发 AgentInstantiated（root 没有 parent_agent_id，
         # AgentLifecycleManager.instantiate 内部只发这一条，不发 AgentSpawned）。
@@ -327,8 +319,6 @@ class SessionRegistry:
             root_agent_id=sess_proj.root_agent_id,
             llm_provider=llm_account or "",
             llm_model=llm_model or "",
-            context_limit=sess_proj.context_limit,
-            reserved_output_tokens=getattr(sess_proj, "reserved_output_tokens", 8192),
             created_at=now_utc(),
         )
         root_task, task_manager = await self._make_root_task_manager(

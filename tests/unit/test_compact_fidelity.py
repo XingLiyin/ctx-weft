@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from types import SimpleNamespace
 
 import pytest
@@ -123,7 +125,7 @@ def _state_ctx(llm):
                              user_prompt_in_memory=True, outputs=None),
         session=SimpleNamespace(context_limit=200_000, reserved_output_tokens=0),
         extra={}, run_id="r1", origin=None,
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
         sequence_counter=1,
     )
     ctx = SimpleNamespace(

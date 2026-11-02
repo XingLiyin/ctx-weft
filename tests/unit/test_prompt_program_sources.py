@@ -1,3 +1,6 @@
+
+from tests.model_testkit import model_snapshot
+
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,7 +40,7 @@ async def test_jinja_program_places_generic_source_blocks() -> None:
         metadata={"title": "Child result"},
         value=record,
     )
-    request = SimpleNamespace(
+    request = SimpleNamespace(resolved_model=model_snapshot(10000, 0),
         purpose="act",
         intent=None,
         task=SimpleNamespace(
@@ -72,7 +75,7 @@ def test_each_purpose_is_an_executable_top_level_template(purpose: str) -> None:
         outputs="",
         unattended=False,
     )
-    request = SimpleNamespace(
+    request = SimpleNamespace(resolved_model=model_snapshot(20000, 0),
         purpose=purpose,
         intent=None,
         task=task,
@@ -115,7 +118,7 @@ async def test_context_assembler_compiles_without_composer_or_budget() -> None:
         context_limit=20_000,
         reserved_output_tokens=0,
     )
-    request = ContextRequest(
+    request = ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose="act",
         scope=SimpleNamespace(session_id="session-1", task_id="task-1", agent_id="agent-1"),
         task=task,
@@ -156,7 +159,7 @@ async def test_tools_and_capability_prose_share_the_collected_snapshot() -> None
         user_prompt="search",
         user_prompt_in_memory=False,
     )
-    request = ContextRequest(
+    request = ContextRequest(resolved_model=model_snapshot(20000, 0),
         purpose="act",
         scope=SimpleNamespace(session_id="session-1", task_id="task-1", agent_id="agent-1"),
         task=task,
@@ -203,7 +206,7 @@ async def test_tools_follow_capabilities_pinned_after_assembly() -> None:
     )
     cache = CapabilityCache()
     cache.put("agent-1", [initial])
-    request = ContextRequest(
+    request = ContextRequest(resolved_model=model_snapshot(20000, 0),
         purpose="act",
         scope=SimpleNamespace(
             session_id="session-1", task_id="task-1", agent_id="agent-1"),

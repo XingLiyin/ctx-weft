@@ -92,7 +92,7 @@ async def worker(path, mode, cut):
                     os._exit(73)
             rt.event_bus.subscribe(None, crash_on_discard)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="FIRST", context_limit=100000,
+                template_id="agent:tpl_echo", user_prompt="FIRST",
                 unattended=mode != "hot"))
             tm = rt._task_managers[SID]
             question = None

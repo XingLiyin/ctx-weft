@@ -20,6 +20,8 @@ CANCELED。旧路径 `report_observation` 判 fail 时就地写 `task.status="FA
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from types import SimpleNamespace
 
@@ -131,7 +133,7 @@ class _LoopRunner:
         scope = MemoryAddress(session_id=self._session.id, task_id=task.id,
                               agent_id=self._agent.id)
         state = LoopState(run_id=generate_id("run"), session=self._session, task=task,
-                          agent=self._agent, scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+                          agent=self._agent, scope=scope, resolved_model=model_snapshot(model="mock", account=""))
         provider_ctx = ProviderContext(session_id=self._session.id, tenant_id="default",
                                        task_id=task.id, agent_id=self._agent.id)
         ctx = LoopContext(
@@ -236,7 +238,7 @@ async def _run_loop_with(
 ) -> LoopState:
     scope = MemoryAddress(session_id=session.id, task_id=task.id, agent_id=agent.id)
     state = LoopState(run_id=generate_id("run"), session=session, task=task, agent=agent,
-                      scope=scope, resolved_model=SimpleNamespace(model="mock", account=""))
+                      scope=scope, resolved_model=model_snapshot(model="mock", account=""))
     provider_ctx = ProviderContext(session_id=session.id, tenant_id="default",
                                    task_id=task.id, agent_id=agent.id)
     ctx = LoopContext(

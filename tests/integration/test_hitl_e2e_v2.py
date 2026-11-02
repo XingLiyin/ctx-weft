@@ -265,7 +265,7 @@ async def test_hot_approval_rewrites_arguments_and_result_reaches_the_model() ->
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="please run ls",
     ))
     sid = handle.session_id
 
@@ -324,7 +324,7 @@ async def test_cold_approval_reconciles_and_invokes_the_tool_exactly_once() -> N
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="please run ls", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="please run ls",
     ))
     sid = handle.session_id
 
@@ -397,7 +397,7 @@ async def test_ask_user_cold_path_delivers_an_image_into_the_tool_result() -> No
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="set up the db", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="set up the db",
     ))
     sid = handle.session_id
 
@@ -488,7 +488,7 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hi",
     ))
     sid = handle.session_id
 

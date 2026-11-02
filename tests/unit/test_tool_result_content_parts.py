@@ -1,3 +1,5 @@
+
+from tests.model_testkit import model_snapshot
 """`InvocationResult.content` 放宽 + provider 用 result `content` 交非文本 part。
 
 子设计 §4.2；2026-09-05 把曾经的 `metadata["content_parts"]` 侧信道收成 content 单口径
@@ -101,7 +103,7 @@ def _state_ctx():
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=scope,
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),

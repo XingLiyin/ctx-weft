@@ -78,7 +78,7 @@ def _build(llm, *, hitl_timeout_sec, memory=None, event_store=None, register=Non
 async def _start(rt):
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="go", context_limit=100_000))
+        template_id="agent:tpl_echo", user_prompt="go"))
     return handle.session_id
 
 

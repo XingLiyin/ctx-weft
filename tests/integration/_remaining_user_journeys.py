@@ -256,7 +256,7 @@ async def prepare(rt, llm, path, store, scenario, variant, stage):
               "ports": "MAIN_PORT_REQUEST: choose the main environment. ",
               "image": "Inspect my deployment screenshot. "}[scenario] + PROJECT
     h = await rt.start_session(SessionStartParams.create(session_id=SID,
-        template_id="agent:tpl_echo", user_prompt=prompt, context_limit=100000))
+        template_id="agent:tpl_echo", user_prompt=prompt))
     data = {"root": h.agent_id, "task": h.task_id, "agents": [h.agent_id], "tasks": [h.task_id]}
     if scenario == "plan":
         await wait_until(lambda: bool(rt.hitl_registry.list_pending(session_id=SID)))

@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -200,7 +202,7 @@ async def test_unattended_root_task_is_auto() -> None:
     """没有人会发下一条消息，interactive 的纯文本 park 即永久挂起。"""
     sm = _session_registry(InProcessEventBus())
     _s, root, _tm = await sm.create_session(
-        template_id="agent:tpl", user_prompt="go", context_limit=1000, unattended=True)
+        template_id="agent:tpl", user_prompt="go",  unattended=True)
     assert root.unattended is True
     assert root.unattended
 
@@ -208,7 +210,7 @@ async def test_unattended_root_task_is_auto() -> None:
 async def test_attended_root_task_stays_interactive() -> None:
     sm = _session_registry(InProcessEventBus())
     _s, root, _tm = await sm.create_session(
-        template_id="agent:tpl", user_prompt="go", context_limit=1000)
+        template_id="agent:tpl", user_prompt="go")
     assert root.unattended is False
     assert not root.unattended
 
@@ -352,7 +354,7 @@ def _state(*, unattended: bool) -> LoopState:
         task=task,
         agent=SimpleNamespace(id=_AGENT_ID, template_id="tpl", session_id="s1"),
         scope=MemoryAddress(session_id="s1", task_id="tsk_1", agent_id=_AGENT_ID),
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
 
 

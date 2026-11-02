@@ -29,10 +29,7 @@ class Session:
     tenant_id: str = "default"
     root_agent_id: str | None = None
 
-    token_budget: int = 200_000
     token_used: int = 0
-    context_limit: int = 180_000
-    reserved_output_tokens: int = 8192
     failure_counter: int = 0
     #: 连续失败到这个数就熔断（`TaskManager._trip_failure_threshold`）。2026-09-28 从 3
     #: 提到 5：自治作业的 INTERRUPTED 退避重排耗尽会落 FAILED 并计入本计数（见

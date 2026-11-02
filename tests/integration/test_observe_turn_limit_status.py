@@ -85,7 +85,7 @@ async def test_subscribers_see_each_retry_and_final_failure_without_another_even
     subscription = runtime.event_bus.subscribe(None, query_on_notification)
     handle = await runtime.start_session(SessionStartParams.create(
         session_id="turn-limit", template_id="agent:tpl_echo", user_prompt="Complete the work",
-        context_limit=100_000,
+
     ))
     await handle.wait_for_finish(timeout=20)
     tm = runtime._task_managers[handle.session_id]

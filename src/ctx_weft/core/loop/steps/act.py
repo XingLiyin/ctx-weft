@@ -42,7 +42,6 @@ from ctx_weft.core.loop.llm_stream import ensure_collected_stream
 from ctx_weft.core.loop.signals import HitlPark
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.core.utils.clock import now_utc
-from ctx_weft.core.utils.estimate import effective_limit
 from ctx_weft.core.utils.ids import MintedCall, generate_id, mint_turn_call_ids
 from ctx_weft.protocols import (
     LLMMessage,
@@ -197,7 +196,7 @@ class ActStep(Step):
                     "ActStep context_limit_hit: prompt_tokens=%d >= %.2f * eff(limit=%d) "
                     "for agent %s", turn.usage.prompt_tokens,
                     getattr(agent.loop_config, "context_limit_stop_ratio", 0.8),
-                    agent.loop_guard.context_limit, agent.id)
+                    state.resolved_model.context_limit, agent.id)
                 break
 
         else:
@@ -518,12 +517,10 @@ async def _account_tokens(state: LoopState, ctx: LoopContext, usage: LLMUsage) -
             # best-effort 计数：失败不影响主流程，但记 debug 便于排查（不静默吞）。
             logger.debug("load_records count for loop_guard failed: %s", exc)
 
-    # 累加 session.token_used（供 token_budget 检查使用）
+    # Accumulate actual usage for reporting; sessions have no token spending limit.
     state.session.token_used += usage.prompt_tokens + usage.completion_tokens
 
-    context_limit = agent.loop_guard.context_limit
-    reserve = getattr(agent.loop_guard, "reserved_output_tokens", 0)
-    eff = effective_limit(context_limit, reserve)
+    eff = state.resolved_model.effective_input_limit
     ratio = getattr(agent.loop_config, "context_limit_stop_ratio", 0.8)
     return (
         eff > 0

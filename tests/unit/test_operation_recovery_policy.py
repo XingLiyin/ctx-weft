@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -119,7 +121,7 @@ async def _mk_fixture(policy="reviewed", *, invoked=True, finished=False, tool=N
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="t1", status="ACTIVE"),
         agent=SimpleNamespace(id="a1", template_id="t"),
-        scope=scope, resolved_model=SimpleNamespace(model="m", account=""),
+        scope=scope, resolved_model=model_snapshot(model="m", account=""),
         sequence_counter=0,
     )
 

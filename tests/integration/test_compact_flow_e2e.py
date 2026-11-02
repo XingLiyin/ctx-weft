@@ -3,6 +3,8 @@
 用真实 runtime（`run_single_task`）与真实 memory 驱动整条 prepare→act→observe→finalize。
 """
 
+from tests.model_testkit import model_snapshot
+
 import dataclasses as _dc
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -13,7 +15,6 @@ import pytest
 from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
-from ctx_weft.core.models.agent import LoopGuard
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
@@ -266,11 +267,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     session = Session(id=sid, user_prompt="do a long task",
                       tenant_id="default", root_agent_id=agent.id, llm_provider="",
                       created_at=now_utc())
-    session.context_limit = resolved_model.context_limit
-    session.reserved_output_tokens = resolved_model.reserved_output_tokens
-    agent = _dc.replace(agent, loop_guard=LoopGuard(
-        context_limit=session.context_limit,
-        reserved_output_tokens=session.reserved_output_tokens))
+
     task = Task(id="tsk_mr", session_id=sid, status="ACTIVE", tenant_id="default",
                 assigned_agent_id=agent.id, creator_agent_id=agent.id, title="User Request",
                 description="do a long task", user_prompt="do a long task", created_at=now_utc())
@@ -335,7 +332,7 @@ async def test_escalating_compact_shrinks_real_memory(monkeypatch):
         compact_token_ratio=0.8, compact_target_ratio=0.01),  # target 极低 → 尽量升级
         loop_guard=SimpleNamespace(context_limit=100))
     session = SimpleNamespace(id="s", tenant_id="default")
-    state = SimpleNamespace(run_id="run1", sequence_counter=0, scope=scope,
+    state = SimpleNamespace(resolved_model=model_snapshot(context_limit=100), run_id="run1", sequence_counter=0, scope=scope,
                             task=SimpleNamespace(id="root"), agent=agent,
                             session=session, extra={})
     ctx = SimpleNamespace(memory=mem, provider_ctx=pctx, event_bus=None, task_manager=None,

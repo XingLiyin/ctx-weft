@@ -140,7 +140,7 @@ async def test_subagent_instantiation_emits_event_with_own_template(runtime_fact
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
             user_prompt="delegate to a researcher",
-            context_limit=100_000,
+
         )
     )
     _view, sub_task = await _wait_for_subagent_task(runtime, handle.session_id)
@@ -170,7 +170,7 @@ async def test_replayed_view_gives_subagent_its_own_template(runtime_factory):
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
             user_prompt="delegate to a researcher",
-            context_limit=100_000,
+
         )
     )
     view, sub_task = await _wait_for_subagent_task(runtime, handle.session_id)
@@ -203,7 +203,7 @@ async def test_agent_spawned_emitted_with_parent_and_subtask(runtime_factory):
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
             user_prompt="delegate to a researcher",
-            context_limit=100_000,
+
         )
     )
     view, sub_task = await _wait_for_subagent_task(runtime, handle.session_id)
@@ -234,7 +234,7 @@ async def test_agent_spawned_precedes_agent_instantiated(runtime_factory):
         SessionStartParams.create(
             template_id=f"agent:{make_echo_template().id}",
             user_prompt="delegate to a researcher",
-            context_limit=100_000,
+
         )
     )
     _view, sub_task = await _wait_for_subagent_task(runtime, handle.session_id)

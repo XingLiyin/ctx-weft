@@ -31,7 +31,6 @@ from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
 from ctx_weft.core.loop.steps.recognize_intent import should_recognize_intent
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.core.utils.estimate import (
-    effective_limit,
     estimate_content_tokens,
     estimate_tokens,
     estimate_tool_calls_tokens,
@@ -116,6 +115,7 @@ class PrepareStep(Step):
                 task=state.task,
                 agent=agent,
                 session=session,
+                resolved_model=state.resolved_model,
                 template=template,
                 bound_capabilities=bound_capabilities,
                 token_counter=ctx.llm.tokenizer.count,
@@ -193,10 +193,7 @@ class PrepareStep(Step):
         """纯预算触发（spec 2026-07-01 §3.6）：token 估算 / context_limit ≥ compact_token_ratio。
         消息条数门控（compact_message_delta）已废。"""
         loop_config = state.agent.loop_config
-        loop_guard = state.agent.loop_guard
-        context_limit = loop_guard.context_limit
-        reserve = getattr(loop_guard, "reserved_output_tokens", 0)
-        eff = effective_limit(context_limit, reserve)
+        eff = state.resolved_model.effective_input_limit
         if eff > 0 and token_estimate > 0:
             return token_estimate / eff >= loop_config.compact_token_ratio
         return False

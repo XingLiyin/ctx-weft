@@ -101,7 +101,7 @@ async def test_unattended_session_finishes_instead_of_parking_on_hitl() -> None:
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
         template_id="agent:tpl_echo", user_prompt="run ls nightly",
-        context_limit=100_000, unattended=True,
+         unattended=True,
     ))
 
     state = await _wait_task_terminal(handle, timeout=10.0)
@@ -129,7 +129,7 @@ async def test_send_message_unattended_marks_the_task_it_opens() -> None:
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="first", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="first",
     ))
     first = await _wait_task_terminal(handle, timeout=10.0)
     assert first is not None and first.task.status == "FINISHED"

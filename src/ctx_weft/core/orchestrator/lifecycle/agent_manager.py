@@ -43,13 +43,7 @@ _SETTLE_REASON: dict[str, str] = {
 }
 
 
-# LoopGuard() 的字段默认值——instantiate() 末尾构造 Agent 时刻意不解模型：会话创建
-# （SessionRegistry.create_session）必须不碰 LLM，惰性解析要留到派发时才发生
-# （test_content_validation.py 钉死这条：纯文本 start_session 不注册 LLM provider
-# 也必须成功返回，_resolve_llm 一次都不许被调用）。真正生效的窗口由派发点的
-# materialize()/resolve_model() 按 agent record 的 ModelChoice 现解、stamp 进 loop_guard。
-_DEFAULT_CONTEXT_LIMIT = LoopGuard().context_limit
-_DEFAULT_RESERVED_OUTPUT_TOKENS = LoopGuard().reserved_output_tokens
+# Model resolution stays lazy until dispatch; instantiated agents carry counters only.
 
 
 class UnknownCapabilityError(CtxWeftError):
@@ -884,10 +878,7 @@ class AgentLifecycleManager:
             "AgentLifecycleManager: instantiated agent %s (template=%s, depth=%d)",
             agent_id, template_id, spawn_depth,
         )
-        # 不走 materialize()/resolve_model()：这里刻意不碰模型解析——instantiate 是
-        # 会话/子 agent 创建路径，调用方（如 SessionRegistry.create_session）此刻常常
-        # 还没有真正要用的窗口、也不该为了造一个返回值就触发 LLM 解析（惰性不变量，
-        # 见上面 _DEFAULT_CONTEXT_LIMIT 的注释）。真实窗口留给派发时的 materialize()。
+        # Instantiate without resolving a client. Dispatch will bind a model budget snapshot.
         agent = Agent(
             id=agent_id,
             session_id=session_id,
@@ -897,10 +888,7 @@ class AgentLifecycleManager:
             spawn_depth=spawn_depth,
             memory_config=template.memory_config,
             loop_config=template.loop_config,
-            loop_guard=LoopGuard(
-                context_limit=_DEFAULT_CONTEXT_LIMIT,
-                reserved_output_tokens=_DEFAULT_RESERVED_OUTPUT_TOKENS,
-            ),
+            loop_guard=LoopGuard(),
             created_at=now_utc(),
         )
 
@@ -996,13 +984,7 @@ class AgentLifecycleManager:
         """
         choice = self._agents[agent_id].llm
         client = self.model_resolver(choice.account, choice.model)
-        return ResolvedModel(
-            client=client,
-            account=choice.account or getattr(client, "account", ""),
-            model=choice.model or getattr(client, "model", ""),
-            context_limit=client.context_limit,
-            reserved_output_tokens=client.output_reserve,
-        )
+        return ResolvedModel.from_client(client, account=choice.account, model=choice.model)
 
     def materialize(
         self, agent_id: str, *, session_id: str, tenant_id: str,
@@ -1027,9 +1009,7 @@ class AgentLifecycleManager:
         每次调用产出一个新实例（不是共享引用）：Agent 带一次 run 的可变量
         （loop_guard.context_tokens 由 act.py 改写），派发时各自持有自己的份是对的。
 
-        窗口不再由调用方传入——`LLMClient` 协议本就把 context_limit / output_reserve
-        定义成抽象属性（protocols/llm.py），永远从这次解出的 client 现读，没有
-        「换模型后对齐窗口」这个动作要做，因为窗口从没存过、一直跟着 client 走。
+        Limits belong to the immutable ResolvedModel budget, never LoopGuard or Session.
         """
         rec = self._agents.get(agent_id)
         if rec is None:
@@ -1045,10 +1025,7 @@ class AgentLifecycleManager:
             spawn_depth=rec.spawn_depth,
             memory_config=rec.memory_config,
             loop_config=rec.loop_config,
-            loop_guard=LoopGuard(
-                context_limit=rm.context_limit,
-                reserved_output_tokens=rm.reserved_output_tokens,
-            ),
+            loop_guard=LoopGuard(),
             created_at=now_utc(),
         )
         return agent, rm

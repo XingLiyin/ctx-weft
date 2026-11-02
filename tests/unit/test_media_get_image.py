@@ -12,6 +12,8 @@ result 回到对话**尾部**（KV cache，子设计 §4.4），因此位置信�
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -374,7 +376,7 @@ def _loop_state_ctx(mem):
         run_id="r1", session=SimpleNamespace(id="s1", tenant_id="default"),
         task=SimpleNamespace(id="tsk_1"), agent=SimpleNamespace(id="agt_1", template_id="t"),
         scope=_ADDR,
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account=""),
     )
     ctx = LoopContext(
         assembler=None, llm=None, memory=mem, event_bus=InProcessEventBus(),

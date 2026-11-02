@@ -66,7 +66,6 @@ class SessionDetail:
     session_id: str
     root_agent_id: str
     goal: str
-    token_budget: int
     created_at: datetime | None
 
 

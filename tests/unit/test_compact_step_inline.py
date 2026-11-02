@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -134,7 +136,7 @@ def _state(context_tokens=1000):
         extra={"template": None, "bound_capabilities": []},
         # resolve_llm_identity 的真值来源（task-4 复审第二轮：summarize_for_compact
         # 不再读 agent.runtime.get("llm_model")，那个键正常任务执行永远不会被写入）。
-        resolved_model=SimpleNamespace(model="mock", account=""),
+        resolved_model=model_snapshot(model="mock", account="", context_limit=1000),
     )
 
 

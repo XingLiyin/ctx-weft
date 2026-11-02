@@ -107,7 +107,7 @@ async def test_inject_user_reply_phase1_adds_edit_note():
     rt = _runtime()
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
-    session = Session(id="s1", tenant_id="default", user_prompt="X",  token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="X")
     task = SimpleNamespace(id="t1", status="SUSPENDED", outputs=None, process_report=None)
     # children_of：`_inject_user_reply` 现在据它跳过「SUSPENDED 在活子任务上」的父任务
     # （复审 I7）。这里的 fake 无子任务。
@@ -136,7 +136,7 @@ async def test_inject_user_reply_non_edit_has_no_note():
     rt = _runtime()
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
-    session = Session(id="s1", tenant_id="default", user_prompt="X",  token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="X")
     task = SimpleNamespace(id="t1", status="SUSPENDED", outputs=None, process_report=None)
     # children_of：`_inject_user_reply` 现在据它跳过「SUSPENDED 在活子任务上」的父任务
     # （复审 I7）。这里的 fake 无子任务。
@@ -189,8 +189,7 @@ async def test_inject_user_reply_leaves_a_parent_suspended_on_live_children_alon
     rt = _runtime()
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
-    session = Session(id="s1", tenant_id="default", user_prompt="X",
-                       token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="X")
     parent = SimpleNamespace(id="t1", status="SUSPENDED", outputs="old",
                              process_report="rep", process_report_at="then")
     child = SimpleNamespace(id="t2", status="ACTIVE")
@@ -213,8 +212,7 @@ async def test_inject_user_reply_still_resets_a_parent_whose_children_are_done()
     """子任务全终态 ⟹ 不是那种形状 ⟹ 照旧掰回 PENDING（`restore` 也会重排它）。"""
     rt = _runtime()
     rt.providers.register_memory(InMemoryMemoryProvider())
-    session = Session(id="s1", tenant_id="default", user_prompt="X",
-                       token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="X")
     parent = SimpleNamespace(id="t1", status="SUSPENDED", outputs="old",
                              process_report="rep", process_report_at="then")
     child = SimpleNamespace(id="t2", status="FINISHED")
@@ -235,8 +233,7 @@ async def test_inject_resolved_user_turns_skips_replies_already_in_the_conversat
     rt = _runtime()
     mem = InMemoryMemoryProvider()
     rt.providers.register_memory(mem)
-    session = Session(id="s1", tenant_id="default", user_prompt="X",
-                       token_budget=0)
+    session = Session(id="s1", tenant_id="default", user_prompt="X")
     task = SimpleNamespace(id="t1", status="ACTIVE", outputs=None,
                            process_report=None, process_report_at=None)
     tm = _tm_with_children(task, [])

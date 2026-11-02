@@ -48,7 +48,6 @@ class RuntimeConfig:
     # INTERRUPTED 才是那个谁也不会碰的静默死亡。
     autonomous_requeue_max: int = 3
     autonomous_requeue_backoff_base_sec: float = 30.0
-    default_token_budget: int = 200_000
     # 工具输出落盘（spill）阈值：CapabilityGateway 读取。host 可覆盖。
     spill_threshold: int = 4000
     spill_preview_chars: int = 1000
@@ -63,18 +62,3 @@ class RuntimeConfig:
     llm_self_heal_max_interval_sec: float = 60.0
     # 从首次中途断流开始计时，不刷新；只限制后续首包等待/退避，不限制正常输出。
     llm_midstream_recovery_max_duration_sec: float = 300.0
-    # 动态 max_tokens（apply_dynamic_max_tokens 读取；默认=安全值）
-    # margin=8192：覆盖本轮新增尾段估算的残余 CJK 低估（len//4 对汉字系统性偏低），
-    # 并与输入侧 reserved_output_tokens=8192 对称。仅在贴近满窗时才实质压小输出（届时已近
-    # compact），常态下几万量级的输出预算无感。
-    dynamic_max_tokens_margin: int = 8192
-    # margin 比例制：实际 margin = max(margin, ratio*estimate)。固定 8192 只兜得住小 prompt 的
-    # 估算残差；估算误差按比例放大（10 万 token 的 5% 是 5000），margin 也须随体量放大。
-    dynamic_max_tokens_margin_ratio: float = 0.05
-    dynamic_max_tokens_floor: int = 1024
-    # 输出软顶：常态下不把整个剩余窗口都放给输出，按 context_limit 的比例封顶（但不低于
-    # output_min）。ceiling = min(output_ceiling or context_limit, max(ratio*L, output_min))。
-    # 好处：没人需要单轮几万 token 输出；且直接降低"max_tokens 超模型真实输出上限"的 400。
-    # used 越过 ~(1-ratio) 后软顶不再绑定，回落到 L-used-margin 的紧缩段。
-    dynamic_max_tokens_output_ratio: float = 0.2
-    dynamic_max_tokens_output_min: int = 4096

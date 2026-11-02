@@ -13,10 +13,10 @@ binding 交给 execute），于是调度那半边不得不 `TYPE_CHECKING` 反�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
-from ctx_weft.protocols import LLMClient
+from ctx_weft.protocols import LLMClient, OutputPolicy
 
 __all__ = ["ModelChoice", "ModelResolver", "ResolvedModel"]
 
@@ -42,6 +42,43 @@ class ResolvedModel:
     model: str
     context_limit: int
     reserved_output_tokens: int
+    output_ceiling: int | None = None
+    output_policy: OutputPolicy = field(default_factory=OutputPolicy)
+
+    def __post_init__(self) -> None:
+        if type(self.context_limit) is not int or self.context_limit <= 0:
+            raise ValueError("context_limit must be a positive integer")
+        if (
+            type(self.reserved_output_tokens) is not int
+            or not 0 <= self.reserved_output_tokens < self.context_limit
+        ):
+            raise ValueError(
+                "reserved_output_tokens must be non-negative and smaller than context_limit"
+            )
+        if self.output_ceiling is not None and (
+            type(self.output_ceiling) is not int
+            or not 0 < self.output_ceiling <= self.context_limit
+        ):
+            raise ValueError("output_ceiling must be positive and no larger than context_limit")
+        if not isinstance(self.output_policy, OutputPolicy):
+            raise ValueError("output_policy must be an OutputPolicy")
+
+    @property
+    def effective_input_limit(self) -> int:
+        return self.context_limit - self.reserved_output_tokens
+
+    @classmethod
+    def from_client(cls, client: LLMClient, *, account: str = "", model: str = "") -> ResolvedModel:
+        """Resolve identity and copy model configuration once for this run."""
+        return cls(
+            client=client,
+            account=account or getattr(client, "account", ""),
+            model=model or getattr(client, "model", ""),
+            context_limit=client.context_limit,
+            reserved_output_tokens=client.output_reserve,
+            output_ceiling=getattr(client, "output_ceiling", None),
+            output_policy=getattr(client, "output_policy", OutputPolicy()),
+        )
 
 
 class ModelResolver(Protocol):

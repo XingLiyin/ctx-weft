@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from types import SimpleNamespace
 
 import pytest
@@ -63,7 +66,7 @@ async def test_loads_by_bare_name_from_qualified_skill_name(execution_instructio
     cache.put("agt_1", [capability])
     provider = _SkillProvider()
     provider.execution_instructions = execution_instructions
-    request = SimpleNamespace(
+    request = SimpleNamespace(resolved_model=model_snapshot(20000, 0),
         purpose="act",
         bound_capabilities=[capability],
         agent=SimpleNamespace(id="agt_1"),

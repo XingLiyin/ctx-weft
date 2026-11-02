@@ -56,7 +56,7 @@ async def test_two_questions_with_retraction_then_restart_and_new_task(tmp_path,
             rt = runtime(store, memory, llm, timeout)
             await initialize_all(rt)
             h = await rt.start_session(SessionStartParams.create(session_id=SID,
-                template_id="agent:tpl_echo", user_prompt="PROCESS_REQUEST", context_limit=100000))
+                template_id="agent:tpl_echo", user_prompt="PROCESS_REQUEST"))
             first = await _next_question(rt, SID)
             if timeout == 0:
                 await wait_until(lambda: not rt._task_managers[SID]._dispatch_tasks)

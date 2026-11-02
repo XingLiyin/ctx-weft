@@ -200,7 +200,7 @@ async def _two_turn_session():
 
     await initialize_all(rt)
     handle = await rt.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hi",
     ))
     async with asyncio.timeout(5):
         while handle._state is None:

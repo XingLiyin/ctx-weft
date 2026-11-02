@@ -1,6 +1,9 @@
 """装配链路统一经 ContextRequest.token_counter 计数（默认回退未校准启发式）。"""
 from __future__ import annotations
 
+from tests.model_testkit import model_snapshot
+
+
 from types import SimpleNamespace
 
 from ctx_weft.core.assembler.assembler import ContextRequest
@@ -10,7 +13,7 @@ from ctx_weft.protocols import MemoryAddress
 
 def _request(counter=None):
     kw = {} if counter is None else {"token_counter": counter}
-    return ContextRequest(
+    return ContextRequest(resolved_model=model_snapshot(100_000, 0),
         purpose="act",
         scope=MemoryAddress(session_id="s", task_id="t", agent_id="a"),
         task=SimpleNamespace(id="t"),

@@ -1,3 +1,5 @@
+
+from tests.model_testkit import model_snapshot
 """summarize_for_compact must produce its summary from the LLM (no truncation fallback).
 
 A transient outage that exhausts self-heal must propagate LLMOutageError, not return "".
@@ -29,7 +31,7 @@ def _state_ctx():
     # summarize_for_compact 不再读 agent.runtime.get("llm_model")）。
     state = SimpleNamespace(agent=agent, scope=None, task=None, session=None,
                             extra={}, transcript=[],
-                            resolved_model=SimpleNamespace(model="mock", account=""))
+                            resolved_model=model_snapshot(model="mock", account=""))
     ctx = SimpleNamespace(assembler=_Assembler(), llm=SimpleNamespace(tokenizer=HeuristicTokenizer()),
                           cancel_token=None, event_bus=None, config=None)
     return state, ctx

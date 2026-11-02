@@ -141,7 +141,7 @@ async def bus_after_recap_run() -> _RecapRun:
 
     await initialize_all(runtime)
     handle = await runtime.start_session(SessionStartParams.create(
-        template_id="agent:tpl_echo", user_prompt="hi", context_limit=100_000,
+        template_id="agent:tpl_echo", user_prompt="hi",
     ))
     state = await wait_for_park(handle, timeout=5.0)
     assert state is not None and state.task.status == "AWAITING_HUMAN"
