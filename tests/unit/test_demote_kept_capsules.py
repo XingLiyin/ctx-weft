@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.steps.compact import demote_kept_capsules
-from ctx_weft.core.assembler.task_memory import task_record_kind
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext
 
@@ -51,3 +51,5 @@ async def test_demote_drops_body_and_thins_finish_pair():
     # 只剩一条 tool 回填（lean），assistant 段被折
     assert len(c1_turns) == 1 and task_record_kind(c1_turns[0]) == "finish"
     assert "c1 综合总结" in c1_turns[0].content
+    assert "legacy_task_record" not in c1_turns[0].metadata
+    assert c1_turns[0].content.startswith("<task_finish")

@@ -4,11 +4,8 @@ from datetime import UTC, datetime
 import pytest
 
 from ctx_weft.core.assembler import prompts
-from ctx_weft.core.assembler.task_memory import (
-    project_task_history,
-    render_task_record,
-    task_record_kind,
-)
+from tests.task_memory_testkit import project_task_history, render_task_record
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 from ctx_weft.core.loop.steps.compact import _dispatch_finish_sets, _split_for_collapse
 from ctx_weft.core.loop.task_memory_fold import (
     build_finish_slots,
@@ -307,7 +304,7 @@ async def test_empty_success_closes_dispatch_without_publishing_a_fake_output():
 @pytest.mark.parametrize("switch", [False, True])
 def test_legacy_three_slot_recap_and_switch_closure_are_labeled(switch):
     from datetime import timedelta
-    from ctx_weft.core.assembler.task_memory import task_record_group
+    from ctx_weft.core.loop.task_memory_fold import task_record_group
 
     recap = MemoryEvent(
         id="legacy-recap",

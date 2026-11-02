@@ -84,124 +84,23 @@ def _memory_type(record) -> str:
     return str(record.type or legacy_type_of(record.kind, record.scope, record.role))
 
 
-def _history_facts(context, records=None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    from ctx_weft.protocols import MemoryEventType, MemoryKind, MemoryScope
-
-    from ctx_weft.core.assembler.task_memory import capsule_history, task_record_group
+def _history_facts(context, records=None):
+    from ctx_weft.core.assembler.sources._history import history_facts
+    from ctx_weft.protocols import MemoryScope
 
     records = context._records if records is None else records
-    history_ids = {block["memory_id"] for block in context.memory_blocks if block["kind"] == "history"}
-    visible, capsules = capsule_history(r for key, r in records.items() if key in history_ids)
-    projected = {r.id: r for r in visible}
-    capsule_groups = {record_id: capsule.group for capsule in capsules for record_id in capsule.full_ids}
-    task_id = context.task.get("id", "")
+    blocks = [b for b in context.memory_blocks if b["kind"] == "history"]
     base = max((r.metadata.get("seq_no", 0) for r in records.values()
-                if r.scope is MemoryScope.TASK), default=0) + 1
-    rows = []
-    for block in context.memory_blocks:
-        if block["kind"] != "history":
-            continue
-        if block["memory_id"] not in projected:
-            continue
-        record = projected[block["memory_id"]]
-        if record.kind is not None and record.kind not in (MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY):
-            continue
+                if r.scope == MemoryScope.TASK), default=0) + 1
+    sequences = {}
+    for block in blocks:
+        record = records[block["memory_id"]]
         metadata = block["metadata"]
-        sequence = metadata.get("sequence", record.metadata.get("seq_no", 0))
-        if "staged_order" in metadata and "seq_no" not in record.metadata:
-            sequence = base + metadata["staged_order"]
-        rows.append((
-            (
-                record.timestamp.isoformat() if record.timestamp else "",
-                sequence,
-            ),
-            block,
-            record,
-        ))
-    rows.sort(key=lambda item: item[0])
-
-    prepared: list[dict[str, Any]] = []
-    for _sort, _block, record in rows:
-        role = record.role or "user"
-        if record.scope is MemoryScope.AGENT and record.kind is MemoryKind.SUMMARY:
-            role = "user"
-        content = record.content
-        tool_calls = record.metadata.get("tool_calls", []) if role == "assistant" else []
-        if _is_blank(content) and not tool_calls:
-            continue
-        if role == "assistant":
-            message = LLMMessage(
-                role="assistant",
-                content=content,
-                tool_calls=[
-                    {"id": call.get("id", ""), "name": call.get("name", ""),
-                     "input": call.get("input", {})}
-                    for call in tool_calls
-                ],
-            )
-        elif role == "tool":
-            message = LLMMessage(
-                role="tool",
-                content=content,
-                tool_call_id=record.metadata.get("tool_call_id", ""),
-            )
-        else:
-            message = LLMMessage(role="user", content=content)
-        event_type = _memory_type(record)
-        is_agent_summary = (
-            record.scope is MemoryScope.AGENT and record.kind is MemoryKind.SUMMARY)
-        is_task_summary = event_type == str(MemoryEventType.TASK_COMPACT_SUMMARY)
-        summary_kind = None
-        if is_agent_summary or is_task_summary:
-            if is_agent_summary or role == "user":
-                summary_kind = "user"
-            elif record.metadata.get("task_id") == task_id:
-                summary_kind = "assistant_current"
-            else:
-                summary_kind = "assistant"
-        prepared.append(dict(
-            ref=f"history:{len(prepared)}",
-            message=message,
-            memory_type=_memory_type(record),
-            timestamp=record.timestamp.isoformat() if record.timestamp else "",
-            task_id=record.metadata.get("task_id", ""),
-            origin_task_id=record.metadata.get("origin_task_id", ""),
-            summary_kind=summary_kind,
-            group=capsule_groups.get(record.id) or ("task-memory:" + str(task_record_group(record))
-                   if task_record_group(record) else None),
-        ))
-
-    candidates = [
-        i for i, item in enumerate(prepared)
-        if item["message"].role == "user" and item["memory_type"] == "user_prompt"
-    ]
-    matching = [i for i in candidates if prepared[i]["task_id"] == task_id]
-    anchor = matching[0] if matching else (candidates[-1] if candidates else None)
-    latest = matching[-1] if matching else anchor
-    for index, item in enumerate(prepared):
-        item["current_prompt"] = index == anchor or (
-            item["task_id"] == task_id and item["memory_type"] == "user_prompt")
-        item["current_task"] = (
-            item["task_id"] == task_id or item["origin_task_id"] == task_id)
-        item["priority"] = (
-            0 if item["current_prompt"] else
-            4 if item["current_task"] else
-            2 if item["memory_type"] == "agent_compact_summary" else
-            5 if item["memory_type"] == "agent_conversation_turn" else 6
-        )
-    user_indexes = [i for i, item in enumerate(prepared) if item["message"].role == "user"]
-    refs = dict(
-        anchor_ref=f"history:{anchor}" if anchor is not None else None,
-        latest_ref=f"history:{latest}" if latest is not None else None,
-        first_user_ref=f"history:{user_indexes[0]}" if user_indexes else None,
-        last_user_ref=f"history:{user_indexes[-1]}" if user_indexes else None,
-        last_ref=f"history:{len(prepared) - 1}" if prepared else None,
-        last_role=prepared[-1]["message"].role if prepared else None,
-        capsules=[dict(group=capsule.group,
-                       messages=[LLMMessage(role=r.role or "user", content=r.content) for r in capsule.lean],
-                       timestamp=capsule.lean[-1].timestamp) for capsule in capsules if capsule.lean],
-    )
-    return prepared, refs
+        sequences[record.id] = (base + metadata["staged_order"]
+            if "staged_order" in metadata and "seq_no" not in record.metadata else
+            metadata.get("sequence", record.metadata.get("seq_no", 0)))
+    return history_facts([records[b["memory_id"]] for b in blocks],
+                         task_id=context.task.get("id", ""), sequences=sequences)
 
 
 _JSON_TYPE_ABBR = {
@@ -457,7 +356,7 @@ class PromptBuilder:
     _tool_groups: dict[str, str] = field(default_factory=dict, init=False)
     _last_refs: tuple[str, ...] = field(default=(), init=False)
     _last_trace: list[dict] = field(default_factory=list, init=False)
-    _capsule_fallbacks: dict[str, list[PromptOperation]] = field(default_factory=dict, init=False)
+    _group_alternatives: dict[str, list[PromptOperation]] = field(default_factory=dict, init=False)
 
     def compile(self, context, *, tools: list[LLMTool] | None = None, records=None,
                 template=None, trim: bool = True, capabilities=None, skill_definition=None):
@@ -469,7 +368,7 @@ class PromptBuilder:
         self._operations.clear()
         self._serial = 0
         self._tool_groups.clear()
-        self._capsule_fallbacks.clear()
+        self._group_alternatives.clear()
         self.tools(tools or [])
         facts = _prompt_facts(context, records, template, capabilities=capabilities,
                               skill_definition=skill_definition)
@@ -554,7 +453,13 @@ class PromptBuilder:
         required: bool = False,
         group: str | None = None,
         timestamp: datetime | str | None = None,
+        content: Any = ...,
+        role: str | None = None,
     ) -> str:
+        if content is not ...:
+            message = replace(message, content=content)
+        if role is not None:
+            message = replace(message, role=role)
         # Derive an atomic group for tool exchanges when the template does not provide one.
         if group is None and message.role == "assistant" and message.tool_calls:
             group = f"tool-exchange:{ref or self._serial}"
@@ -616,21 +521,31 @@ class PromptBuilder:
     def tools(self, tools: list[LLMTool]) -> None:
         self._tools = deepcopy(tools)
 
-    def capsule(self, group: str, messages: list[LLMMessage], *, timestamp=None) -> None:
-        """Register a template-supplied minimal alternative to an atomic capsule."""
+    def alternative(self, group: str, caller=None) -> str:
+        """Capture ordinary template operations as an alternative to an atomic group."""
         full = [op for op in self._operations if op.group == group]
-        if not full:
-            return
-        sequence = max(op.sequence for op in full)
-        first_ref = next(op.ref for op in full if op.kind in {"message", "user"})
-        operations = []
-        for index, message in enumerate(messages):
-            self.message(message, ref=first_ref if index == 0 else f"{group}:lean:{index}",
-                         group=group, priority=max(op.priority for op in full), timestamp=timestamp)
-            op = self._operations.pop()
-            op.sequence = sequence
-            operations.append(op)
-        self._capsule_fallbacks[group] = operations
+        start = len(self._operations)
+        tool_groups = dict(self._tool_groups)
+        try:
+            if caller is not None:
+                rendered = caller()
+                if rendered.strip():
+                    raise ValueError("alternative program emitted stray text")
+        finally:
+            self._tool_groups = tool_groups
+        operations = self._operations[start:]
+        del self._operations[start:]
+        if full and operations:
+            sequence = max(op.sequence for op in full)
+            first_ref = next(op.ref for op in full if op.kind in {"message", "user"})
+            old_ref = next(op.ref for op in operations if op.kind in {"message", "user"})
+            for op in operations:
+                op.sequence = sequence
+                op.group = group
+                if op.ref == old_ref:
+                    op.ref = first_ref
+            self._group_alternatives[group] = operations
+        return ""
 
     def build(
         self,
@@ -698,14 +613,14 @@ class PromptBuilder:
                     break
                 if required:
                     continue
-                fallback = self._capsule_fallbacks.get(key)
+                fallback = self._group_alternatives.get(key)
                 if fallback:
                     old_tokens = sum(op.token_count for op in grouped[key])
                     new_tokens = sum(op.token_count for op in fallback)
                     if new_tokens < old_tokens:
                         replacements[key] = fallback
                         total -= old_tokens - new_tokens
-            # Only after lean alternatives have been considered may a capsule be dropped.
+            # Consider registered alternatives before dropping whole groups.
             for required, _negative_priority, _timestamp, _negative_tokens, key in sorted(candidates):
                 if total <= content_limit:
                     break
@@ -862,3 +777,30 @@ class PromptBuilder:
     def trace(self) -> list[dict]:
         """Editing trace from the most recent build."""
         return list(self._last_trace)
+
+
+def compile_history(records, *, token_counter=len, locale="en", task_id="", decorate=False):
+    """Execute the shared history program without a task instruction or budget trim."""
+    from ctx_weft.core.assembler.prompts import render_purpose
+    from ctx_weft.core.assembler.sources._history import history_facts
+    rows, facts = history_facts(records, task_id=task_id)
+    builder = PromptBuilder(token_counter)
+    render_purpose("history", locale=locale, prompt=builder, history=rows,
+                   history_decorate=decorate, **facts)
+    result = builder.build(None)
+    result.metadata["history_refs"] = builder.refs
+    result.metadata["history_sources"] = {row["ref"]: row for row in rows}
+    result.metadata["alternatives"] = {
+        group: [op.content for op in operations if op.kind in {"message", "user"}]
+        for group, operations in builder._group_alternatives.items()
+    }
+    return result
+
+
+def history_records(records, *, locale="en"):
+    """Materialize an untrimmed history view with source IDs and blob references."""
+    result = compile_history(records, locale=locale)
+    sources = result.metadata["history_sources"]
+    return [replace(sources[ref]["record"], content=message.content, role=message.role,
+                    timestamp=sources[ref]["timestamp"])
+            for ref, message in zip(result.metadata["history_refs"], result.messages, strict=True)]

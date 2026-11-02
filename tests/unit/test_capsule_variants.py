@@ -9,7 +9,8 @@ import pytest
 from ctx_weft.core.assembler.builder import PromptBuilder
 from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.assembler.sources.agent_recall import _staged_record
-from ctx_weft.core.assembler.task_memory import capsule_history, task_record_kind
+from tests.task_memory_testkit import history_view
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 from ctx_weft.core.loop.steps.compact import demote_kept_capsules
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
 from ctx_weft.core.loop.task_memory_fold import (
@@ -98,25 +99,25 @@ def blocks(records):
 def test_full_capsule_has_one_answer_and_no_finish(retained_raw):
     raw = body()
     records = raw + closure(reply="" if retained_raw else "Delivered answer")
-    visible, capsules = capsule_history(records)
+    visible, capsules = history_view(records)
     assert len(capsules) == 1
-    assert sum(task_record_kind(r) == "final_reply" for r in visible) == 1
+    assert sum("<task_final_reply" in str(r.content) for r in visible) == 1
     assert not any(task_record_kind(r) == "finish" for r in visible)
     assert sum("Delivered answer" in r.content for r in visible) == 1
     assert raw[-1].content == "Delivered answer"  # read projection is immutable
-    assert [task_record_kind(r) for r in capsules[0].lean] == ["finish"]
+    assert len(capsules[0].lean) == 1 and "<task_finish" in capsules[0].lean[0].content
 
 
 def test_minimal_capsule_has_only_the_finish_even_with_old_stray_recap():
     records = closure(reply="")
-    visible, capsules = capsule_history(records)
+    visible, capsules = history_view(records)
     assert [task_record_kind(r) for r in visible] == ["finish"]
     assert capsules == []
 
 
 def test_partial_closure_does_not_hide_its_last_surviving_record():
     records = closure()
-    visible, capsules = capsule_history([records[-1]])
+    visible, capsules = history_view([records[-1]])
     assert visible == [records[-1]]
     assert capsules == []
 
@@ -150,8 +151,8 @@ def test_legacy_raw_answer_is_labeled_without_converting_business_tools():
         timestamp=NOW,
         metadata={"task_id": "t", "tool_calls": [{"id": "real", "name": "fs__read", "input": {}}]},
     )
-    visible, _ = capsule_history([*raw, tool, old, report])
-    assert any(r.id == "t-reply" and task_record_kind(r) == "final_reply" for r in visible)
+    visible, _ = history_view([*raw, tool, old, report])
+    assert any(r.id == "t-reply" and "<task_final_reply" in r.content for r in visible)
     assert (
         next(r for r in visible if r.id == "business").metadata["tool_calls"][0]["name"]
         == "fs__read"
@@ -192,7 +193,8 @@ def test_required_capsule_is_not_silently_demoted_by_the_budget():
         required=True,
         group="capsule",
     )
-    builder.capsule("capsule", [LLMMessage(role="user", content="Lean")])
+    builder.alternative("capsule", caller=lambda: (builder.message(
+        LLMMessage(role="user", content="Lean"), priority=1, group="capsule"), "")[1])
     with pytest.raises(ContextOverflowError):
         builder.build(20)
 
@@ -228,7 +230,7 @@ def test_capsule_selection_does_not_depend_on_the_jinja_label_spelling(monkeypat
         )
     )
     monkeypatch.setattr(prompts, "_JINJA", environment)
-    visible, capsules = capsule_history(body() + closure(reply=""))
+    visible, capsules = history_view(body() + closure(reply=""))
     assert any(r.content == "CUSTOM final_reply: Delivered answer" for r in visible)
     assert all("CUSTOM finish" not in r.content for r in visible)
     assert capsules[0].lean[0].content == "CUSTOM finish: Goal achieved; essential result"
@@ -240,7 +242,7 @@ def test_canceled_partial_tool_output_is_not_invented_as_a_final_answer():
     closed = closure(reply="")
     for record in closed:
         record.metadata["finish_policy"]["outcome"] = "cancelled"
-    visible, _ = capsule_history(records + closed)
+    visible, _ = history_view(records + closed)
     assert all(task_record_kind(r) != "final_reply" for r in visible)
     assert any(r.content == "Half finished" for r in visible)
 
@@ -252,10 +254,10 @@ async def test_failed_observation_cannot_demote_uncovered_raw_history():
     for record in closed:
         record.metadata["finish_policy"]["has_summary"] = False
     records = body() + closed
-    visible, capsules = capsule_history(records)
+    visible, capsules = history_view(records)
     assert all(task_record_kind(r) != "recap" for r in visible)
-    assert any(task_record_kind(r) == "final_reply" for r in visible)
-    assert capsules[0].lean == ()
+    assert any("<task_final_reply" in str(r.content) for r in visible)
+    assert capsules == []  # The template does not register an unusable alternative.
     for record in records:
         await memory.ingest(record, CTX)
     assert (
@@ -407,8 +409,8 @@ async def test_raw_answer_reference_and_lean_state_survive_sqlite_reopen(tmp_pat
         agent = await load_records(memory, SCOPE, MemoryScope.AGENT, CTX)
         raw = await load_records(memory, SCOPE, MemoryScope.TASK, CTX)
         assert agent[-1].metadata["finish_policy"]["final_reply_record_id"] == "t-reply"
-        visible, _ = capsule_history([*agent, *raw])
-        assert sum(task_record_kind(r) == "final_reply" for r in visible) == 1
+        visible, _ = history_view([*agent, *raw])
+        assert sum("<task_final_reply" in str(r.content) for r in visible) == 1
         assert not any(task_record_kind(r) == "finish" for r in visible)
         await demote_kept_capsules(
             SimpleNamespace(scope=SCOPE), SimpleNamespace(memory=memory, provider_ctx=CTX), {"t"}
@@ -417,4 +419,4 @@ async def test_raw_answer_reference_and_lean_state_survive_sqlite_reopen(tmp_pat
     async with open_sqlite_memory(database) as memory:
         after = await load_records(memory, SCOPE, MemoryScope.AGENT, CTX)
         assert [(r.id, r.content) for r in before] == [(r.id, r.content) for r in after]
-        assert [task_record_kind(r) for r in capsule_history(after)[0]] == ["finish"]
+        assert [task_record_kind(r) for r in history_view(after)[0]] == ["finish"]

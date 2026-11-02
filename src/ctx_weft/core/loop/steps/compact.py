@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from ctx_weft.core.assembler.task_memory import capsule_origin, task_record_kind, task_record_group
+from ctx_weft.core.loop.task_memory_fold import capsule_origin, task_record_kind, task_record_group
 
 import dataclasses
 import inspect
@@ -455,9 +455,9 @@ async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
         _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
     agent_recs = await load_records(ctx.memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
-    from ctx_weft.core.assembler.task_memory import capsule_history
-    visible, _ = capsule_history([*body, *agent_recs])
-    for r in visible:
+    from ctx_weft.core.assembler.builder import compile_history
+    messages = compile_history([*body, *agent_recs]).messages
+    for r in messages:
         text = r.content if isinstance(r.content, str) else content_to_text(r.content)
         # 图片另计：不计入则降级图片的 freed_tokens 恒为 0，escalating_compact 的
         # est 不减、误判该级白跑而继续升级（见 spec 2026-08-20-multimodal-design §6.5）。
@@ -680,7 +680,7 @@ async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: s
     than user/assistant/tool roles. A late recap can update the lean record but
     must never resurrect its deleted details.
     """
-    from ctx_weft.core.assembler.task_memory import project_task_history
+    from ctx_weft.core.assembler.legacy_task_memory import normalize_legacy_tasks
     from ctx_weft.core.loop.steps.observe import record_id
     from ctx_weft.protocols import MemoryEvent
 
@@ -690,7 +690,7 @@ async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: s
     turns = await load_records(memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
         kinds=[MemoryKind.CONVERSATION_TURN])
-    projected = project_task_history(turns)
+    projected = normalize_legacy_tasks(turns)
     finishes = {capsule_origin(r): r for r in projected
                 if task_record_kind(r) == "finish"}
     parents = {oid: r.metadata.get("parent_task_id") for oid, r in finishes.items()}
@@ -729,9 +729,11 @@ async def demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: s
         policy.pop("final_reply_record_id", None)
         lean = MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
-            address=closing.address, content=closing.content, timestamp=closing.timestamp,
+            address=closing.address, content=(runtime_prompt("task_memory_record", record=closing.metadata["legacy_task_record"]).strip()
+                if closing.metadata.get("legacy_task_record") else closing.content), timestamp=closing.timestamp,
             role="user", id=record_id("demote_capsule", closing.id), blob_refs=closing.blob_refs,
             metadata={**closing.metadata, "finish_policy": policy})
+        lean.metadata.pop("legacy_task_record", None)  # Read-only normalization facts are not storage.
         await memory.fold(ids, [lean], ctx.provider_ctx)
         processed.update(descendants)
         total += len(ids)

@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 
 from ctx_weft import SessionStartParams
-from ctx_weft.core.assembler.task_memory import task_record_kind
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 from ctx_weft.protocols import MemoryAddress, MemoryScope, ProviderContext, load_records
 from ctx_weft.providers.llm.adapters.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

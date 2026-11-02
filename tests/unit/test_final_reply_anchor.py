@@ -25,7 +25,8 @@ from ctx_weft.core.loop import task_memory_fold as fp
 from ctx_weft.core.loop.steps.finalize import (
     finalize_task_memory,
 )
-from ctx_weft.core.assembler.task_memory import render_task_record, task_record_kind, task_record_group
+from tests.task_memory_testkit import render_task_record
+from ctx_weft.core.loop.task_memory_fold import task_record_kind, task_record_group
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (
     MemoryAddress,

@@ -8,7 +8,7 @@ role 映射）随 mirror 删除而移除——其验证的镜像机制已不存�
 切割/fail 前缀等仍适用于新模型的断言。
 """
 from __future__ import annotations
-from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+from ctx_weft.core.loop.task_memory_fold import task_record_kind, task_record_group
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace

@@ -9,7 +9,8 @@
 """
 from __future__ import annotations
 
-from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group, render_task_record
+from tests.task_memory_testkit import render_task_record
+from ctx_weft.core.loop.task_memory_fold import task_record_kind, task_record_group
 
 from datetime import UTC, datetime, timedelta
 

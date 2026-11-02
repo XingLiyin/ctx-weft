@@ -8,40 +8,11 @@ semantic facts; this file owns placement, order, priorities and required content
   {% do prompt.system(background, priority=1, group="background") %}
 {% endif %}
 
-{% for item in history %}
-  {% do prompt.message(
-      item.message,
-      ref=item.ref,
-      priority=item.priority,
-      required=item.current_prompt,
-      group=item.group,
-      timestamp=item.timestamp
-  ) %}
-  {% do prompt.before(
-      item.ref, shared.history_before(item), priority=item.priority,
-      required=item.current_prompt, group=item.group
-  ) %}
-  {% do prompt.after(
-      item.ref, shared.history_after(item), priority=item.priority,
-      required=item.current_prompt, group=item.group
-  ) %}
-{% endfor %}
-
-{% for capsule in capsules | default([]) %}
-  {% do prompt.capsule(capsule.group, capsule.messages, timestamp=capsule.timestamp) %}
-{% endfor %}
-
-{% set state = namespace(
-    anchor_ref=anchor_ref,
-    latest_ref=latest_ref,
-    first_user_ref=first_user_ref,
-    last_user_ref=last_user_ref,
-    last_ref=last_ref,
-    last_role=last_role,
-    fresh_ref=none,
-    resume_ref=none,
-    standalone_cap_ref=none
-) %}
+{% import "steps/_history.jinja" as history_program %}
+{% set state = namespace(anchor_ref=none, latest_ref=none, first_user_ref=none,
+    last_user_ref=none, last_prompt_ref=none, last_ref=none, last_role=none,
+    fresh_ref=none, resume_ref=none, standalone_cap_ref=none, history=[]) %}
+{% do history_program.emit(prompt, history, task_history, history_trees, state, shared) %}
 
 {% if not user_prompt_in_memory %}
   {% set state.fresh_ref = prompt.user(
@@ -73,7 +44,7 @@ semantic facts; this file owns placement, order, priorities and required content
 {% set directive_ref = state.anchor_ref or state.last_user_ref if purpose == "act" else state.first_user_ref %}
 {% set cap_ref = state.anchor_ref or state.last_user_ref if ctx.capability_sections else none %}
 
-{% for item in history %}
+{% for item in state.history %}
   {% set base_slots = [] %}
   {% if user_prompt_in_memory and item.ref == state.anchor_ref %}
     {% do base_slots.append("context") %}

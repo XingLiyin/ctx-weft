@@ -1,3 +1,5 @@
+{% import "runtime/tasks.en.jinja" as task_records %}
+{% macro task_memory_record(record) -%}{{ task_records.task_memory_record(record) }}{%- endmacro %}
 {# Shared step presentation. Python supplies facts; these macros supply prose. #}
 {% macro directive(value) -%}
 {% if value %}## Instructions for the current task{% if value.skill_name %} (skill: {{ value.skill_name }}){% endif %}

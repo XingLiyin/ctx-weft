@@ -7,7 +7,7 @@ from tests.model_testkit import model_snapshot
 
 from types import SimpleNamespace
 
-from ctx_weft.core.assembler.builder import PromptBuilder, _history_facts
+from ctx_weft.core.assembler.builder import PromptBuilder, compile_history
 from ctx_weft.core.assembler.context import PromptContext
 
 
@@ -60,8 +60,8 @@ def prompt_request(*, task_id: str = "t1", purpose: str = "act", **overrides):
 def history_messages(blocks, *, task_id: str = "t1"):
     """Project raw history blocks with the same mapper used before Jinja placement."""
     request = prompt_request(task_id=task_id)
-    rows, _refs = _history_facts(context_from_blocks(request, blocks))
-    return [row["message"] for row in rows]
+    context = context_from_blocks(request, blocks)
+    return compile_history(context._records.values(), task_id=task_id).messages
 
 
 def compile_prompt(blocks, request=None, *, tools=None):

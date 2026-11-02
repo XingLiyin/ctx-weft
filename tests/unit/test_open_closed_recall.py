@@ -9,7 +9,7 @@
 判据：task.status / finish 对是否存在，不依赖 task 层是否被 supersede。
 """
 from __future__ import annotations
-from ctx_weft.core.assembler.task_memory import task_record_kind
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace

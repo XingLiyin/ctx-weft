@@ -1,0 +1,5 @@
+{% import "steps/_shared.en.jinja" as shared with context %}
+{% import "steps/_history.jinja" as history_program %}
+{% set state = namespace(anchor_ref=none, latest_ref=none, first_user_ref=none,
+    last_user_ref=none, last_prompt_ref=none, last_ref=none, last_role=none, history=[]) %}
+{% do history_program.emit(prompt, history, task_history, history_trees, state, shared, history_decorate) %}

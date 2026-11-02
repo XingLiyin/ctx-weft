@@ -1,3 +1,5 @@
+{% import "runtime/tasks.zh.jinja" as task_records %}
+{% macro task_memory_record(record) -%}{{ task_records.task_memory_record(record) }}{%- endmacro %}
 {# 中文 step 模板仍保留协议标题，提示正文使用中文。 #}
 {% macro directive(value) -%}
 {% if value %}## Instructions for the current task{% if value.skill_name %} （技能：{{ value.skill_name }}）{% endif %}

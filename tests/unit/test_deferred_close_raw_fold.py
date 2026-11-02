@@ -7,7 +7,7 @@ close 时若尚无 LLM 总结（规则 observe 占位，has_llm_summary=False）
 
 from __future__ import annotations
 
-from ctx_weft.core.assembler.task_memory import task_record_kind
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace

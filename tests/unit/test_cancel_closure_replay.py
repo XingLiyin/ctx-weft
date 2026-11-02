@@ -1,4 +1,4 @@
-from ctx_weft.core.assembler.task_memory import task_record_kind
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 """Cancellation memory replays partially committed slots and parent acknowledgements."""
 from datetime import timedelta
 

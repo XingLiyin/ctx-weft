@@ -2,8 +2,8 @@
 
 This directory has two surfaces only:
 
-- `steps/`: complete prompt programs for `act`, `observe`, `compact`, and
-  `metadata`. They own all model-visible organization and wording. `_shared.*`
+- `steps/`: complete prompt programs for `act`, `observe`, `compact`,
+  `metadata`, and the instruction-free `history` entry point. They own all model-visible organization and wording. `_shared.*`
   contains locale-specific presentation macros; `_assemble.jinja` applies the
   common placement and trimming policy through `PromptBuilder`.
 - `runtime/`: named Jinja macros for short messages emitted while the loop is
@@ -11,6 +11,22 @@ This directory has two surfaces only:
 
 Python collectors and `PromptBuilder` pass structured facts. They must not render
 headings, sections, or prompt fragments before invoking a purpose template.
+
+`sources/_history.py::history_facts()` retains every candidate record and describes
+task ownership, closure completeness, reply-source validity, ancestry and logical
+ordering. It does not select a visible view or construct replacement messages.
+`steps/_history.jinja` owns full/minimal selection, reply deduplication and wrapping,
+and registers alternatives through the generic `prompt.alternative(group)` call
+block. Message anchors are updated only when that program emits a message.
+`PromptBuilder` accounts for ordinary operations and atomic groups; it has no
+task-specific visibility rules. `compile_history()` executes the same program
+without instructions, image downgrading or budget trimming, for inherited
+snapshots and compact token estimates.
+
+`legacy_task_memory.py` only normalizes old synthetic calls into structured facts;
+the history template renders those facts. It is the independently removable
+compatibility layer. Current lifecycle metadata helpers remain with
+`loop/task_memory_fold.py`, and writers invoke the runtime label macro directly.
 
 ## Task history records
 

@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from ctx_weft.core.assembler.task_memory import task_record_kind, task_record_group
+from ctx_weft.core.loop.task_memory_fold import task_record_kind, task_record_group
 
 from datetime import UTC, datetime, timedelta
 

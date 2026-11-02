@@ -14,9 +14,11 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from ctx_weft.core.assembler.task_memory import (
-    legacy_task_call_name, project_task_history, render_task_record, task_record_group, task_record_kind, task_record_metadata,
+from ctx_weft.core.assembler.legacy_task_memory import (
+    legacy_task_call_name, normalize_legacy_tasks,
+    task_record_kind as legacy_record_kind, task_record_group as legacy_record_group,
 )
+from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.media import placeholder_refs
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import (
@@ -33,6 +35,38 @@ from ctx_weft.protocols.capability import qualify
 logger = logging.getLogger(__name__)
 
 _VIEW_KINDS = [MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT]
+
+
+def task_record_kind(record):
+    """Read current task markers, accepting historical synthetic records."""
+    marker = record.metadata.get("task_memory", {})
+    if marker.get("version") == 1:
+        scope = getattr(record, "scope", None)
+        if scope == MemoryScope.TASK:
+            return "final_reply" if marker.get("kind") == "final_reply" else None
+        if scope == MemoryScope.AGENT and record.kind == MemoryKind.CONVERSATION_TURN:
+            return marker.get("kind")
+        return None
+    return legacy_record_kind(record)
+
+
+def task_record_group(record):
+    if getattr(record, "scope", None) != MemoryScope.AGENT:
+        return None
+    marker = record.metadata.get("task_memory", {})
+    return marker.get("group_id") or legacy_record_group(record)
+
+
+def task_record_metadata(kind: str, group_id: str):
+    return {"version": 1, "kind": kind, "group_id": group_id}
+
+
+def capsule_origin(record) -> str | None:
+    """Inherited snapshot rows belong to the receiving task's capsule."""
+    address = getattr(record, "address", None)
+    return record.metadata.get("origin_task_id") or (
+        address.task_id if address and record.metadata.get("inherited_from_agent_id") else None
+    )
 
 
 @dataclass
@@ -150,8 +184,9 @@ def build_finish_slots(*, scope, task_id: str, parent_task_id, title: str, outco
     parts.append(("finish", task_summary or act_recap))
     events = []
     for index, (kind, body) in enumerate(parts):
-        content = render_task_record(kind, task_id=task_id, parent_task_id=parent_task_id or "",
-                                    title=title, outcome=outcome if kind in {"finish", "final_reply"} else "", body=body)
+        content = runtime_prompt("task_memory_record", record=dict(
+            kind=kind, task_id=task_id, parent_task_id=parent_task_id or "",
+            title=title, description="", outcome=outcome if kind in {"finish", "final_reply"} else "", body=body)).strip()
         events.append(MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
             content=content, timestamp=base + timedelta(microseconds=index),
@@ -253,7 +288,8 @@ async def replace_finish_report(memory, provider_ctx, scope, task_id: str,
         events = [e for e in events if not e.metadata.get("final_reply")]
         events.insert(1, MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=scope,
-            content=project_task_history([existing_anchor])[0].content,
+            content=(runtime_prompt("task_memory_record", record=normalize_legacy_tasks([existing_anchor])[0].metadata["legacy_task_record"]).strip()
+                     if not existing_anchor.metadata.get("task_memory") else existing_anchor.content),
             timestamp=ts + timedelta(microseconds=1),
             blob_refs=list(dict.fromkeys([*existing_anchor.blob_refs,
                                           *placeholder_refs(existing_anchor.content)])),

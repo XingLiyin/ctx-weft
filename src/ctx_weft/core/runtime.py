@@ -211,12 +211,8 @@ async def _copy_memory_for_inherit(
         MemoryAddress(session_id=session_id, agent_id=source_agent_id),
         MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN],
     )
-    from ctx_weft.core.assembler.task_memory import capsule_history
-    visible, _ = capsule_history([*body_records, *frame_records])
-    combined = sorted(
-        visible,
-        key=lambda r: (r.timestamp, r.metadata.get("seq_no", 0)),
-    )
+    from ctx_weft.core.assembler.builder import history_records
+    combined = history_records([*body_records, *frame_records])
     child_scope = MemoryAddress(session_id=session_id, task_id=child_task.id, agent_id=sub_agent.id)
     for r in combined:  # chronological → re-ingest preserves order via fresh per-scope seq_no
         # `inherited_from_agent_id` 恒写（真正的来源标识）；`inherited_from_task_id`

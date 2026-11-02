@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from ctx_weft.protocols import load_records
-from ctx_weft.core.assembler.task_memory import task_record_kind
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 from ctx_weft.core.control.reducers import rebuild_view
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store

@@ -9,7 +9,7 @@ from jinja2 import ChoiceLoader, DictLoader, Environment, StrictUndefined, Undef
 
 from ctx_weft.core.assembler import prompts
 from ctx_weft.core.loop.capability_gateway import converge_tool_output
-from ctx_weft.core.assembler.task_memory import render_task_record
+from tests.task_memory_testkit import render_task_record
 from ctx_weft.core.loop.steps.finalize import _dispatch_ack, _dispatch_running_ack
 
 BASELINE = json.loads(

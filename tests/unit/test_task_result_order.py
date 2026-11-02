@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.assembler.task_memory import render_task_record, task_record_metadata
+from tests.task_memory_testkit import render_task_record
+from ctx_weft.core.loop.task_memory_fold import task_record_metadata
 from ctx_weft.core.loop.steps.finalize import _close_one, ensure_dispatch_frame_at_start
 from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, load_records

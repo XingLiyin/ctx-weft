@@ -8,7 +8,7 @@ _agent_scope, _state, _loop_ctx, _make_task, _pctx, T, finalize_task_memory, Loo
 """
 from __future__ import annotations
 
-from ctx_weft.core.assembler.task_memory import task_record_kind
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 
 import pytest
 

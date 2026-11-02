@@ -1,22 +1,9 @@
-"""AgentRecallSource：统一装配路径（spec 2026-06-23 重构；task-resident 语义 2026-06-28）。
+"""Recall raw task/agent history candidates by ID, including closed tasks.
 
-agent 是上下文组织单元：一次召回 = 本 agent 名下所有 task 的记录，按 timestamp 归并。
-
-task-resident（spec 2026-06-28）：
-- **未折叠 task body**（ALL tasks，无论是否结束）→ task 层记录
-  （USER_PROMPT/LLM_RESPONSE/TOOL_RESULT/TASK_COMPACT_SUMMARY），按 agent_id 跨 task 召回。
-  body 不因 close 而 supersede（旧的「CLOSED body 已 supersede 故不返回」假设已失效）。
-- **结束 task 的 finish 对**（AGENT_CONVERSATION_TURN：assistant finish_task + tool Process Report）
-  → agent 层；按 (timestamp, seq_no) 与 body 归并 → `[body][finish 对]`。
-- **运行中/暂停 task**（status ≠ FINISHED，无 finish 对）→ 只有 body，无 finish 对 → `[body]`。
-- OPEN/CLOSED 判据：task.status（或等价地：finish 对是否存在），不依赖 supersession 状态。
-
-agent 层另含：AGENT_CONVERSATION_TURN（finish 对 + dispatch 对 + inherit_memory 快照载体）
-→ 原样按时序渲染（dispatch 对 = delegating task 对话里的一组普通 message，spec 2026-06-28 §2.3）；
-AGENT_COMPACT_SUMMARY → user 摘要回合。存量 legacy TASK_DISPATCH/RESULT 由 normalize_legacy_dispatch
-在读侧归一化成 conversation turn（§5.5），核心渲染只面对单一表示。
-
-取代旧的 RecentMemorySource + AgentExperienceSource 双源。
+History facts describe task relationships. The shared Jinja history program
+selects full/minimal views, renders legacy facts and places task labels. This
+source neither renders nor truncates history. Fixed observe IDs preserve the
+original observation snapshot; staged TASK records supplement live actor input.
 """
 
 from __future__ import annotations
@@ -50,11 +37,7 @@ def _staged_record(ev) -> MemoryRecord:
 
 
 class AgentRecallSource:
-    """単一装配源（task-resident，spec 2026-06-28）：
-    ① task 层 body（所有未折叠 task，含已结束的）+ ② agent 层 finish 对/dispatch 对/经验，
-    按 (timestamp, seq_no) 在 composer 归并。
-    结束 task → `[body][finish 对]`；运行中/暂停 task → `[body]`（无 finish 对）。
-    """
+    """Recall surviving task bodies and agent records for the current agent."""
 
     name = "agent_recall"
 

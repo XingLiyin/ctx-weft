@@ -7,8 +7,8 @@ miniAgents 对齐版：
 
 from __future__ import annotations
 
-from ctx_weft.core.assembler.task_memory import (
-    final_reply_source, render_task_record, task_record_group, task_record_kind, task_record_metadata,
+from ctx_weft.core.loop.task_memory_fold import (
+    task_record_group, task_record_kind, task_record_metadata,
 )
 
 import logging
@@ -37,6 +37,31 @@ from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryS
 logger = logging.getLogger(__name__)
 
 # v2 P3：旧类型清单常量（_OWN_CONV_TYPES/_FINAL_RAW_TYPES）随读侧 kind+role 谓词化删除。
+
+def _final_reply_source(records, outputs: str) -> str | None:
+    """Locate the actual retained actor answer, including the old body+summary form."""
+    if not outputs.strip():
+        return None
+    candidates = []
+    for record in records:
+        md = record.metadata
+        if (
+            record.scope != MemoryScope.TASK
+            or record.role != "assistant"
+            or md.get("tool_calls")
+            or md.get("tool_call_count")
+            or md.get("interrupted")
+            or md.get("cancelled")
+            or not isinstance(record.content, str)
+        ):
+            continue
+        body = record.content.strip()
+        if body and (outputs.strip() == body or outputs.strip().startswith(body + "\n\n")):
+            candidates.append(record)
+    return max(candidates, key=lambda r: (
+        r.timestamp.isoformat() if r.timestamp else "", r.metadata.get("seq_no", 0)
+    )).id if candidates else None
+
 
 def _dispatch_running_ack(ref: str) -> str:
     """Running acknowledgement for the child task; its body follows inline."""
@@ -124,8 +149,8 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
     tool_call_id = task.origin_tool_call_id or generate_id("tcall")
     await memory.ingest(MemoryEvent(
         kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
-        content=render_task_record("start", task_id=task.id, parent_task_id=task.parent_task_id or "",
-                                   title=task.title, description=task.description or ""),
+        content=runtime_prompt("task_memory_record", record=dict(kind="start", task_id=task.id,
+            parent_task_id=task.parent_task_id or "", title=task.title, description=task.description or "", body="", outcome="")).strip(),
         timestamp=ts, role="user",
         metadata={"origin_task_id": task.parent_task_id, "parent_task_id": task.parent_task_id,
                   "child_task_id": task.id, "task_memory": task_record_metadata("start", tool_call_id)},
@@ -174,7 +199,8 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
     await memory.fold(stale, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT, address=parent_scope,
-            content=render_task_record("result", task_id=task.id, title=task.title, body=content),
+            content=runtime_prompt("task_memory_record", record=dict(kind="result", task_id=task.id,
+                parent_task_id="", title=task.title, description="", body=content, outcome="")).strip(),
             timestamp=result_ts, role="user", id=result_id,
             metadata={"origin_task_id": task.parent_task_id,
                       "child_task_id": task.id,
@@ -504,7 +530,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     raw = await load_records(memory, MemoryAddress(session_id=scope.session_id, task_id=task.id,
         agent_id=getattr(task, "assigned_agent_id", None) or scope.agent_id),
         MemoryScope.TASK, provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
-    source = final_reply_source(raw, _output_text(getattr(task, "outputs", None)))
+    source = _final_reply_source(raw, _output_text(getattr(task, "outputs", None)))
     if source:
         policy["final_reply_record_id"] = source
     for index, event in enumerate(slots):

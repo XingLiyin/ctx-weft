@@ -1,0 +1,87 @@
+{# One history presentation program shared by prompts, inheritance and estimates. #}
+{% macro row(prompt, item, shared, group, task=none, wrap=false) -%}
+{% set options = dict(ref=item.ref, priority=item.priority, required=item.current_prompt,
+                      group=group, timestamp=item.timestamp) %}
+{% if wrap %}
+  {% set label = dict(kind="final_reply", task_id=task.id, parent_task_id=task.parent_id or "",
+      title="", outcome=task.policy.get("outcome", ""), description="", body=item.message.content) %}
+  {% do options.update(content=shared.task_memory_record(label) | trim) %}
+{% elif item.legacy %}
+  {% do options.update(content=shared.task_memory_record(item.legacy) | trim) %}
+{% endif %}
+{% do prompt.message(item.message, **options) %}
+{%- endmacro %}
+
+{% macro emit(prompt, history, task_history, history_trees, state, shared, decorate=true) -%}
+{% set views = {} %}
+{% for key, task in task_history.items() %}
+  {% set source = task.source %}
+  {% if not task.anchors and not source and task.policy.get("outcome") != "cancelled" %}
+    {% set source = task.last_prose %}
+  {% endif %}
+  {% set full = task.policy.get("capsule_state") != "lean" and (task.anchors or source or task.body) %}
+  {% do views.update({key: dict(source=source, full=full)}) %}
+{% endfor %}
+{% set expanded = {} %}
+{% for tree in history_trees %}
+  {% set check = namespace(full=false) %}
+  {% for task in tree.tasks %}
+    {% if views[task.key].full %}{% set check.full = true %}{% endif %}
+  {% endfor %}
+  {% do expanded.update({tree.key: check.full}) %}
+{% endfor %}
+
+{% for item in history %}
+  {% set choice = namespace(show=true, wrap=false, group=item.group) %}
+  {% set task = item.task %}
+  {% if task %}
+    {% set view = views[task.key] %}
+    {% if not expanded[item.tree.key] %}
+      {% set choice.show = item.ref == item.tree.root.closing.ref %}
+    {% elif task.policy.get("capsule_state") == "lean" or not view.full %}
+      {% set choice.show = item.ref == task.closing.ref %}
+    {% else %}
+      {% set choice.show = item.ref != task.closing.ref %}
+      {% if item.kind == "recap" and task.policy.get("has_summary") == false %}
+        {% set choice.show = false %}
+      {% endif %}
+      {% if view.source and item.ref == view.source.ref %}
+        {% if task.anchors %}{% set choice.show = false %}
+        {% else %}{% set choice.wrap = true %}{% endif %}
+      {% endif %}
+    {% endif %}
+    {% if expanded[item.tree.key] %}{% set choice.group = item.tree.group %}{% endif %}
+  {% endif %}
+  {% if choice.show and (item.message.content or item.message.tool_calls or item.legacy) %}
+    {% do row(prompt, item, shared, choice.group, task, choice.wrap) %}
+    {% if decorate %}
+      {% do prompt.before(item.ref, shared.history_before(item), priority=item.priority,
+          required=item.current_prompt, group=choice.group) %}
+      {% do prompt.after(item.ref, shared.history_after(item), priority=item.priority,
+          required=item.current_prompt, group=choice.group) %}
+    {% endif %}
+    {% do state.history.append(item) %}
+    {% if item.current_prompt %}
+      {% if not state.anchor_ref %}{% set state.anchor_ref = item.ref %}{% endif %}
+      {% set state.latest_ref = item.ref %}
+    {% endif %}
+    {% if item.message.role == "user" %}
+      {% if not state.first_user_ref %}{% set state.first_user_ref = item.ref %}{% endif %}
+      {% set state.last_user_ref = item.ref %}
+      {% if item.memory_type == "user_prompt" %}{% set state.last_prompt_ref = item.ref %}{% endif %}
+    {% endif %}
+    {% set state.last_ref = item.ref %}
+    {% set state.last_role = item.message.role %}
+  {% endif %}
+{% endfor %}
+{% if not state.anchor_ref %}{% set state.anchor_ref = state.last_prompt_ref %}{% endif %}
+{% if not state.latest_ref %}{% set state.latest_ref = state.anchor_ref %}{% endif %}
+
+{% for tree in history_trees %}
+  {% if expanded[tree.key] and tree.root.policy.get("has_summary") != false %}
+    {% call prompt.alternative(tree.group) %}
+      {% do row(prompt, tree.root.closing, shared, tree.group) %}
+    {% endcall %}
+  {% endif %}
+{% endfor %}
+{%- endmacro %}

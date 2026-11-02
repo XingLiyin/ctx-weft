@@ -7,7 +7,7 @@ agent + task 已经够定位，events() 与 wait_for_finish() 都不需要 run_i
 
 from __future__ import annotations
 
-from ctx_weft.core.assembler.task_memory import task_record_kind
+from ctx_weft.core.loop.task_memory_fold import task_record_kind
 
 import asyncio
 from datetime import UTC, datetime

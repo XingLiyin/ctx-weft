@@ -13,7 +13,7 @@ def test_assets_expose_only_complete_steps_and_runtime_macros() -> None:
     root = _asset_root()
     assert {path.name for path in root.iterdir()} == {"README.md", "steps", "runtime"}
     assert sorted(path.name for path in (root / "steps").glob("[a-z]*.en.jinja")) == [
-        "act.en.jinja", "compact.en.jinja", "metadata.en.jinja", "observe.en.jinja",
+        "act.en.jinja", "compact.en.jinja", "history.en.jinja", "metadata.en.jinja", "observe.en.jinja",
     ]
 
 
@@ -24,7 +24,9 @@ def test_purpose_templates_depend_only_on_the_purpose_surface(locale: str) -> No
         text = path.read_text(encoding="utf-8")
         for line in text.splitlines():
             if "{% include" in line or "{% import" in line:
-                assert '"steps/' in line
+                assert '"steps/' in line or (
+                    path.name == f"_shared.{locale}.jinja"
+                    and line == '{% import "runtime/tasks.' + locale + '.jinja" as task_records %}')
 
 
 def test_runtime_macros_are_locale_symmetric() -> None:
