@@ -93,7 +93,8 @@ async def test_prepare_collects_through_assembler_and_consumes_hint_after_reasse
         settings=NormalTaskSettings(),
     )
     manager = NS(all_tasks=lambda: [task])
-    state = NS(resolved_model=model_snapshot(), task=task, agent=NS(), session=NS(), scope=NS(), extra={})
+    state = NS(resolved_model=model_snapshot(), task=task, agent=NS(), session=NS(), scope=NS(),
+               extra={}, origin="loop.prepare")
     snapshots = []
 
     async def assemble(request):

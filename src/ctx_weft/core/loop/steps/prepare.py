@@ -36,7 +36,7 @@ from ctx_weft.core.utils.estimate import (
     estimate_tool_calls_tokens,
 )
 from ctx_weft.protocols import load_records
-from ctx_weft.protocols.events import EventType
+from ctx_weft.protocols.events import EventOrigin, EventType
 
 
 def _estimate_record_tokens(r, count: Callable[[str], int] | None = None) -> int:
@@ -140,8 +140,15 @@ class PrepareStep(Step):
             # 压缩的视野；代价是这一轮从此不可撤（LLM 开口前按暂停也不再丢弃）。
             await commit_round(state, ctx)
             from ctx_weft.core.loop.steps.compact import escalating_compact
-            compact_events = await escalating_compact(
-                state, ctx, token_estimate=token_estimate, trigger="compact")
+            # Inline compaction keeps Prepare's continuation, but its LLM events
+            # must carry the compact origin, including the paired response finish.
+            prev_origin = state.origin
+            state.origin = EventOrigin.LOOP_COMPACT
+            try:
+                compact_events = await escalating_compact(
+                    state, ctx, token_estimate=token_estimate, trigger="compact")
+            finally:
+                state.origin = prev_origin
             for ev in compact_events:
                 await ctx.event_bus.emit(ev)
             # 「门开了但一条 MEMORY_COMPACTED 都没产」= 各级可折性 guard 全 noop = 这个 scope

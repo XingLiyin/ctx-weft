@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from tests.model_testkit import model_snapshot
 
+import asyncio
 import inspect
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +21,7 @@ from ctx_weft.core.loop import llm_gateway
 from ctx_weft.core.loop.driver import StepDriver
 from ctx_weft.core.loop.steps import act
 from ctx_weft.core.loop.steps.act import _run_llm_turn
-from ctx_weft.protocols import LLMUsage, MemoryAddress
+from ctx_weft.protocols import LLMOutageError, LLMUsage, MemoryAddress
 from ctx_weft.protocols.events import EventOrigin, EventType
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
@@ -218,7 +220,7 @@ class _FakeCompactAssembler:
         return await compiled_test_inputs(inputs, **kwargs)
 
     async def assemble(self, req):
-        return scripted_inputs(SimpleNamespace(system="SYS-COMPACT", messages=[], tools=[]), purpose=req.purpose)
+        return scripted_inputs(SimpleNamespace(system="SYS-COMPACT", messages=[], tools=[], token_count=10), purpose=req.purpose)
 
 
 def _make_compact_state(*, origin: str = EventOrigin.LOOP_COMPACT):
@@ -281,6 +283,79 @@ async def test_gateway_emits_stream_events_for_compact_origin_and_pairs_with_res
     assert all(e.payload["request_id"] == rid for e in tokens)
     assert finished[0].payload["content"] == "hello"
     assert finished[0].payload["finish_reason"] == "stop"
+
+
+async def _prepare_inline_compact(monkeypatch, *, llm=None):
+    from ctx_weft.core.loop.steps.prepare import PrepareStep
+    from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
+
+    state = _make_compact_state(origin=EventOrigin.LOOP_PREPARE)
+    state.task.settings = SimpleNamespace()
+    state.agent.loop_config = SimpleNamespace(
+        compact_keep_last=1, collapse_keep_last=1,
+        compact_token_ratio=0.8, compact_target_ratio=0.6,
+    )
+    bus = _RecordingBus()
+    ctx = _make_compact_ctx(bus, llm=llm)
+    ctx.config = SimpleNamespace(llm_self_heal_max_attempts=1)
+    for i in range(5):
+        await ctx.memory.ingest(MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+            address=state.scope, role="user" if i % 2 == 0 else "assistant",
+            content=f"history {i}", timestamp=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=i),
+        ), ctx.provider_ctx)
+
+    async def estimate(*args):
+        return 90_000, True
+
+    async def capabilities(*args):
+        return []
+
+    monkeypatch.setattr(PrepareStep, "_estimate_tokens", estimate)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.resolve_and_bind", capabilities)
+    return state, ctx, bus, StepDriver({"prepare": PrepareStep()})
+
+
+@pytest.mark.asyncio
+async def test_prepare_inline_compact_pairs_llm_events_and_continues_to_act(monkeypatch):
+    from ctx_weft.protocols import MemoryScope, load_records
+
+    state, ctx, bus, driver = await _prepare_inline_compact(monkeypatch)
+    outcome = await driver.execute("prepare", state, ctx)
+
+    llm_events = [e for e in bus.events if e.type in _MOVED_TYPES | {EventType.LLM_RESPONSE_FINISHED}]
+    assert [e.type for e in llm_events].count(EventType.LLM_REQUEST_STARTED) == 1
+    assert [e.type for e in llm_events].count(EventType.LLM_PROMPT_SENT) == 1
+    assert [e.type for e in llm_events].count(EventType.LLM_RESPONSE_FINISHED) == 1
+    assert all(e.origin == EventOrigin.LOOP_COMPACT for e in llm_events)
+    assert len({e.payload["request_id"] for e in llm_events}) == 1
+    assert llm_events[-1].payload["content"] == "hello"
+    compact_events = [e for e in bus.events if e.type in {
+        EventType.MEMORY_COMPACT_STARTED, EventType.MEMORY_COMPACTED, EventType.MEMORY_COMPACT_FINISHED}]
+    assert compact_events and all(e.origin == EventOrigin.LOOP_COMPACT for e in compact_events)
+    records = await load_records(ctx.memory, state.scope, MemoryScope.TASK, ctx.provider_ctx)
+    assert any(r.metadata.get("collapsed") and "hello" in r.content for r in records)
+    assert state.origin == EventOrigin.LOOP_PREPARE
+    assert outcome.next_step == "act"
+    assert outcome.state_patch["prompt_inputs"] is not None
+    assert all(e.origin == EventOrigin.LOOP_PREPARE for e in outcome.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, LLMOutageError, asyncio.CancelledError])
+async def test_prepare_inline_compact_restores_origin_on_failure_or_cancel(monkeypatch, error_type):
+    class FailingLLM(_FakeLLM):
+        async def complete(self, request, stream=True):
+            raise error_type("compact request stopped")
+            yield  # pragma: no cover
+
+    state, ctx, bus, driver = await _prepare_inline_compact(monkeypatch, llm=FailingLLM())
+    with pytest.raises(error_type, match="compact request stopped"):
+        await driver.execute("prepare", state, ctx)
+    assert state.origin == EventOrigin.LOOP_PREPARE
+    started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
+    assert len(started) == 1 and started[0].origin == EventOrigin.LOOP_COMPACT
+    assert not any(e.type == EventType.PREPARE_COMPLETED for e in bus.events)
 
 
 @pytest.mark.asyncio

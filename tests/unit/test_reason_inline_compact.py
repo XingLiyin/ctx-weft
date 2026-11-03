@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.utils.estimate import estimate_tokens
+from ctx_weft.protocols.events import EventOrigin
 from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 
 
@@ -19,6 +20,7 @@ class _SpyEscalatingCompact:
     async def __call__(self, state, ctx, **kwargs):
         self.order = list(getattr(ctx.task_manager, "committed", []))
         self.called = True
+        self.origin = state.origin
         self.kwargs = kwargs
         return []
 
@@ -54,7 +56,7 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
                            settings=SimpleNamespace(skill_name="", purpose="act"))
     state = SimpleNamespace(resolved_model=model_snapshot(context_limit=1000), agent=agent, session=session, task=task,
                             scope=SimpleNamespace(), extra={"template": None},
-                            run_id="r1", sequence_counter=0)
+                            run_id="r1", sequence_counter=0, origin=EventOrigin.LOOP_PREPARE)
 
     class _Assembler:
         def __init__(self):
@@ -87,6 +89,8 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
 
     outcome = await rs.execute(state, ctx)
     assert spy.called is True          # escalating_compact ran inline
+    assert spy.origin == EventOrigin.LOOP_COMPACT
+    assert state.origin == EventOrigin.LOOP_PREPARE
     assert spy.kwargs["trigger"] == "compact"
     assert pushed == []                # no compact Task pushed
     assert outcome.next_step == "act"  # still proceeds to act
@@ -125,7 +129,7 @@ async def test_reason_stashes_bound_capabilities(monkeypatch):
                            settings=SimpleNamespace(skill_name="", purpose="act"))
     state = SimpleNamespace(resolved_model=model_snapshot(context_limit=1000), agent=agent, session=session, task=task,
                             scope=SimpleNamespace(), extra={"template": None},
-                            run_id="r1", sequence_counter=0)
+                            run_id="r1", sequence_counter=0, origin=EventOrigin.LOOP_PREPARE)
 
     class _Assembler:
         async def compile(self, inputs, **kwargs):
