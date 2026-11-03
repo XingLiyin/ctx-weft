@@ -546,7 +546,7 @@ class ObserveStep(Step):
         2026-07-21）：交互任务中若有免折残留的前段 raw，不被跨段合折。
         """
 
-        if verdict.task_outcome != VERDICT_CONTINUE:
+        if verdict.task_outcome != VERDICT_CONTINUE or state.extra.get("observe_keep_raw"):
             return
         summary = (verdict.act_recap or "").strip()
         if not summary:
@@ -672,7 +672,8 @@ class ObserveStep(Step):
 
                 usable_recap = bool(act_recap) and (not judging or
                     observation.verdict is not None and observation.verdict.reported)
-                if usable_recap and boundary not in CLOSE_BOUNDARIES and not short_segment and not closed:
+                if (usable_recap and boundary not in CLOSE_BOUNDARIES and not short_segment
+                        and not closed and not state.extra.get("observe_keep_raw")):
                     # v2 P3c：策展上移——段作用域折叠（护 user 回合与既有段摘要、锚点/
                     # 段尾语义，与 observe._fold_retry_segment 同门）由框架侧 segment_fold
                     # 执行原子 fold。旧 apply_compact 的 TypeError 协议错配特判随之消亡
@@ -941,6 +942,9 @@ async def request(state, ctx, boundary, judging):
         await capture_context(state, ctx, options)
         await ctx.event_bus.emit(make_event(state, EventType.OBSERVE_REQUESTED, {
             "task_id": state.task.id, "agent_id": state.agent.id, **options}))
+    else:
+        # Recovered requests may have pinned an incomplete pre-repair view.
+        await capture_context(state, ctx, options)
 
 
 async def begin(state, ctx, boundary, judging):
@@ -1033,20 +1037,41 @@ def record_id(operation, *parts):
 
 async def capture_context(state, ctx, options):
     """Pin immutable input records before the request becomes visible to another turn."""
-    if "context_record_ids" in options:
+    from ctx_weft.core.loop.driver import assistant_memory_checkpoint
+    checked = options.get("observe_id")
+    if checked and state.extra.get("assistant_context_checked") == checked:
+        return
+    fixed = options.get("context_record_ids")
+    if fixed is not None and getattr(ctx, "assistant_memory_checkpoint", None) is None:
         return
     from ctx_weft.protocols import MemoryAddress, MemoryKind
-    end = datetime.fromisoformat(options["segment_end_at"])
-    record_ids = []
-    for scope in (MemoryScope.TASK, MemoryScope.AGENT):
-        record_ids.extend(await ctx.memory.load_view_ids(
-            MemoryAddress(session_id=state.session.id, agent_id=state.agent.id),
-            scope, ctx.provider_ctx,
-            kinds=([MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT]
-                   if scope == MemoryScope.TASK else None), end_at=end))
-    options["context_record_ids"] = record_ids
+    end = (datetime.fromisoformat(options["segment_end_at"])
+           if options.get("segment_end_at") else _execution(ctx).started_at or now_utc())
+    async with assistant_memory_checkpoint(state, ctx):
+        record_ids = []
+        for scope in (MemoryScope.TASK, MemoryScope.AGENT):
+            record_ids.extend(await ctx.memory.load_view_ids(
+                MemoryAddress(session_id=state.session.id, agent_id=state.scope.agent_id),
+                scope, ctx.provider_ctx,
+                kinds=([MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT]
+                       if scope == MemoryScope.TASK else None), end_at=end))
+        if fixed is not None:
+            extra_ids = set(record_ids) - set(fixed)
+            extra = await ctx.memory.read_records(list(extra_ids), ctx.provider_ctx) if extra_ids else []
+            if any(r.scope == MemoryScope.TASK and r.kind == MemoryKind.CONVERSATION_TURN
+                   and r.role == "assistant" for r in extra):
+                # Never expand an old summary's fold pool to newly repaired raw.
+                state.extra["observe_keep_raw"] = True
+        else:
+            if options.get("completion"):
+                state.extra["observe_keep_raw"] = True  # Legacy summary has no proven input set.
+            options["context_record_ids"] = record_ids
+    state.extra["assistant_context_checked"] = checked
     from copy import copy
-    state.extra["observe_context_task"] = copy(state.task)
+    # Recovery already reconstructed outputs from immutable actor facts; the
+    # current task projection may still have outputs=None at the crash boundary.
+    if "observe_context_task" not in state.extra or (fixed is None and not state.extra.get("observe_recovery")):
+        state.extra["observe_context_task"] = copy(state.task)
 
 
 async def context_records(state, ctx):
@@ -1160,5 +1185,5 @@ async def apply_close_report(state, ctx, observation, ready):
             observation.act_recap, observation.task_summary, policy["outcome"], state.task.title or "",
             final_reply="" if policy["preserve_raw"] else _output_text(observation_task(state).outputs),
             operation_id=state.extra["observe_id"])
-        if not policy["preserve_raw"]:
+        if not policy["preserve_raw"] and not state.extra.get("observe_keep_raw"):
             await _supersede_final_raw_segment(ctx.memory, state.scope, ctx.provider_ctx)

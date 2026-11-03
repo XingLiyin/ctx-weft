@@ -29,7 +29,7 @@ from typing import Any
 
 from ctx_weft.core.assembler import CompactIntent, ContextRequest
 from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.loop.driver import COMPACT_NOOP_KEY, LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.driver import COMPACT_NOOP_KEY, LoopContext, LoopState, Step, StepOutcome, assistant_memory_checkpoint, make_event
 from ctx_weft.core.loop.llm_gateway import (
     build_llm_request,
     llm_request_id,
@@ -792,6 +792,10 @@ async def escalating_compact(
     est = token_estimate
     if est < target_tokens and not force:
         return []
+    # Same-agent foreground runs are serialized by TaskManager. No model await
+    # belongs under this lock; background observe pins its own IDs under it.
+    async with assistant_memory_checkpoint(state, ctx):
+        pass
     # MemoryCompactStarted：有 event_bus 时立即 live 发（folds 含 LLM 摘要、耗时数秒；随批次事后发
     # 会让前端状态条错过整个「压缩中」窗口）。无 bus（单测）时退回塞进返回批次，保持既有契约与用例。
     started = make_event(state, EventType.MEMORY_COMPACT_STARTED, payload={

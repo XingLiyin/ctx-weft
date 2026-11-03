@@ -101,6 +101,7 @@ from ctx_weft.protocols import (
     LLMClientResolver,
     LLMOutageError,
     MemoryAddress,
+    MemoryEvent,
     MemoryKind,
     MemoryProvider,
     MemoryScope,
@@ -134,6 +135,18 @@ logger = logging.getLogger(__name__)
 #: （读起来像"问了没人答"，语义不对：这不是一次没人回答的提问）。与
 #: `act.INTERRUPTED_MARK` / `act.CANCELLED_MARK` 同一方括号风格的合成标记。
 _RESUME_MARK = "[resumed by operator]"
+
+
+@dataclass
+class _PendingAssistantMemory:
+    """Retain the original envelopes until both durable effects are confirmed."""
+
+    finished: Event
+    memory: MemoryEvent
+    provider_ctx: ProviderContext
+    after_position: int
+    committed: bool = False
+    provisional: bool = False
 
 
 def _latest_prior_root_task(task_manager: "TaskManager", t: "Task") -> "Task | None":
@@ -708,6 +721,9 @@ class CtxWeftRuntime:
         # （体量微小、按 session 数有界）。
         self._resume_locks: dict[str, asyncio.Lock] = {}
         self._assistant_memory_locks: dict[str, asyncio.Lock] = {}
+        self._assistant_agent_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._assistant_pending: dict[tuple[str, str, str], dict[str, _PendingAssistantMemory]] = {}
+        self._assistant_memory_ready: dict[tuple[str, str], tuple[MemoryProvider, int]] = {}
         self._session_lock_owners: dict[str, asyncio.Task] = {}
         self._loaded_sessions: set[str] = set()
         self._initialized_sessions: set[str] = set()
@@ -974,6 +990,9 @@ class CtxWeftRuntime:
     def clear_storage_isolation(self, session_id: str) -> None:
         """宿主确认存储恢复后解除隔离（恢复流程须先按 batch_id 收口未知提交）。"""
         if self._storage_unavailable.pop(session_id, None) is not None:
+            for key in list(self._assistant_memory_ready):
+                if key[1] == session_id:
+                    self._assistant_memory_ready.pop(key, None)
             logger.info("session %s storage isolation cleared", session_id)
 
     @_session_command(load_session="skip")
@@ -1288,7 +1307,19 @@ class CtxWeftRuntime:
             if done is not None:
                 committed.append(done)
         for memory, event, pctx in staged:
-            await memory.ingest(event, pctx)
+            key = self._assistant_key(pctx, event.address)
+            pending = self._assistant_pending.get(key, {})
+            if event.id not in pending:
+                await memory.ingest(event, pctx)
+                continue
+            async with self._assistant_agent_lock(key):
+                entry = self._assistant_pending.get(key, {}).get(event.id)
+                if entry is not None:
+                    # commit_provisional has already confirmed the original batch.
+                    entry.committed = self._config.event_commit_policy == "required"
+                    entry.provisional = False
+                await memory.ingest(event, pctx)
+                self._assistant_pending.get(key, {}).pop(event.id, None)
         # 3. 给这一轮终局掉的答复盖「已了结」章（`HitlClosed`）。
         #
         # **这里是那枚章唯一正确的位置**，因为两个条件到这一行才同时成立：决定已终局
@@ -1328,6 +1359,17 @@ class CtxWeftRuntime:
         停在待终局，且会记一条 exception 日志。
         """
         tm = self._task_managers.get(session_id)
+
+        # TaskManager calls revert only before an irreversible/uncertain commit.
+        for key, pending in list(self._assistant_pending.items()):
+            if key[1] != session_id or not any(
+                    entry.provisional and entry.finished.task_id == task_id
+                    for entry in pending.values()):
+                continue
+            async with self._assistant_agent_lock(key):
+                for record_id, entry in list(pending.items()):
+                    if entry.provisional and entry.finished.task_id == task_id:
+                        pending.pop(record_id, None)
 
         # 按 task 全量退回，而不是记一个 id：`_cancel_pending_hitl_of` 收口的是该 agent
         # 名下**全部**未决请求，可能不止一条。
@@ -2210,6 +2252,12 @@ class CtxWeftRuntime:
         self._agent_lifecycle_manager.forget_session(session_id)
         self._step_executions.pop(session_id, None)
         self._session_registry.forget_session(session_id)
+        for key in list(self._assistant_memory_ready):
+            if key[1] == session_id:
+                self._assistant_memory_ready.pop(key, None)
+        for key in list(self._assistant_pending):
+            if key[1] == session_id:
+                self._assistant_pending.pop(key, None)
         for _p in self.providers.get_capability_providers():
             if isinstance(_p, SessionScopedCapabilityProvider):
                 _p.deregister_session(session_id)
@@ -2820,7 +2868,7 @@ class CtxWeftRuntime:
 
         from ctx_weft.core.loop.steps.observe import blocks_actor_recovery
         try:
-            await self._restore_assistant_messages(session)
+            await self._ensure_assistant_memory(session)
             if task.status == "CANCELED":
                 # Repair cancellation before the obsolete observation can publish
                 # Applied and release the task retained for recovery.
@@ -2911,10 +2959,11 @@ class CtxWeftRuntime:
         """Recover foreground settlement here; observation never drives a step chain."""
         from ctx_weft.core.loop.driver import ExecutionMode, StepExecution
         from ctx_weft.core.loop.steps.observe import (
-            ObservationResult, Verdict, apply_foreground_assessment, emit_effect,
+            ObservationResult, Verdict, apply_foreground_assessment, capture_context, emit_effect,
         )
         options = dict(info)
         ctx.execution = StepExecution(ExecutionMode.FOREGROUND, options)
+        await capture_context(state, ctx, options)
         state.extra.update(observe_id=options["observe_id"],
             observe_effects=list(options.get("effects", [])))
         if options.get("completion"):
@@ -3062,6 +3111,7 @@ class CtxWeftRuntime:
         tm.set_recovery_pending(True)
         await self.hitl.confirm_opens(tm.session.id)
         await self.hitl.confirm_resolutions(tm.session.id)
+        await self._confirm_assistant_events(tm.session)
         await self._restore_assistant_messages(tm.session)
         await tm.reconcile_stopped_tasks()
         await self._repair_observe_handoffs(tm)
@@ -3205,7 +3255,7 @@ class CtxWeftRuntime:
                 raise RuntimeError(f"Session {session_id!r} not found in event store")
 
             session = session_from_projection(proj)
-            await self._restore_assistant_messages(session)
+            await self._ensure_assistant_memory(session)
             pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             # 水合，不新建：target_agent_id 是已存在 agent。register_session 保证跨
             # 重启后 registry 为空时 materialize 的回落有正确的 session 语境（幂等）。
@@ -4561,7 +4611,119 @@ class CtxWeftRuntime:
             },
         )
 
-    async def _restore_assistant_messages(self, session: "Session") -> None:
+    @staticmethod
+    def _assistant_key(provider_ctx, address) -> tuple[str, str, str]:
+        if not address.agent_id:
+            raise ValueError("Assistant memory requires an owning agent")
+        return (provider_ctx.tenant_id or "default", address.session_id, address.agent_id)
+
+    def _assistant_agent_lock(self, key):
+        # Keep identities stable across eviction while owners/waiters may exist.
+        return self._assistant_agent_locks.setdefault(key, asyncio.Lock())
+
+    async def _ensure_assistant_memory(self, session) -> None:
+        key = (session.tenant_id or "default", session.id)
+        ready = self._assistant_memory_ready.get(key)
+        if ready is None or ready[0] is not self.providers.get_memory():
+            await self._restore_assistant_messages(session, only_if_uninitialized=True)
+
+    async def _persist_assistant_turn(self, state, ctx, finished, event) -> None:
+        """Track before emitting; serialize only this memory owner's final write."""
+        from ctx_weft.core.loop.driver import ingest_or_stage
+
+        await self._ensure_assistant_memory(state.session)
+        if ctx.memory is not self.providers.get_memory():
+            raise RuntimeError("Assistant memory provider changed during the run")
+        key = self._assistant_key(ctx.provider_ctx, event.address)
+        after_position = self._assistant_memory_ready.get(key[:2], (ctx.memory, 0))[1]
+        async with self._assistant_agent_lock(key):
+            tm = ctx.task_manager
+            provisional = bool(tm is not None and tm.is_round_open(state.task.id))
+            entry = _PendingAssistantMemory(
+                finished, event, ctx.provider_ctx,
+                after_position, provisional=provisional)
+            self._assistant_pending.setdefault(key, {})[event.id] = entry
+            # Cancellation and uncertain receipts deliberately leave the entry.
+            await ctx.event_bus.emit(finished)
+            entry.committed = not provisional and self._config.event_commit_policy == "required"
+            await ingest_or_stage(ctx.memory, event, ctx.provider_ctx,
+                                  task_manager=tm, task_id=state.task.id)
+            if not provisional:
+                self._assistant_pending[key].pop(event.id, None)
+
+    async def _repair_assistant_pending(self, key) -> None:
+        """Called with the agent lock held. Empty hot checks perform no storage I/O."""
+        from ctx_weft.protocols.events import EventReadProjection
+        from ctx_weft.core.control.reducers import REPLAY_BATCH
+
+        pending = self._assistant_pending.get(key, {})
+        for record_id, entry in list(pending.items()):
+            if not entry.committed:
+                # emit may have committed and lost its acknowledgement, or the
+                # event may still be provisional. Only durable facts authorize repair.
+                head = await self.event_store.committed_head(key[1])
+                confirmed = False
+                cursor = entry.after_position
+                while cursor < head and not confirmed:
+                    upper = min(cursor + REPLAY_BATCH, head)
+                    rows = await self.event_store.read_range(
+                        key[1], after_position=cursor, through_position=upper,
+                        include_types=(EventType.LLM_RESPONSE_FINISHED,),
+                        projection=EventReadProjection({EventType.LLM_RESPONSE_FINISHED: (("memory_id",),)}))
+                    confirmed = any(row.event.id == entry.finished.id
+                                    and row.event.payload.get("memory_id") == record_id
+                                    and (row.event.tenant_id or "default") == key[0]
+                                    and row.event.agent_id == entry.finished.agent_id for row in rows)
+                    cursor = upper
+                if not confirmed:
+                    raise RuntimeError(f"Assistant finished commit not confirmed: {entry.finished.id}")
+                entry.committed = True
+                entry.provisional = False
+            memory = self.providers.get_memory()
+            if not await memory.read_records([record_id], entry.provider_ctx):
+                await self._ingest_recovered_assistant(memory, entry.memory, entry.provider_ctx)
+            pending.pop(record_id, None)
+
+    async def _confirm_assistant_events(self, session) -> None:
+        """Explicit recovery retries uncertain single-event commits using original IDs.
+
+        Provisional events must be confirmed as their original round batch by
+        TaskManager; replaying one of those as a standalone event is forbidden.
+        """
+        for key, pending in list(self._assistant_pending.items()):
+            if key[:2] != (session.tenant_id or "default", session.id):
+                continue
+            for record_id, entry in list(pending.items()):
+                if entry.committed or entry.provisional:
+                    continue
+                async with self._assistant_agent_lock(key):
+                    if pending.get(record_id) is not entry or entry.committed:
+                        continue
+                    await self._event_bus.emit(entry.finished)
+                    entry.committed = self._config.event_commit_policy == "required"
+
+    @contextlib.asynccontextmanager
+    async def _assistant_memory_checkpoint(self, session, address):
+        # Never acquire the session initialization lock while owning an agent lock.
+        await self._ensure_assistant_memory(session)
+        pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
+        key = self._assistant_key(pctx, address)
+        async with self._assistant_agent_lock(key):
+            await self._repair_assistant_pending(key)
+            yield
+
+    @staticmethod
+    async def _ingest_recovered_assistant(memory, event, pctx) -> None:
+        try:
+            await memory.ingest(event, pctx)
+        except Exception:
+            # Lost commit acknowledgements and immutable superseded rows are safe.
+            if not await memory.read_records([event.id], pctx):
+                raise
+        if not await memory.read_records([event.id], pctx):
+            raise RuntimeError(f"Assistant memory write not confirmed: {event.id}")
+
+    async def _restore_assistant_messages(self, session: "Session", *, only_if_uninitialized=False) -> None:
         """Repair only finished references after the independently verified memory cut.
 
         State snapshots may be ahead of assistant writes; never use their state
@@ -4573,9 +4735,14 @@ class CtxWeftRuntime:
 
         lock = self._assistant_memory_locks.setdefault(session.id, asyncio.Lock())
         async with lock:
+            ready_key = (session.tenant_id or "default", session.id)
+            memory = self.providers.get_memory()
+            ready = self._assistant_memory_ready.get(ready_key)
+            if only_if_uninitialized and ready is not None and ready[0] is memory:
+                return
+            self._assistant_memory_ready.pop(ready_key, None)
             head = await self.event_store.committed_head(session.id)
             floor = await assistant_memory_floor(self.event_store, session.id, head=head)
-            memory = self.providers.get_memory()
             async for missing in missing_assistant_memories(
                     self.event_store, memory, session.id, session.tenant_id,
                     after_position=floor, through_position=head):
@@ -4591,16 +4758,12 @@ class CtxWeftRuntime:
                     p["content"], [ToolCall(**call) for call in p.get("tool_calls", [])],
                     LLMUsage(**p.get("usage", {})), p.get("turn", 0),
                     anchor=p["memory_id"], timestamp=ev.timestamp)
-                try:
-                    await memory.ingest(event, pctx)
-                except Exception:
-                    # A concurrent live writer or a lost commit acknowledgement
-                    # may already have created the immutable row.
+                key = self._assistant_key(pctx, event.address)
+                async with self._assistant_agent_lock(key):
                     if not await memory.read_records([event.id], pctx):
-                        raise
-                if not await memory.read_records([event.id], pctx):
-                    raise RuntimeError(f"Assistant memory write not confirmed: {event.id}")
+                        await self._ingest_recovered_assistant(memory, event, pctx)
                 logger.warning("Restored assistant memory %s from finished event %s", event.id, ev.id)
+            self._assistant_memory_ready[ready_key] = (memory, head)
 
     async def _restore_appended_messages(self, session: "Session") -> None:
         """恢复期补写：`TaskMessageAppended` 记着、memory 里却没有的注入消息，按原 id / 原时间戳写回。
@@ -5142,6 +5305,8 @@ class CtxWeftRuntime:
             # rehydrate_content 据其 can_externalize=False 原样返回、零开销。
             blob_store=self.providers.get_memory_blob_store(),
             event_blob_store=self.providers.get_event_blob_store(),
+            persist_assistant_turn=self._persist_assistant_turn,
+            assistant_memory_checkpoint=self._assistant_memory_checkpoint,
         )
 
     @staticmethod
@@ -5534,7 +5699,7 @@ class _SessionTaskRunner:
             return None
         sess_id = self._session.id
         tenant_id = self._session.tenant_id
-        await self._runtime._restore_assistant_messages(self._session)
+        await self._runtime._ensure_assistant_memory(self._session)
 
         # Cython 3.2 does not support structural pattern matching.
         s = t.settings
@@ -5579,6 +5744,9 @@ class _SessionTaskRunner:
                 # 的出身早已由 `AgentInstantiated` 钉死——record 才是真相。
                 tmpl = await self._template_of(agent, ctx)
             t.assigned_agent_id = agent.id
+            async with self._runtime._assistant_memory_checkpoint(
+                    self._session, MemoryAddress(session_id=sess_id, agent_id=agent.id)):
+                pass
             if s.inherit_memory and not t.user_prompt_in_memory:
                 # 继承源三级，**显式优先**（spec/09 §6）：
                 #   ① settings.inherit_from_agent_id —— host 直接锚定，绕过推导。
@@ -5598,11 +5766,13 @@ class _SessionTaskRunner:
                         src_aid = src_t.assigned_agent_id or src_t.creator_agent_id or ""
                         src_tid = src_t.id
                 if src_aid:
-                    await _copy_memory_for_inherit(
-                        source_agent_id=src_aid, child_task=t, sub_agent=agent,
-                        memory=self._memory, session_id=sess_id, tenant_id=tenant_id,
-                        source_task_id=src_tid,
-                    )
+                    async with self._runtime._assistant_memory_checkpoint(
+                            self._session, MemoryAddress(session_id=sess_id, agent_id=src_aid)):
+                        await _copy_memory_for_inherit(
+                            source_agent_id=src_aid, child_task=t, sub_agent=agent,
+                            memory=self._memory, session_id=sess_id, tenant_id=tenant_id,
+                            source_task_id=src_tid,
+                        )
             initial = await self._reconcile_or(t, agent, "prepare")
             return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
                                 initial_step=initial, run_id=generate_id("run"), model=rm)
@@ -5624,6 +5794,9 @@ class _SessionTaskRunner:
             # `provider_ctx.agent_template_id` 报的又是它自己的模板，两者自相矛盾。
             tmpl = await self._template_of(
                 agent, ProviderContext(session_id=sess_id, tenant_id=tenant_id))
+            async with self._runtime._assistant_memory_checkpoint(
+                    self._session, MemoryAddress(session_id=sess_id, agent_id=agent.id)):
+                pass
             initial = await self._reconcile_or(t, agent, "prepare")
             return AgentBinding(agent_id=agent.id, agent=agent, template=tmpl,
                                 initial_step=initial, run_id=generate_id("run"), model=rm)

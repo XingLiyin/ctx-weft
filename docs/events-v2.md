@@ -567,9 +567,17 @@ TM 区分前两者靠的是 **task 状态**，那本来就是它自己的领域�
 
 `LLMResponseFinished.memory_id` 与 `MemoryRecord.id` 相等；再按该回复事件的 `request_id` 关联 `LLMPromptSent`，即可串起 memory、回复与生成它的 prompt。memory metadata 不额外保存 `request_id`。回复事件先于 memory 写入发出，缺失时由 Runtime 从事件幂等补写；正常写入和补写共用 assistant 记录构造逻辑，并使用事件时间。事件中没有的 `raw_tool_call_id` 不猜测补造，已有内部工具调用 ID 保持原样。用户打断保存的半截回复没有此 finished 事件，沿用原有行为。
 
-`StateSnapshot.payload.assistant_memory_verified_position` 是独立的 assistant memory 核对水位 P，缺省或非法值为 0；始终满足 `0 <= P <= cut_position`。状态切面 C 可以领先于 P，不能用状态切面或已裁剪的 task 集合跳过 assistant 补写。写快照时按固定 C、分批检查 `(P, C]` 内 finished 的 memory ID（包含已 superseded 记录）：全部存在则推进到 C，发现首个缺失位置 Q 则只推进到 Q-1；读取失败保留原水位。快照只核对，不执行补写。未接 memory provider 的快照写入方不能自行推进水位。
+`StateSnapshot.payload.assistant_memory_verified_position` 是独立的 assistant memory 核对水位 P；显式为 0 或非法值时从 0 检查。兼容例外：可用旧快照完全缺少此字段时，以其 `cut_position` 作为迁移基线，跳过切面之前的历史 memory 核对；这部分旧缺口不追补。存在水位字段的新快照始终按该字段核对，不能用更大的状态切面或已裁剪的 task 集合跳过 assistant 补写。写快照时按固定 C、分批检查 `(P, C]` 内 finished 的 memory ID（包含已 superseded 记录）：全部存在则推进到 C，发现首个缺失位置 Q 则只推进到 Q-1；读取失败保留原水位。快照只核对，不执行补写。未接 memory provider 的快照写入方不能自行推进水位。
 
-会话冷加载、活 owner 恢复、任务派发/自动重试、独立压缩和 observe 恢复在读取依赖记忆前核对 `(P, H]`，H 是本次固定的已提交位置。先按类型和位置投影读取 ID，只为缺失项读取完整事件；直接 ingest、按原 ID 幂等并回读确认，不走暂存区，也不调用模型或工具。失败向上传播，不放行依赖缺失记忆的执行。旧快照、无快照和关闭快照时 P=0，需要分批建立基线；兼容快照之后只核对水位后的增量。已写记录须保留按 ID 读取的能力，未核对完的源事件不能提前清理。这个机制修复漏写，不是检测已确认记录被外部物理删除的全量审计。
+会话首次使用 memory、冷加载及活 owner 恢复时核对 `(P, H]`，H 是本次固定的已提交位置。先按类型和位置投影读取 ID，只为缺失项读取完整事件；直接 ingest、按原 ID 幂等并回读确认，不调用模型或工具。全部成功后才建立进程内初始化标记；更换 memory provider、会话逐出及解除存储隔离会使该标记失效。旧快照缺少水位时只检查其切面之后的尾部；没有可用快照时仍从 0 分批建立基线。
+
+初始化之后，Runtime 按 `(tenant_id, session_id, memory_address.agent_id)` 维护一致性锁和 pending 表。act 在发 finished 前登记原事件及 memory 内容，事件提交和 memory 写入在该 agent 的锁内完成；成功落库才清除 pending，异常、取消和提交结果不确定都保留。暂存成功不算落库：轮次正式提交的 memory 钩子负责清除，明确撤销未提交轮次才随缓冲丢弃；未确认事件落盘不得凭 pending 补写。显式恢复可按原事件 ID 重试不确定的单事件提交，provisional 事件仍须按原轮次批次确认。不同 agent 不共享回复收尾锁，流式输出和摘要模型调用不持锁。
+
+锁顺序固定为先完成 session 初始化，再进入 agent 临界区；agent 锁内的补写不回调初始化入口。轮次提交在 observer 固定输入的临界区之前完成，避免提交钩子重入同一把 agent 锁。异常和取消均由上下文管理器释放锁。
+
+任务派发/重试、继承源读取、普通 compact 首次读取输入前检查对应 agent 的 pending；observer 在同一把锁内完成补齐与 `context_record_ids` 固定。初始化完成且 pending 为空时，检查不查询事件库和 memory。失败向上传播，不放行依赖缺失记忆的执行。恢复旧 observer 时，若原固定输入漏了该时间范围内当前仍活跃的 assistant 记录，保留 raw、跳过段折叠与末段清理，不把旧摘要的折叠范围静默扩大。快照仍独立查询实际记录核对水位，不从 pending 空表推导整个 session 的证明。
+
+已写记录须保留按 ID 读取的能力（含已 superseded 记录），未核对完的源事件不能提前清理。这个机制修复漏写，不是检测已确认记录被外部物理删除的全量审计。
 
 ⚡ = TRANSIENT，不持久化。
 

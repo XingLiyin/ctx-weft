@@ -645,7 +645,10 @@ def snapshot_facts_from_event(ev: "Event | None") -> "SnapshotFacts | None":
     if not isinstance(blob, dict):
         return None
     cut = p.get(_SNAP_CUT)
-    verified = p.get(_SNAP_ASSISTANT_MEMORY_POSITION, 0)
+    # Legacy snapshots have no assistant proof. Accept their state cut as the
+    # migration baseline instead of auditing pre-upgrade history on first load.
+    # An explicitly present zero/invalid value must not take this exemption.
+    verified = p.get(_SNAP_ASSISTANT_MEMORY_POSITION, cut)
     if (type(verified) is not int or type(cut) is not int
             or not 0 <= verified <= cut):
         verified = 0
@@ -695,7 +698,7 @@ def snapshot_is_usable(
 
 
 async def assistant_memory_floor(event_store: Any, session_id: str, *, head: int) -> int:
-    """Read the independently verified assistant cut; legacy/invalid proofs start at zero."""
+    """Read the assistant cut; legacy snapshots exempt history through their state cut."""
     stored = await event_store.read_last_of_type(session_id, EventType.STATE_SNAPSHOT)
     snapshot = snapshot_facts_from_event(stored.event if stored else None)
     if not snapshot_is_usable(snapshot, head):

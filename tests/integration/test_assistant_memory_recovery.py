@@ -58,12 +58,12 @@ async def snapshot(store, memory):
     return snapshot_facts_from_event(stored.event)
 
 
-@pytest.mark.parametrize("proof, expected", [(None, 0), (-1, 0), (True, 0),
-                                            (1.5, 0), ("2", 0), (6, 0), (2, 2)])
-def test_invalid_proofs_do_not_inherit_the_state_cut(proof, expected):
+@pytest.mark.parametrize("proof, expected", [("absent", 5), (None, 0), (0, 0), (-1, 0),
+                                            (True, 0), (1.5, 0), ("2", 0), (6, 0), (2, 2)])
+def test_only_absent_legacy_proofs_inherit_the_state_cut(proof, expected):
     payload = snapshot_event_payload(RunStateView("r", "s", "", ""), cut=5,
                                      chain_depth=0, reason="test")
-    if proof is None:
+    if proof == "absent":
         payload.pop("assistant_memory_verified_position")  # Legacy snapshot.
     else:
         payload["assistant_memory_verified_position"] = proof
@@ -235,18 +235,66 @@ async def test_watermark_never_crosses_the_first_gap():
 
 
 @pytest.mark.asyncio
-async def test_legacy_snapshot_ahead_of_a_gap_starts_verification_from_zero():
+@pytest.mark.parametrize("sql", [False, True])
+@pytest.mark.parametrize("legacy_version", [False, True])
+async def test_legacy_snapshot_skips_old_gap_but_repairs_post_cut_reply(
+        tmp_path, monkeypatch, sql, legacy_version):
+    from contextlib import AsyncExitStack
+
+    async with AsyncExitStack() as stack:
+        if sql:
+            store = await stack.enter_async_context(open_sqlite_event_store(tmp_path / "events.db"))
+            memory = await stack.enter_async_context(open_sqlite_memory(tmp_path / "memory.db"))
+        else:
+            store, memory = InMemoryEventStore(), InMemoryMemoryProvider()
+        # Even a pre-cut event carrying memory_id is intentionally exempt.
+        await finished(store, "old-gap")
+        payload = snapshot_event_payload(RunStateView("r", "s", "", ""), cut=1,
+                                         chain_depth=0, reason="legacy")
+        payload.pop("assistant_memory_verified_position")
+        if legacy_version:
+            payload["projection_version"] = 10
+        await append(store, EventType.STATE_SNAPSHOT, **payload)
+        await finished(store, "new-gap")
+        reads, lookups = [], []
+        real_range, real_read = store.read_range, memory.read_records
+
+        async def read_range(session_id, **kwargs):
+            reads.append(kwargs)
+            return await real_range(session_id, **kwargs)
+
+        async def read_records(ids, ctx):
+            lookups.extend(ids)
+            return await real_read(ids, ctx)
+
+        monkeypatch.setattr(store, "read_range", read_range)
+        monkeypatch.setattr(memory, "read_records", read_records)
+        runtime = make_runtime(event_store=store, agent_provider=InlineAgentTemplateProvider())
+        runtime.providers.register_memory(memory)
+        await runtime._restore_assistant_messages(SESSION)
+        proof = await snapshot(store, memory)
+        assert proof.assistant_memory_verified_position == proof.last_commit_position
+        assistant_reads = [call for call in reads
+                           if call.get("include_types") == (EventType.LLM_RESPONSE_FINISHED,)]
+        assert assistant_reads and all(call["after_position"] >= 1 for call in assistant_reads)
+        assert "old-gap" not in lookups
+        assert await real_read(["old-gap"], CTX) == []
+        record, = await real_read(["new-gap"], CTX)
+        assert record.content == "saved answer"
+
+
+@pytest.mark.asyncio
+async def test_explicit_zero_proof_does_not_exempt_a_pre_cut_gap():
     store, memory = InMemoryEventStore(), InMemoryMemoryProvider()
     await finished(store)
     payload = snapshot_event_payload(RunStateView("r", "s", "", ""), cut=1,
-                                     chain_depth=0, reason="legacy")
-    payload.pop("assistant_memory_verified_position")
+                                     chain_depth=0, reason="explicit_zero",
+                                     assistant_memory_verified_position=0)
     await append(store, EventType.STATE_SNAPSHOT, **payload)
     runtime = make_runtime(event_store=store, agent_provider=InlineAgentTemplateProvider())
     runtime.providers.register_memory(memory)
     await runtime._restore_assistant_messages(SESSION)
-    record, = await memory.read_records(["reply"], CTX)
-    assert record.content == "saved answer"
+    assert await memory.read_records(["reply"], CTX)
 
 
 @pytest.mark.asyncio

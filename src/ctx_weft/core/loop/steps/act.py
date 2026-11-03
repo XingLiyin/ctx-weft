@@ -145,9 +145,11 @@ class ActStep(Step):
                     baseline_msg_count = len(turn.messages_sent)
 
                 # 3) assistant 回合落 memory + 接回 message 历史 + 记 transcript
-                persisted_turn = await _ingest_assistant_turn(
-                    state, ctx, turn.text, turn.tool_calls, turn.usage, turn_num,
-                    anchor=turn.anchor, minted=turn.minted, timestamp=turn.memory_timestamp)
+                persisted_turn = turn.persisted_turn
+                if persisted_turn is None:
+                    persisted_turn = await _ingest_assistant_turn(
+                        state, ctx, turn.text, turn.tool_calls, turn.usage, turn_num,
+                        anchor=turn.anchor, minted=turn.minted, timestamp=turn.memory_timestamp)
                 asst_tool_dicts = persisted_turn.tool_calls
                 state.extra["assistant_record_id"] = persisted_turn.record_id
                 appended_messages.append(LLMMessage(
@@ -375,6 +377,7 @@ class _LLMTurnOutput:
     provider_state: dict[str, Any] = dataclasses.field(default_factory=dict)
     messages_sent: list[LLMMessage] = dataclasses.field(default_factory=list)
     memory_timestamp: datetime | None = None
+    persisted_turn: PersistedAssistantTurn | None = None
 
 
 async def _run_llm_turn(
@@ -484,12 +487,22 @@ async def _run_llm_turn(
             # 本次调用实际使用的模型/账号（host 云端上报按此计账，不再受切换竞态影响）
             "llm_model": model, "llm_account": llm_account,
             "finish_reason": "tool_use" if tool_calls else "stop", "turn": turn_num})
-    await ctx.event_bus.emit(finished)
+    persist = getattr(ctx, "persist_assistant_turn", None)
+    persisted_turn = None
+    if persist is None:
+        await ctx.event_bus.emit(finished)
+    else:
+        event, tool_dicts = _assistant_memory_event(
+            state.scope, text, tool_calls, usage, turn_num,
+            anchor=anchor, minted=minted, timestamp=finished.timestamp)
+        await persist(state, ctx, finished, event)
+        persisted_turn = PersistedAssistantTurn(record_id=anchor, tool_calls=tool_dicts)
 
     return _LLMTurnOutput(
         text=text, reasoning=reasoning, tool_calls=tool_calls, usage=usage,
         anchor=anchor, minted=minted, provider_state=result.provider_state,
-        messages_sent=llm_request.messages, memory_timestamp=finished.timestamp)
+        messages_sent=llm_request.messages, memory_timestamp=finished.timestamp,
+        persisted_turn=persisted_turn)
 
 
 def _can_recover_context(state: LoopState) -> bool:
@@ -936,6 +949,9 @@ async def _cold_park(
     observe_request = None
     if observe_boundary is not None:
         from ctx_weft.core.loop.steps.observe import capture_context, make_observe_request
+        # A stream can end without yielding any chunk. Its finished/memory pair
+        # is still provisional; commit it before pinning the observer's inputs.
+        await commit_round(state, ctx)
         observe_request = make_observe_request(
             state, observe_boundary,
             observe_boundary in {"plain_text", "finish_park", "task_switch"})

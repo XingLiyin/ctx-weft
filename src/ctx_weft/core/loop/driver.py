@@ -305,6 +305,9 @@ class LoopContext:
     event_blob_store: "Any" = None
     steps: "StepDriver | None" = None
     execution: StepExecution = field(default_factory=StepExecution)
+    # Runtime-owned assistant write tracking; standalone steps retain their old path.
+    persist_assistant_turn: Any = None
+    assistant_memory_checkpoint: Any = None
 
 
 #: `state.extra` 键：本轮是否已过提交点（`commit.commit_round` 的幂等标志）。
@@ -330,6 +333,17 @@ COMPACT_NOOP_KEY = "_compact_noop"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def assistant_memory_checkpoint(state, ctx):
+    """Repair this memory owner before selecting compaction inputs."""
+    checkpoint = getattr(ctx, "assistant_memory_checkpoint", None)
+    if checkpoint is None:
+        yield
+    else:
+        async with checkpoint(state.session, state.scope):
+            yield
 
 
 def make_event(

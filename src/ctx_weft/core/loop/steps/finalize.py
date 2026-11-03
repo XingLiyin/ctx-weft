@@ -354,6 +354,7 @@ async def _close_one(memory, state, task, mem_content: str, outcome: str, ctx,
     # identity gives finish slots, dispatch results and publications stable record IDs.
     events: list[Any] = []
     same_agent = task.creator_agent_id == task.assigned_agent_id
+    short = short or bool(getattr(state, "extra", {}).get("observe_keep_raw"))
     cross_agent = bool(task.parent_task_id) and not same_agent
     is_own_root = (task.parent_task_id is None) or cross_agent
     # raw 所在层恒为本 task 的 task scope（≠ 嵌套 finish 对的 parent scope）
