@@ -312,6 +312,9 @@ class SessionRegistry:
         if unfinished:
             raise UnfinishedTasksError(session_id, unfinished)
 
+        # Terminal facts can precede dispatch exit. Join old tails before binding a new Session.
+        await task_manager.wait_for_terminal_dispatches()
+
         session = Session(
             id=session_id,
             user_prompt=user_prompt,
@@ -335,6 +338,7 @@ class SessionRegistry:
             "llm_model": llm_model or "",
             "llm_account": llm_account or "",
         })
+        task_manager.reset_for_new_round()
         self.register_session(session_id, tenant_id=tenant_id)
 
         return session, root_task, task_manager

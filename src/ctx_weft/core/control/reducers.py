@@ -1046,8 +1046,8 @@ def _apply(view: RunStateView, ev: Event) -> None:
     elif t == EventType.SESSION_RESUMED:
         sess = view.sessions.get(ev.session_id)
         if sess is not None:
-            # 续跑开新一轮 → 清闩。与内存侧同形：`resume_session` 造的是全新 Session
-            # 与全新 TaskManager（`_threshold_tripped` 回到 False），新一轮的失败照常计。
+            # Match the reused TaskManager.reset_for_new_round at the new round boundary.
+            sess.failure_counter = 0
             sess.threshold_tripped = False
             sess.threshold_root_task_ids = []
             sess.threshold_cancel_task_ids = []

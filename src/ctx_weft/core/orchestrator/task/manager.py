@@ -190,6 +190,27 @@ class TaskManager:
         """注入 Session 对象，供 failure_counter 维护使用。"""
         self._session = session
 
+    async def wait_for_terminal_dispatches(self) -> None:
+        """Await terminal dispatch tails before binding the next round's Session."""
+        current = asyncio.current_task()
+        executions = [job for tid, job in self._dispatch_tasks.items()
+                      if job is not current and not job.done()
+                      and self._tasks[tid].status in TERMINAL_TASK_STATUSES]
+        for execution in executions:
+            await asyncio.shield(execution)
+
+    def reset_for_new_round(self) -> None:
+        """Reset after a new SessionResumed commits; recovering old work keeps its state."""
+        self._cancelled = False
+        self._pause_abandon = False
+        self._recovery_pending = False
+        self._threshold_tripped = False
+        self._pending_threshold_roots.clear()
+        self._threshold_commit = None
+        self._recent_failures.clear()
+        if self._session is not None:
+            self._session.failure_counter = 0
+
     @property
     def session(self) -> "Session | None":
         """注入的 Session 对象（复用路径据它读/写本轮 llm 参数——model=会话状态）。"""

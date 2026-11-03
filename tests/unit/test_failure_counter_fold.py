@@ -233,12 +233,8 @@ def test_latch_holds_for_late_inflight_failures() -> None:
     assert view.sessions["s1"].failure_counter == 1
 
 
-def test_session_resumed_clears_the_latch() -> None:
-    """续跑开新一轮：闩位清掉，新一轮的失败照常计数。
-
-    与内存侧同形——resume_session 造的是全新 Session（failure_counter=0）
-    和全新 TaskManager（_threshold_tripped=False）。
-    """
+def test_session_resumed_clears_the_latch_and_counter() -> None:
+    """重开清掉旧轮闩位和计数；新轮的第一次失败从 1 开始。"""
     events = [
         _session_created(),
         _task_created(2, task_id="tsk_1"),
@@ -253,7 +249,28 @@ def test_session_resumed_clears_the_latch() -> None:
     ]
     view = reduce_events(events, run_id="run_1")
     assert view.sessions["s1"].threshold_tripped is False
-    assert view.sessions["s1"].failure_counter == 2
+    assert view.sessions["s1"].failure_counter == 1
+
+
+def test_session_resumed_resets_counter_across_snapshot_without_a_trip() -> None:
+    """旧轮未熔断的失败也不能带入新轮。快照恢复与全量重放保持一致。"""
+    events = [
+        _session_created(),
+        _task_created(2),
+        _task_started(3),
+        _task_failed(4),
+    ]
+    previous = reduce_events(events, run_id="run_1")
+    restored = deserialize_view(serialize_view(previous))
+    reopened = apply_events([_session_resumed(5)], restored)
+    assert reopened.sessions["s1"].failure_counter == 0
+
+    delta = [_task_created(6, task_id="tsk_new"),
+             _task_started(7, task_id="tsk_new"),
+             _task_failed(8, task_id="tsk_new")]
+    resumed = apply_events(delta, reopened)
+    full = reduce_events([*events, _session_resumed(5), *delta], run_id="run_1")
+    assert resumed.sessions["s1"].failure_counter == full.sessions["s1"].failure_counter == 1
 
 
 def test_snapshot_roundtrip_preserves_the_latch() -> None:
