@@ -52,7 +52,7 @@ from ctx_weft.protocols import (
     ToolCall,
     load_records,
 )
-from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import (
     HITL_FORM_WAIT,
     PREFACE_AFTER_INTERRUPT,
@@ -75,6 +75,15 @@ class TurnRecord:
     tool_calls: list[ToolCall] = dataclasses.field(default_factory=list)
     tool_results: list[Any] = dataclasses.field(default_factory=list)
     usage: LLMUsage = dataclasses.field(default_factory=LLMUsage)
+
+
+@dataclass
+class PendingActTurn:
+    """A persisted, accounted LLM turn whose tools await foreground compaction."""
+
+    record: TurnRecord
+    assistant_record_id: str
+    context_limit_hit: bool
 
 
 class ActStep(Step):
@@ -107,48 +116,67 @@ class ActStep(Step):
         # prompt 基线）。None=本轮无循环内真实基线（首轮）→ request_prompt_estimate 走整份估算。
         baseline_msg_count: int | None = None
 
-        for turn_num in range(turns_used + 1, max_turns + 1):
-            state.extra[ACT_TURNS_USED_KEY] = turn_num
-            await _interrupt_checkpoint(state, ctx)
-            await ctx.event_bus.emit(make_event(
-                state, EventType.ACT_TURN_STARTED, payload={"turn": turn_num}))
+        pending = getattr(state, "pending_act_turn", None)
+        while pending is not None or turns_used < max_turns:
+            if pending is not None:
+                await _interrupt_checkpoint(state, ctx)
+                turn_record = pending.record
+                turn_num = turn_record.turn
+                context_limit_hit = pending.context_limit_hit
+                state.extra["assistant_record_id"] = pending.assistant_record_id
+            else:
+                turn_num = turns_used + 1
+                turns_used = turn_num
+                state.extra[ACT_TURNS_USED_KEY] = turn_num
+                await _interrupt_checkpoint(state, ctx)
+                await ctx.event_bus.emit(make_event(
+                    state, EventType.ACT_TURN_STARTED, payload={"turn": turn_num}))
 
-            # 1) 单轮 LLM：流式累积文本 / reasoning / tool_calls / usage（软打断在内部 park）
-            turn = await _run_llm_turn(state, ctx, inputs, appended_messages, turn_num, baseline_msg_count)
+                # 1) 单轮 LLM：流式累积文本 / reasoning / tool_calls / usage（软打断在内部 park）
+                turn = await _run_llm_turn(state, ctx, inputs, appended_messages, turn_num, baseline_msg_count)
 
-            # 2) token 记账 + context_limit 判定
-            context_limit_hit = await _account_tokens(state, ctx, turn.usage)
-            # 仅当本轮真实刷新了 context_tokens（usage>0）才前移基线；否则保持旧值/None，
-            # 让下一轮退回整份估算（更保守），避免基线与陈旧 context_tokens 错配。
-            if turn.usage.prompt_tokens > 0:
-                baseline_msg_count = len(turn.messages_sent)
+                # 2) token 记账 + context_limit 判定
+                context_limit_hit = await _account_tokens(state, ctx, turn.usage)
+                # 仅当本轮真实刷新了 context_tokens（usage>0）才前移基线；否则保持旧值/None，
+                # 让下一轮退回整份估算（更保守），避免基线与陈旧 context_tokens 错配。
+                if turn.usage.prompt_tokens > 0:
+                    baseline_msg_count = len(turn.messages_sent)
 
-            # 3) assistant 回合落 memory + 接回 message 历史 + 记 transcript
-            persisted_turn = await _ingest_assistant_turn(
-                state, ctx, turn.text, turn.tool_calls, turn.usage, turn_num,
-                anchor=turn.anchor, minted=turn.minted)
-            asst_tool_dicts = persisted_turn.tool_calls
-            state.extra["assistant_record_id"] = persisted_turn.record_id
-            appended_messages.append(LLMMessage(
-                role="assistant", content=turn.text, tool_calls=asst_tool_dicts,
-                reasoning_content=turn.reasoning or None, provider_state=turn.provider_state,
-                memory_id=persisted_turn.record_id))
-            turn_record = TurnRecord(
-                turn=turn_num, messages_sent=[*turn.messages_sent, appended_messages[-1]],
-                assistant_text=turn.text, tool_calls=turn.tool_calls, usage=turn.usage)
+                # 3) assistant 回合落 memory + 接回 message 历史 + 记 transcript
+                persisted_turn = await _ingest_assistant_turn(
+                    state, ctx, turn.text, turn.tool_calls, turn.usage, turn_num,
+                    anchor=turn.anchor, minted=turn.minted)
+                asst_tool_dicts = persisted_turn.tool_calls
+                state.extra["assistant_record_id"] = persisted_turn.record_id
+                appended_messages.append(LLMMessage(
+                    role="assistant", content=turn.text, tool_calls=asst_tool_dicts,
+                    reasoning_content=turn.reasoning or None, provider_state=turn.provider_state,
+                    memory_id=persisted_turn.record_id))
+                turn_record = TurnRecord(
+                    turn=turn_num, messages_sent=[*turn.messages_sent, appended_messages[-1]],
+                    assistant_text=turn.text, tool_calls=turn.tool_calls, usage=turn.usage)
 
-            # 4) 纯文本（无 tool call）：interactive 让位用户 / 否则即任务产出 → observe
-            #
-            # **这一支刻意排在 context_limit 之前**（改造前相反）：纯文本就是本 run 的收尾，
-            # 模型已经把答复交出来了，此刻压缩没有任何收益——而让 context_limit 抢先的代价是
-            # 把一次正常收尾误报成机械退出，经 observe 强制改判 retry、白吃一次重试预算。
-            if not turn.tool_calls:
-                transcript.append(turn_record)
-                await _finish_plain_text_turn(state, ctx, turn_num, transcript)
-                break
+                # 4) 纯文本（无 tool call）：interactive 让位用户 / 否则即任务产出 → observe
+                #
+                # **这一支刻意排在 context_limit 之前**（改造前相反）：纯文本就是本 run 的收尾，
+                # 模型已经把答复交出来了，此刻压缩没有任何收益——而让 context_limit 抢先的代价是
+                # 把一次正常收尾误报成机械退出，经 observe 强制改判 retry、白吃一次重试预算。
+                if not turn.tool_calls:
+                    transcript.append(turn_record)
+                    await _finish_plain_text_turn(state, ctx, turn_num, transcript)
+                    break
 
-            # 5) 派发前压缩（含派发调用且越阈值时；在 dispatch 执行 / 子 spawn-inherit 之前）
-            await _maybe_predispatch_compact(state, ctx, turn.tool_calls, turn.usage)
+                compact_options = _predispatch_compact_options(state, turn.tool_calls, turn.usage)
+                if compact_options is not None:
+                    await commit_round(state, ctx)
+                    return StepOutcome(
+                        next_step="compact", next_step_options=compact_options,
+                        state_patch={
+                            "transcript": transcript, "prompt_inputs": None,
+                            "pending_act_turn": PendingActTurn(
+                                turn_record, persisted_turn.record_id, context_limit_hit),
+                        },
+                    )
 
             # 6) 执行 tool calls（同批次延后退出信号，保证 tool_call ↔ result 一一对应）
             #
@@ -164,11 +192,13 @@ class ActStep(Step):
             # ③ 执行完可能进一步超出窗口，但这是安全的：装配预算层把 assistant(tool_calls)
             #    与其 tool 结果聚成同生共死单元再整单元丢弃（`budget._coalesce_tool_pairs`），
             #    永不产孤儿；且紧接着就是 compact，折的正是这批新料。
-            tool_results = await _execute_tool_calls(state, ctx, turn.tool_calls)
+            tool_results = await _execute_tool_calls(state, ctx, turn_record.tool_calls)
             for tr in tool_results:
                 appended_messages.append(LLMMessage(
                     role="tool", content=tr["result"], tool_call_id=tr["tool_call_id"],
                     memory_id=tr.get("memory_id")))
+            state.pending_act_turn = None
+            pending = None
             turn_record.tool_results = tool_results
             transcript.append(turn_record)
             await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
@@ -179,6 +209,9 @@ class ActStep(Step):
             # 7) actor 收尾 —— 同样**优先于** context_limit：任务已经做完了，没有可续的跑。
             if state.task.switch_requested:
                 exit_reason = "task_switch"
+                break
+            if state.task.suspend_requested:
+                exit_reason = "suspended"
                 break
             if state.task.actor_done:
                 exit_reason = "actor_done"
@@ -194,7 +227,7 @@ class ActStep(Step):
                 exit_reason = "context_limit"
                 logger.warning(
                     "ActStep context_limit_hit: prompt_tokens=%d >= %.2f * eff(limit=%d) "
-                    "for agent %s", turn.usage.prompt_tokens,
+                    "for agent %s", turn_record.usage.prompt_tokens,
                     getattr(agent.loop_config, "context_limit_stop_ratio", 0.8),
                     state.resolved_model.context_limit, agent.id)
                 break
@@ -219,22 +252,11 @@ class ActStep(Step):
                 "observe", state, ctx, options={"boundary": "task_switch"})
             return StepOutcome(None, state_patch={
                 "transcript": transcript, "act_exit_reason": exit_reason,
+                "pending_act_turn": None,
                 "run_outcome": RunOutcome(kind=RunOutcomeKind.TASK_SWITCHED),
             })
 
-        # 路由优先级：suspend > 上下文恢复 > observe。
-        #
-        # - suspend 最先：suspend_requested 表示 actor 本轮派了活、本 run 要停在等子任务 →
-        #   SuspendStep（判据从 `task.status == "SUSPENDED"` 换成意图位：状态归 TaskManager，
-        #   Task 4）。越线也不例外——父的上下文由 `_maybe_predispatch_compact` 那条路负责，
-        #   而这个 run 本来就要停了，没有「续跑」可言。
-        # - 恢复次之：越线但还救得回来 → 回 PrepareStep。为什么是 prepare 而不是已注册的
-        #   "compact" 步：① `CompactStep.execute` 返回 next_step=None，会直接终结 driver 的
-        #   循环（既无 observe 也无 finalize，run_outcome 是 None）；② `escalating_compact`
-        #   **从不回写** loop_guard.context_tokens（est 是局部量），所以 compact → prepare
-        #   会让 prepare 用压缩前的陈旧基线再开一次门、白跑第二次压缩；③ prepare 顺带做了
-        #   续跑必须做的两件事——resolve_and_bind 重解能力面 + `_assemble()` 重建
-        #   prompt_inputs，供 gateway 编译恢复后的基础消息。
+        # Delegation parks first; recover context through Prepare, otherwise review.
         if state.task.suspend_requested:
             next_step = "suspend"
         elif exit_reason == "context_limit" and _can_recover_context(state):
@@ -251,9 +273,12 @@ class ActStep(Step):
 
         return StepOutcome(
             next_step=next_step,
+            next_step_options=({"boundary": exit_reason, "judge_task": True}
+                               if next_step == "observe" else {}),
             state_patch={
                 "transcript": transcript,
                 "act_exit_reason": exit_reason,
+                "pending_act_turn": None,
             },
         )
 
@@ -601,35 +626,21 @@ async def _ingest_assistant_turn(
     return PersistedAssistantTurn(record_id=record_id or "", tool_calls=asst_tool_dicts)
 
 
-async def _maybe_predispatch_compact(
-    state: LoopState, ctx: LoopContext, tool_calls: list[ToolCall], usage: LLMUsage,
-) -> None:
-    """本轮含派发调用且越过 predispatch 阈值 → 派发执行前先走一遍 compact（同 CompactStep）。
-
-    在 gateway 写 delegate conversation turn / 子 spawn-inherit 之前完成，使子继承到压缩后的记忆；每轮至多一次。
-    随后 dispatch 执行（父转 SUSPENDED）→ 本 Act 末尾路由到 SuspendStep。usage.prompt_tokens 是本轮真实计数。
-
-    task-4 复审修复：driver 只在**步骤边界**切换 state.origin，此刻仍是 Act 步骤执行期间、
-    origin 还是 LOOP_ACT——但接下来经 maybe_compact_before_dispatch → escalating_compact →
-    summarize_for_compact 发起的这次 LLM 调用实际是 compact 摘要，不是 act 的一次 LLM turn。
-    不临时切换的话，llm_gateway.stream_llm_resilient 的 origin 门禁会把它错当成 act 调用发出
-    LLM_REQUEST_STARTED/LLM_PROMPT_SENT（turn 还取不到值恒为 0），escalating_compact 内部
-    make_event(state, ...) 发的 MEMORY_COMPACT_* 也会被错标成 LOOP_ACT。这里临时切到
-    LOOP_COMPACT、调用结束（含异常路径）后用 finally 还原，使这次调用的所有事件来源标注
-    正确，也走上 summarize_for_compact 里新补的收尾事件。
-    """
+def _predispatch_compact_options(
+    state: LoopState, tool_calls: list[ToolCall], usage: LLMUsage,
+) -> dict[str, Any] | None:
+    """Decide the next step without running compaction or invoking tools."""
     from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS
     if not any(tc.name in DISPATCH_TOOLS for tc in tool_calls):
-        return
-    from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
-    prev_origin = state.origin
-    state.origin = EventOrigin.LOOP_COMPACT
-    try:
-        events = await maybe_compact_before_dispatch(state, ctx, prompt_tokens=usage.prompt_tokens)
-    finally:
-        state.origin = prev_origin
-    for ev in events:
-        await ctx.event_bus.emit(ev)
+        return None
+    ratio = getattr(state.agent.loop_config, "predispatch_compact_token_ratio", 0.0)
+    tokens = usage.prompt_tokens or state.agent.loop_guard.context_tokens
+    limit = state.resolved_model.effective_input_limit
+    if ratio <= 0 or limit <= 0 or tokens <= 0 or tokens / limit < ratio:
+        return None
+    return {"trigger": "pre_dispatch", "token_estimate": tokens,
+            "force": False, "after": "prepare"}
+
 
 
 async def _execute_tool_calls(

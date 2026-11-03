@@ -12,7 +12,8 @@ import pytest
 from ctx_weft.core.assembler import ContextAssembler, ContextRequest
 from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-from ctx_weft.core.loop.driver import LoopContext, LoopState, make_event
+from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
+from ctx_weft.core.loop.steps.compact import CompactStep
 from ctx_weft.core.loop.llm_gateway import build_llm_request
 from ctx_weft.core.loop.steps.prepare import PrepareStep, _estimate_assembled_tokens
 from ctx_weft.core.models.agent import Agent, LoopGuard
@@ -74,6 +75,11 @@ async def test_compact_estimates_history_that_sending_would_discard(monkeypatch,
 
     outcome = await PrepareStep().execute(state, ctx)
 
+    assert outcome.next_step == "compact"
+    assert outcome.next_step_options["token_estimate"] > threshold
+    driver = StepDriver({"prepare": PrepareStep(), "compact": CompactStep()})
+    state, folded = await driver._execute_foreground("compact", state, ctx, options=outcome.next_step_options)
+    state, outcome = await driver._execute_foreground("prepare", state, ctx, options=folded.next_step_options)
     compact.assert_awaited_once()
     assert compact.await_args.kwargs["token_estimate"] > threshold
     inputs = outcome.state_patch["prompt_inputs"]
@@ -94,7 +100,7 @@ async def test_compact_estimates_history_that_sending_would_discard(monkeypatch,
 async def test_required_overflow_can_be_compacted_before_sending(monkeypatch):
     state, ctx = await harness(current_is_large=True)
 
-    async def compact(state, ctx, *, token_estimate, trigger):
+    async def compact(state, ctx, *, token_estimate, trigger, **kwargs):
         assert token_estimate > state.resolved_model.context_limit
         await ctx.memory.fold(["current", "previous"], [MemoryEvent(
             id="summary", kind=MemoryKind.SUMMARY, scope=MemoryScope.TASK, address=state.scope,
@@ -109,6 +115,10 @@ async def test_required_overflow_can_be_compacted_before_sending(monkeypatch):
 
     outcome = await PrepareStep().execute(state, ctx)
 
+    assert outcome.next_step == "compact"
+    driver = StepDriver({"prepare": PrepareStep(), "compact": CompactStep()})
+    state, folded = await driver._execute_foreground("compact", state, ctx, options=outcome.next_step_options)
+    state, outcome = await driver._execute_foreground("prepare", state, ctx, options=folded.next_step_options)
     compact_mock.assert_awaited_once()
     request = await build_llm_request(ctx, state, outcome.state_patch["prompt_inputs"])
     assert "COMPACTED summary" in str(request.messages)

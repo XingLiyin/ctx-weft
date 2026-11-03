@@ -1,4 +1,4 @@
-"""CompactStep：长对话压缩，由 PrepareStep 内联直调（不再以 task 形式调度）。
+"""CompactStep：由 StepDriver 调度的前台记忆压缩步骤。
 
   - 作用域 = 当前 state.scope（当前 task + agent）。
   - escalating_compact：预算驱动的 L0.5→L1→L2→L3 升级编排（替旧的双阈值并行折 _compact_scope）。
@@ -29,7 +29,7 @@ from typing import Any
 
 from ctx_weft.core.assembler import CompactIntent, ContextRequest
 from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
+from ctx_weft.core.loop.driver import COMPACT_NOOP_KEY, LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.llm_gateway import (
     build_llm_request,
     llm_request_id,
@@ -154,8 +154,8 @@ async def summarize_for_compact(
     materialize() 出来的 Agent 就是空 runtime），这行代码因此在那条路径下恒回落
     ``"mock"``。改用同子系统其余调用方（act.py 等）已经在用的 ``resolve_llm_identity``
     ——真值来自 ``state.resolved_model``，是派发时 ``AgentLifecycleManager.resolve_model`` 解出的
-    那一个，compact 的三条调用路径（inline PrepareStep 触发 / ``_maybe_predispatch_compact``
-    / 独立的 ``compact_agent``）用的都是已经带 ``resolved_model`` 的 ``LoopState``（前两者
+    那一个，compact 的三条入口（PrepareStep / ActStep 派发前触发
+    / ``compact_agent``，均由 driver 执行 CompactStep）用的都是已经带 ``resolved_model`` 的 ``LoopState``（前两者
     共享 ``_execute_task`` 构造的那份，同一份 state 上 act.py 的 ``resolve_llm_identity``
     早就在成功调用；后者是 ``runtime.py::compact_agent`` 显式 ``resolved_model=rm`` 构造
     的孤儿 run），故不额外加 try/except 兜底——真出现 None 就该炸，不吞。
@@ -193,6 +193,7 @@ async def summarize_for_compact(
     正确发送）。
     """
     agent = state.agent
+    pending = getattr(state, "pending_act_turn", None)
     request = ContextRequest(
         purpose="compact",
         scope=state.scope,
@@ -203,7 +204,8 @@ async def summarize_for_compact(
         template=state.extra.get("template"),
         bound_capabilities=state.extra.get("bound_capabilities", []),
         token_counter=ctx.llm.tokenizer.count,
-        extra={"compact_scope": scope},
+        extra={"compact_scope": scope,
+               "exclude_memory_ids": [pending.assistant_record_id] if pending else []},
         intent=CompactIntent(scope="agent" if scope == "agent" else "task"),
     )
     inputs = await ctx.assembler.assemble(request)
@@ -260,7 +262,10 @@ def _rendered_only(recs: list) -> list:
     return [r for r in recs if getattr(r, "kind", None) is not MemoryKind.TOOL_AUDIT]
 
 
-def _split_for_collapse(recs: list, keep_last: int) -> tuple[list, list]:
+def _split_for_collapse(
+    recs: list, keep_last: int, *, protected_call_ids: set[str] | None = None,
+    protected_record_ids: set[str] | None = None,
+) -> tuple[list, list]:
     """把 task 层视图切成 (折区, 保留区)：保留**至少** keep_last 条会被渲染的记录，并对齐回合边界。
 
     两条规则，缺一条都会让保留区在模型眼里变空：
@@ -274,17 +279,25 @@ def _split_for_collapse(recs: list, keep_last: int) -> tuple[list, list]:
     按 tool_call_id 找归属而不是「往前跳过连续的 tool 记录」：工具结果与 assistant 之间可能
     夹着别的记录（审计、异步回填），只看相邻关系会漏。
     """
-    if keep_last <= 0:
-        return list(recs), []
     cut, seen = len(recs), 0
-    for i in range(len(recs) - 1, -1, -1):
-        if getattr(recs[i], "kind", None) is MemoryKind.TOOL_AUDIT:
-            continue
-        seen, cut = seen + 1, i
-        if seen >= keep_last:
-            break
-    if seen < keep_last:
-        return [], list(recs)
+    if keep_last > 0:
+        for i in range(len(recs) - 1, -1, -1):
+            if getattr(recs[i], "kind", None) is MemoryKind.TOOL_AUDIT:
+                continue
+            seen, cut = seen + 1, i
+            if seen >= keep_last:
+                break
+        if seen < keep_last:
+            return [], list(recs)
+    # An Act turn may be waiting for tools across compact -> prepare -> act.
+    # Protect by call identity: media demotion can replace the record's ID.
+    if protected_call_ids or protected_record_ids:
+        protected_call_ids = protected_call_ids or set()
+        protected_record_ids = protected_record_ids or set()
+        cut = min([cut, *(i for i, r in enumerate(recs)
+            if r.id in protected_record_ids or any(
+                tc.get("id") in protected_call_ids
+                for tc in r.metadata.get("tool_calls", [])))])
     while True:
         kept_call_ids = {r.metadata.get("tool_call_id") for r in recs[cut:]
                          if r.role == "tool" and r.metadata.get("tool_call_id")}
@@ -334,9 +347,13 @@ async def collapse_task_layer(
     才求值——无可折之物时不花那次 LLM，且摘要输入里不会有即将被降级的真图（同 L1 的顺序）。
     """
     memory = ctx.memory
+    pending = getattr(state, "pending_act_turn", None)
+    protected_call_ids = {tc.id for tc in pending.record.tool_calls} if pending else set()
+    protected_record_ids = {pending.assistant_record_id} if pending else set()
     recs = await load_records(memory,
         state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
-    fold, kept = _split_for_collapse(recs, keep_last)
+    fold, kept = _split_for_collapse(recs, keep_last, protected_call_ids=protected_call_ids,
+                                    protected_record_ids=protected_record_ids)
     if not _worth_collapsing(fold):
         return 0
 
@@ -354,7 +371,8 @@ async def collapse_task_layer(
         # 真图，照旧被拍扁，本段的目的完全落空。
         recs = await load_records(memory,
             state.scope, MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
-        fold, kept = _split_for_collapse(recs, keep_last)
+        fold, kept = _split_for_collapse(recs, keep_last, protected_call_ids=protected_call_ids,
+                                        protected_record_ids=protected_record_ids)
         if not _worth_collapsing(fold):
             return 0
 
@@ -396,29 +414,6 @@ async def collapse_task_layer(
         ),
     ], ctx.provider_ctx)
     return len(ids)
-
-
-async def maybe_compact_before_dispatch(
-    state: LoopState, ctx: LoopContext, *, prompt_tokens: int
-) -> list[Any]:
-    """派发执行前的按需压缩：本轮 prompt token 越过 predispatch_compact_token_ratio 时，
-    对父 scope 跑一次完整压缩（task 层 fold_task + agent 层 fold_root + 回收 finished 短 task，
-    共享单次 summary），使父 resume 更精简、inherit 快照为压缩后版本。
-
-    与 PrepareStep 的 compact 同构（复用 escalating_compact），区别只在触发条件：这里由独立的
-    predispatch token 阈值门控，且仅在本轮含派发调用时由 ActStep 调用。门控不满足返回空列表。
-    """
-    agent = state.agent
-    ratio = getattr(agent.loop_config, "predispatch_compact_token_ratio", 0.0)
-    if ratio <= 0:
-        return []
-    eff = state.resolved_model.effective_input_limit
-    tokens = prompt_tokens or agent.loop_guard.context_tokens
-    if eff <= 0 or tokens <= 0:
-        return []
-    if tokens / eff < ratio:
-        return []
-    return await escalating_compact(state, ctx, token_estimate=tokens, trigger="pre_dispatch")
 
 
 def _dispatch_finish_sets(recs) -> tuple[set, set]:
@@ -923,14 +918,28 @@ async def escalating_compact(
 
 
 class CompactStep(Step):
-    """Standalone compaction over state.scope. Invoked inline by PrepareStep."""
+    """Foreground compaction with an explicit continuation supplied by the caller."""
 
     name = "compact"
 
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
+        options = getattr(getattr(ctx, "execution", None), "options", {})
+        after = options.get("after")
+        if after not in (None, "prepare"):
+            raise ValueError(f"Unsupported compact continuation: {after!r}")
+        guard = state.agent.loop_guard
+        token_estimate = options.get("token_estimate", guard.context_tokens)
+        # The request has captured the old estimate. Any level may mutate memory,
+        # including before a later level fails; invalidate its incremental baseline.
+        guard.context_tokens = 0
+        guard.context_message_count = 0
+        events = await escalating_compact(
+            state, ctx, token_estimate=token_estimate,
+            trigger=options.get("trigger", "compact"), force=options.get("force", False))
+        state.extra[COMPACT_NOOP_KEY] = not any(
+            ev.type == EventType.MEMORY_COMPACTED for ev in events)
         return StepOutcome(
-            next_step=None,
-            events=await escalating_compact(
-                state, ctx, token_estimate=state.agent.loop_guard.context_tokens,
-                trigger="compact", force=state.extra.get("force_compact", False)),
+            next_step=after,
+            next_step_options={"after_compact": True} if after == "prepare" else {},
+            state_patch={"prompt_inputs": None}, events=events,
         )

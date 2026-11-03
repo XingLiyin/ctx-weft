@@ -3150,7 +3150,7 @@ class CtxWeftRuntime:
         compact was always an agent-grained operation — hanging it off the session
         had it backwards). An unregistered ``agent_id`` raises ``AgentNotFound``.
 
-        Calls ``CompactStep.execute`` directly (no step driver) but does emit a
+        Executes a foreground CompactStep through the step driver and emits a
         matching RunStarted/RunFinished pair around it (总账 C5: an orphan run_id
         with no start/finish confused hosts) — the session's projection status is
         still untouched, since RunStarted/RunFinished are reducer no-ops just like
@@ -3170,7 +3170,6 @@ class CtxWeftRuntime:
         from ctx_weft.core.control.converters import session_from_projection
         from ctx_weft.core.control.reducers import rebuild_view
         from ctx_weft.core.models.errors import SessionBusyError
-        from ctx_weft.core.loop.steps.compact import CompactStep
         from ctx_weft.core.models.task import NormalTaskSettings, Task
         from ctx_weft.protocols import MemoryAddress, ProviderContext
 
@@ -3257,13 +3256,8 @@ class CtxWeftRuntime:
                 task=task,
                 agent=agent,
                 scope=scope,
-                extra={"template": template, "force_compact": True},
+                extra={"template": template},
                 resolved_model=rm,
-                # 孤儿 run：不走 StepDriver.run，构造时显式钉住 origin——下面两条
-                # RUN_STARTED/RUN_FINISHED 已各自显式覆盖为 RUNTIME，这里补的是
-                # CompactStep.execute 内部经 make_event(state, ...) 发的其余事件
-                # （如 MEMORY_COMPACT_* 一类），不补则它们的 origin 是空串。
-                origin=EventOrigin.LOOP_COMPACT,
             )
             # 总账 C5：这段独立跑了一个 run_id 却从不发起止——host 会看到凭空出现又
             # 凭空消失的 run。补齐起止事件（payload 结构照抄 `_run_loop` 的实际发射点，
@@ -3277,9 +3271,11 @@ class CtxWeftRuntime:
             run_error: Exception | None = None
             was_cancelled = False
             try:
-                outcome = await CompactStep().execute(state, loop_ctx)
-                for ev in outcome.events:
-                    await self._event_bus.emit(ev)
+                state, outcome = await loop_ctx.steps._execute_foreground(
+                    "compact", state, loop_ctx, options={
+                        "trigger": "manual", "token_estimate": agent.loop_guard.context_tokens,
+                        "force": True, "after": None,
+                    })
             except asyncio.CancelledError:
                 # F2：CancelledError 不是 Exception 子类，下面的 except Exception 接不住
                 # ——接不住则 run_error 仍是 None，RunFinished 会谎报 completed。记下来，

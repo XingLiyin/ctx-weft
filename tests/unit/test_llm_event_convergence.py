@@ -285,7 +285,7 @@ async def test_gateway_emits_stream_events_for_compact_origin_and_pairs_with_res
     assert finished[0].payload["finish_reason"] == "stop"
 
 
-async def _prepare_inline_compact(monkeypatch, *, llm=None):
+async def _prepare_compact_transition(monkeypatch, *, llm=None):
     from ctx_weft.core.loop.steps.prepare import PrepareStep
     from ctx_weft.protocols import MemoryEvent, MemoryKind, MemoryScope
 
@@ -313,15 +313,20 @@ async def _prepare_inline_compact(monkeypatch, *, llm=None):
 
     monkeypatch.setattr(PrepareStep, "_estimate_tokens", estimate)
     monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.resolve_and_bind", capabilities)
-    return state, ctx, bus, StepDriver({"prepare": PrepareStep()})
+    from ctx_weft.core.loop.steps.compact import CompactStep
+    return state, ctx, bus, StepDriver({"prepare": PrepareStep(), "compact": CompactStep()})
 
 
 @pytest.mark.asyncio
-async def test_prepare_inline_compact_pairs_llm_events_and_continues_to_act(monkeypatch):
+async def test_prepare_compact_transition_pairs_llm_events_and_continues_to_act(monkeypatch):
     from ctx_weft.protocols import MemoryScope, load_records
 
-    state, ctx, bus, driver = await _prepare_inline_compact(monkeypatch)
-    outcome = await driver.execute("prepare", state, ctx)
+    state, ctx, bus, driver = await _prepare_compact_transition(monkeypatch)
+    state, first = await driver._execute_foreground("prepare", state, ctx)
+    assert first.next_step == "compact"
+    state, folded = await driver._execute_foreground("compact", state, ctx, options=first.next_step_options)
+    assert folded.next_step == "prepare"
+    state, outcome = await driver._execute_foreground("prepare", state, ctx, options=folded.next_step_options)
 
     llm_events = [e for e in bus.events if e.type in _MOVED_TYPES | {EventType.LLM_RESPONSE_FINISHED}]
     assert [e.type for e in llm_events].count(EventType.LLM_REQUEST_STARTED) == 1
@@ -343,16 +348,17 @@ async def test_prepare_inline_compact_pairs_llm_events_and_continues_to_act(monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_type", [RuntimeError, LLMOutageError, asyncio.CancelledError])
-async def test_prepare_inline_compact_restores_origin_on_failure_or_cancel(monkeypatch, error_type):
+async def test_prepare_compact_transition_restores_origin_on_failure_or_cancel(monkeypatch, error_type):
     class FailingLLM(_FakeLLM):
         async def complete(self, request, stream=True):
             raise error_type("compact request stopped")
             yield  # pragma: no cover
 
-    state, ctx, bus, driver = await _prepare_inline_compact(monkeypatch, llm=FailingLLM())
+    state, ctx, bus, driver = await _prepare_compact_transition(monkeypatch, llm=FailingLLM())
+    state, first = await driver._execute_foreground("prepare", state, ctx)
     with pytest.raises(error_type, match="compact request stopped"):
-        await driver.execute("prepare", state, ctx)
-    assert state.origin == EventOrigin.LOOP_PREPARE
+        await driver.execute("compact", state, ctx, options=first.next_step_options)
+    assert state.origin == EventOrigin.LOOP_COMPACT
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
     assert len(started) == 1 and started[0].origin == EventOrigin.LOOP_COMPACT
     assert not any(e.type == EventType.PREPARE_COMPLETED for e in bus.events)
@@ -445,52 +451,16 @@ async def test_compact_stays_silent_on_response_finished_under_wrong_origin():
     )
 
 
-@pytest.mark.asyncio
-async def test_predispatch_compact_swaps_origin_to_compact_and_restores_on_success(monkeypatch):
-    from ctx_weft.core.loop import capability_gateway as _cap_mod
-    from ctx_weft.core.loop.steps import compact as _compact_mod
-    from ctx_weft.core.loop.steps.act import _maybe_predispatch_compact
-
-    dispatch_tool_name = next(iter(_cap_mod.DISPATCH_TOOLS))
-    tool_calls = [SimpleNamespace(name=dispatch_tool_name, id="tc1", arguments={})]
-    seen_origin = {}
-
-    async def _fake_maybe_compact(state, ctx, *, prompt_tokens):
-        seen_origin["value"] = state.origin
-        return []
-
-    monkeypatch.setattr(_compact_mod, "maybe_compact_before_dispatch", _fake_maybe_compact)
-    bus = _RecordingBus()
-    state = _make_state()  # origin=LOOP_ACT，同 _run_llm_turn 测试用的那份夹具
-    ctx = _make_ctx(bus)
-
-    await _maybe_predispatch_compact(state, ctx, tool_calls, LLMUsage(prompt_tokens=1))
-
-    assert seen_origin["value"] == EventOrigin.LOOP_COMPACT
-    assert state.origin == EventOrigin.LOOP_ACT  # 调用结束后已还原
-
-
-@pytest.mark.asyncio
-async def test_predispatch_compact_restores_origin_even_on_exception(monkeypatch):
-    from ctx_weft.core.loop import capability_gateway as _cap_mod
-    from ctx_weft.core.loop.steps import compact as _compact_mod
-    from ctx_weft.core.loop.steps.act import _maybe_predispatch_compact
-
-    dispatch_tool_name = next(iter(_cap_mod.DISPATCH_TOOLS))
-    tool_calls = [SimpleNamespace(name=dispatch_tool_name, id="tc1", arguments={})]
-
-    async def _boom(state, ctx, *, prompt_tokens):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(_compact_mod, "maybe_compact_before_dispatch", _boom)
-    bus = _RecordingBus()
+def test_predispatch_only_decides_transition_without_changing_origin():
+    from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS
+    from ctx_weft.core.loop.steps.act import _predispatch_compact_options
     state = _make_state()
-    ctx = _make_ctx(bus)
-
-    with pytest.raises(RuntimeError, match="boom"):
-        await _maybe_predispatch_compact(state, ctx, tool_calls, LLMUsage(prompt_tokens=1))
-
-    assert state.origin == EventOrigin.LOOP_ACT  # finally 里还原，异常路径也不例外
+    state.agent.loop_config.predispatch_compact_token_ratio = 0.5
+    calls = [SimpleNamespace(name=next(iter(DISPATCH_TOOLS)))]
+    options = _predispatch_compact_options(state, calls, LLMUsage(prompt_tokens=60_000))
+    assert options == {"trigger": "pre_dispatch", "token_estimate": 60_000,
+                       "force": False, "after": "prepare"}
+    assert state.origin == EventOrigin.LOOP_ACT
 
 
 # ── Task 5：删除 ReactEventTypes 间接层，observe/background_observe 靠 origin 收敛 ──

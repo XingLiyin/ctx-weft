@@ -80,7 +80,7 @@ memory；首字前撤销仍丢弃整批，并恢复原气泡。
         │            LLMClient         ──▶ 流式 chunk                  │
         │                                                                │
         │  StepDriver: prepare → act → observe → finalize               │
-        │     （compact 内联于 prepare；recognize_intent 旁路并发）        │
+        │     （compact 为正式前台步骤；recognize_intent 旁路并发）        │
         └───────────────────────────┬────────────────────────────────────┘
                                     │ RunOutcome（execute 的返回值）
                                     ▼
@@ -147,21 +147,36 @@ memory；首字前撤销仍丢弃整批，并恢复原气泡。
 
 | Step | 源码（name= 行） | 作用 | `next_step` |
 |------|------------------|------|-------------|
-| `prepare` | `core/loop/steps/prepare.py:103` | 能力解析/绑定 + token 估算 + 命中阈值时内联升级压缩 + 装配 prompt + guidance/resume cue 注入 | `"act"`（`core/loop/steps/prepare.py:187`） |
+| `prepare` | `core/loop/steps/prepare.py:103` | 能力解析/绑定 + token 估算 + 命中阈值时切换 compact，完成后带 after_compact 回本步重装配 + 装配 prompt + guidance/resume cue 注入 | `"act"` 或 `"compact"` |
 | `act` | `core/loop/steps/act.py:60` | ReAct 循环：调 LLM → gateway 执行 tool_call → 写 memory，直到 actor_done / max_turns / context_limit / 纯文本 | `suspend_requested` → `"suspend"`（`core/loop/steps/act.py:156`），否则 `"observe"` |
 | `observe` | `core/loop/steps/observe.py:216` | 裁决：root/跨 agent 任务走机械判决 + 后台 observe；子任务走 LLM observe（`report_task_outcome` 为终止工具） | `"finalize"`（`core/loop/steps/observe.py:293`） |
 | `finalize` | `core/loop/steps/finalize.py:686` | 写 finish 对 / 派发结果回填父 scope / blackboard 发布 / 发 TASK_FINALIZED；**不写 task 状态** | `None`（`core/loop/steps/finalize.py:801`） |
 | `suspend` | `core/loop/steps/suspend.py:22` | 当前 task 等子任务，挂起；TaskManager 在子任务完成后重新入队 | `None` |
-| `compact` | `core/loop/steps/compact.py:733` | 记忆压缩（不再作为 task 起步；由 PrepareStep 内联直调或 `compact_agent` 主动触发） | `None` |
+| `compact` | `core/loop/steps/compact.py:733` | 记忆压缩（统一由 StepDriver 执行；options.after 指定接续） | `"prepare"` 或 `None` |
 | `recognize_intent` | `core/loop/steps/recognize_intent.py:99` | 旁路意图识别：回填 root task 的 title/description/session goal（`update_task_metadata`） | `None`（单发） |
 | `reconcile` | `core/loop/steps/reconcile.py:23` | resume 后补 dangling tool_call：已有结果的复用、悬挂的经 gateway 重执行 | `"prepare"` |
 
 **`initial_step` 的选定**（`_SessionTaskRunner.assemble` 里的 `_reconcile_or`，`core/runtime.py:4172`）：最近 assistant turn 有 dangling tool_call → `"reconcile"`（探测函数 `_task_has_dangling_tool_call` `core/runtime.py:480`），否则 `"prepare"`。`AgentBinding.initial_step` 默认 `"prepare"`（`core/orchestrator/task/runner.py:34`）。
 
-**compact 的两个触发面**：
+**step 参数与 compact 的三个入口**：
 
-- **内联（自动）**：PrepareStep 估算 token（对齐 miniAgents 基线）→ 命中阈值 → `escalating_compact` 逐级升级——L0.5 图片降级 → L1 agent 层折 → L2 胶囊降级 → L3 task 层坍缩（`core/loop/steps/prepare.py:155`-`166`）→ 重装配后继续 `→ act`。
-- **主动**：`CtxWeftRuntime.compact_agent(agent_id, *, task_id="")`（`core/runtime.py:2394`）对一个 idle（非 busy）agent 直调 `CompactStep().execute()`（现在**补发 RunStarted/RunFinished 对**），返回 `CompactReceipt`；强制压不受预算门控。
+`StepOutcome.next_step_options` 指定下一次 step 的调用参数，driver 复制后写入该次
+`ctx.execution.options`，不会自动继承到后续步骤。跨 step 的执行结果仍通过
+`state_patch` / `LoopState` 传递。前台 `act → observe` 显式传 `boundary` 与 `judge_task`；
+后台 Observe 仍经 `start_durable(..., options=...)` 发起，保留持久化请求与恢复语义。
+
+- **Prepare 预算触发**：`prepare → compact → prepare → act`。Compact 接收
+  `trigger/token_estimate/force/after`；`after="prepare"` 时返回
+  `next_step_options={"after_compact": True}`。第二次 Prepare 从 source 重新装配，
+  不再检查压缩阈值，避免重复触发；一次性 hint 在最终进入 Act 前消费。
+- **Act 派发前触发**：`act → compact → prepare → act`。已持久化、已记账但尚未执行工具的
+  回合存入 `LoopState.pending_act_turn`；压缩保护该回合并从摘要输入排除。Act 重入后先恢复
+  原工具调用，不重问模型、不重复记账，不消耗新的模型回合；工具结果落定后清除接续状态。
+- **runtime 手动触发**：`compact_agent` 保留 idle guard 与 `CompactReceipt`，通过 driver 的
+  前台执行入口运行 Compact，`force=True, after=None`。仅结束维护 run，不启动 Act 或终结业务 task。
+
+Compact 在可能改写记忆前清除旧的增量 token 基线；重装配使用完整估算，后续真实 Act usage
+重建基线。压缩 noop 仍只回 Prepare 一次，并保留上下文恢复次数与压不动时的止损规则。
 
 **digest 保真契约（spec: compact-fidelity）**：L1/L3 的 digest 按五固定小节生成（`## Goal / ## Constraints / ## Done / ## Remaining / ## Evidence`，Evidence 可缺）；`summarize_for_compact` 落库前经 `parse_structured_digest` 宽松解析，缺必需节整文降级（落库点 metadata `digest_degraded`）。Evidence 引用可回取的执行身份（tool-result-recovery 的 read_tool_output）。验收三层：CI 管道层（材料传递/解析/落库/降级）+ CI 请求层（cue 契约断言——固定 mock 输出不随 cue 变化，语义不归 mock 证）+ 非 CI 语义层（`benchmarks/compact_fidelity_eval.py`，真模型）。**不可逆边界**：fold 即 supersede，对话文本原文不可恢复——本契约不承诺原文回取；可回取面 = 工具产出（结果存储）+ 图片（ref 机制）。段摘要（act_recap / Progress So Far）不在此契约内。
 
@@ -173,7 +188,9 @@ memory；首字前撤销仍丢弃整批，并恢复原气泡。
 stateDiagram-v2
     [*] --> prepare: 普通任务（dangling tool_call 则先 reconcile）
 
-    prepare --> prepare: 命中阈值<br/>内联 escalating_compact + 重装配
+    prepare --> compact: 预算超阈值
+    compact --> prepare: after_compact=True，重装配后进 act
+    act --> compact: 派发前压缩
     prepare --> act: prompt 装配完成
 
     act --> observe: actor_done / 纯文本 / max_turns
@@ -201,7 +218,7 @@ ASCII 版（同一张图）：
 ```
           initial_step = prepare（dangling tool_call → 先 reconcile → prepare）
         │
-        │  命中 token 阈值：内联 escalating_compact（L0.5 图片→L1 折→L2 降级→L3 坍缩）
+        │  命中 token 阈值：正式切换 compact → prepare(after_compact=True)（L0.5 图片→L1 折→L2 降级→L3 坍缩）
         │  ┌──────────────────────────────────────────────────┐
         │  │ compact: 复用 act 装配 + 压缩指令 → fold → 重装配  │
         │  └──────────────────────────────────────────────────┘
@@ -266,6 +283,7 @@ class StepOutcome:               # 每个 Step 的统一返回
     state_patch: dict = {}
     events: list[Event] = []
     request_pause: bool = False
+    next_step_options: dict = {}  # 下一次 step 的 execution.options
 ```
 
 `make_event`（`core/loop/driver.py:170`）只做字段抽取 + sequence 自增；**类型白名单校验**在 `core/utils/event.py:35 new_event`（全仓唯一一份，`type not in EVENT_TYPES → ValueError`）。

@@ -115,6 +115,10 @@ async def test_prepare_collects_through_assembler_and_consumes_hint_after_reasse
     monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.commit_round", AsyncMock())
     monkeypatch.setattr(compact, "escalating_compact", AsyncMock(return_value=[]))
 
+    outcome = await step.execute(state, ctx)
+    assert outcome.next_step == "compact"
+    assert task.next_step_hint == "one shot"
+    ctx.execution = NS(options={"after_compact": True})
     await step.execute(state, ctx)
 
     assert [item["guidance"]["review_note"] for item in snapshots] == [

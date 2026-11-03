@@ -1,4 +1,4 @@
-"""PrepareStep compacts inline (calls escalating_compact directly) and still routes to act."""
+"""PrepareStep routes compaction through the driver, then rebuilds exactly once."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class _SpyEscalatingCompact:
         return []
 
 
-async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
+async def test_prepare_routes_to_compact_then_reassembles_without_retrigger(monkeypatch):
     spy = _SpyEscalatingCompact()
     monkeypatch.setattr("ctx_weft.core.loop.steps.compact.escalating_compact", spy)
 
@@ -88,15 +88,22 @@ async def test_reason_runs_compact_inline_and_routes_to_act(monkeypatch):
                           llm=SimpleNamespace(tokenizer=SimpleNamespace(count=estimate_tokens)))
 
     outcome = await rs.execute(state, ctx)
-    assert spy.called is True          # escalating_compact ran inline
-    assert spy.origin == EventOrigin.LOOP_COMPACT
-    assert state.origin == EventOrigin.LOOP_PREPARE
-    assert spy.kwargs["trigger"] == "compact"
-    assert pushed == []                # no compact Task pushed
-    assert outcome.next_step == "act"  # still proceeds to act
-    assert asm.calls == 2              # assembled once, then re-assembled after compaction
-    # 压缩只折 memory，够不着未提交窗口里暂存的记录 → 压缩之前必须先提交这一轮。
-    assert spy.order == ["t1"]
+    assert not spy.called
+    assert outcome.next_step == "compact"
+    assert outcome.next_step_options == {
+        "trigger": "prepare_budget", "token_estimate": 100000,
+        "force": False, "after": "prepare",
+    }
+    assert pushed == []
+    assert asm.calls == 1
+    assert ctx.task_manager.committed == ["t1"]
+    ctx.execution = SimpleNamespace(options={"after_compact": True})
+    rebuilt = await rs.execute(state, ctx)
+    assert rebuilt.next_step == "act"
+    assert rebuilt.next_step_options == {}
+    assert asm.calls == 2
+    assert not spy.called
+
 
 
 async def test_reason_stashes_bound_capabilities(monkeypatch):

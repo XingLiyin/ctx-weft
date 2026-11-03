@@ -445,7 +445,7 @@ async def test_execute_idempotent_second_run_noop() -> None:
 
 async def test_predispatch_folds_task_and_agent_layers() -> None:
     """派发前压缩越过阈值时，与 CompactStep 同构地同时折 task 层与 agent 层，事件标 pre_dispatch。"""
-    from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
+    from tests.unit.test_predispatch_compact import _compact_before_dispatch
 
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
@@ -457,7 +457,7 @@ async def test_predispatch_folds_task_and_agent_layers() -> None:
     state = _state(_active_task(), cfg, context_limit=1000)
     # 950 / 1000 = 0.95 >= 0.6 → 门控通过；留足预算余量使 L1 折后仍在 target(800) 之上，续入
     # L2/L3（escalating_compact 每级折后即测：低于 target 就提前停,此处要打穿到 L3 才折 task 层）。
-    events = await maybe_compact_before_dispatch(
+    events = await _compact_before_dispatch(
         state, _loop_ctx(mem, _FakeTM({}), with_assembler=True), prompt_tokens=950)
 
     compacted = [e for e in events if e.type == "MemoryCompacted"]
@@ -470,7 +470,7 @@ async def test_predispatch_folds_task_and_agent_layers() -> None:
 
 
 async def test_predispatch_gate_blocks_below_threshold() -> None:
-    from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
+    from tests.unit.test_predispatch_compact import _compact_before_dispatch
 
     mem = InMemoryMemoryProvider()
     sc = _sc("t1")
@@ -481,7 +481,7 @@ async def test_predispatch_gate_blocks_below_threshold() -> None:
     cfg = LoopConfig(compact_keep_last=1, predispatch_compact_token_ratio=0.6)
     state = _state(_active_task(), cfg, context_limit=1000)
     # 500 / 1000 = 0.5 < 0.6 → 不压
-    events = await maybe_compact_before_dispatch(
+    events = await _compact_before_dispatch(
         state, _loop_ctx(mem, _FakeTM({}), with_assembler=True), prompt_tokens=500)
     assert events == []
     assert await mem.recall_recent(sc, [T.TASK_COMPACT_SUMMARY, T.AGENT_COMPACT_SUMMARY], 100, _ctx()) == []

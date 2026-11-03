@@ -50,6 +50,7 @@ class AgentRecallSource:
         from ctx_weft.core.utils.ids import generate_id
 
         extra = getattr(request, "extra", None) or {}
+        excluded = set(extra.get("exclude_memory_ids", ()))
         fixed_ids = extra.get("observe_record_ids")
         if fixed_ids is not None:
             for record_id in fixed_ids:
@@ -71,6 +72,8 @@ class AgentRecallSource:
             ids = await deps.memory.load_view_ids(
                 address, scope, deps.provider_ctx, kinds=list(_VIEW_TASK_KINDS), end_at=end)
             for record_id in ids:
+                if record_id in excluded:
+                    continue
                 yield ContextBlock(id=generate_id("blk"), source=self.name, kind="history",
                                    value=None, memory_id=record_id)
 
@@ -78,6 +81,7 @@ class AgentRecallSource:
             ev for ev in extra.get("staged_memory", [])
             if ev.scope is MemoryScope.TASK and ev.kind in _VIEW_TASK_KINDS
             and getattr(ev.address, "agent_id", None) == request.scope.agent_id
+            and ev.id not in excluded
         ]
         for order, event in enumerate(staged):
             block = record_to_history_block(_staged_record(event), source=self.name, idx=order)

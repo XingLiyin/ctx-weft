@@ -202,8 +202,8 @@ async def test_recovers_in_place_without_spending_a_retry(monkeypatch, caplog):
 
     # ① 续跑真的发生在**同一个 run 内**：prepare 出现两次，且第二次在第一段 act 之后。
     steps = _steps(seen)
-    assert steps.count("prepare") == 2, f"应恰好恢复一次（prepare 跑两次），实际 {steps}"
-    assert steps[:4] == ["prepare", "act", "prepare", "act"], steps
+    assert steps.count("prepare") == 4, f"应恰好恢复一次（每次 compact 后再跑 prepare），实际 {steps}"
+    assert steps[:8] == ["prepare", "compact", "prepare", "act", "prepare", "compact", "prepare", "act"], steps
 
     # ② 没有吃掉重试预算，也没有被重排
     assert state.task.retry_count == 0
@@ -212,7 +212,7 @@ async def test_recovers_in_place_without_spending_a_retry(monkeypatch, caplog):
 
     # ③ 压缩真的跑了，且是 compact 触发（不是 pre_dispatch）
     started = _types(seen, EventType.MEMORY_COMPACT_STARTED)
-    assert started and started[0]["trigger"] == "compact"
+    assert started and started[0]["trigger"] == "prepare_budget"
     assert _types(seen, EventType.MEMORY_COMPACTED), "该有实际折叠"
 
     # ④ 进度不丢：续跑那次请求里，压缩摘要与原始消息**同时**在场
@@ -284,7 +284,7 @@ async def test_turn_budget_is_not_reset_by_recovery(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 2, "仍应恢复一次"
+    assert _steps(seen).count("prepare") == 4, "仍应恢复一次"
     assert _types(seen, EventType.MAX_TURNS_REACHED), \
         "恢复后轮数预算已耗尽，必须落到 max_turns 退出而不是白送一轮"
     # 第二段 act 一次 LLM 都不该发：预算为 0 时循环体根本不进
@@ -309,7 +309,7 @@ async def test_gives_up_when_compaction_cannot_free_anything(monkeypatch):
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
     steps = _steps(seen)
-    assert steps.count("prepare") == 2, f"应在第一次恢复无果后就放弃，实际 {steps}"
+    assert steps.count("prepare") == 4, f"应在第一次恢复无果后就放弃，实际 {steps}"
     assert "observe" in steps, steps
     # 退回老路：机械退出 → 强制 retry
     assert state.verdict is not None and state.verdict.task_outcome == "continue"
@@ -318,7 +318,7 @@ async def test_gives_up_when_compaction_cannot_free_anything(monkeypatch):
     # 路径本来的动作，不是「压缩有效」的证据。本分支上它恰好不发（机械判决的 act_recap 为空
     # → 段保 raw），但断言不该依赖这个巧合：换个分支或改了机械判决就会误红。
     assert not [p for p in _types(seen, EventType.MEMORY_COMPACTED)
-                if p.get("trigger") == "compact"], "恢复驱动的压缩本例应一无所获"
+                if p.get("trigger") == "prepare_budget"], "恢复驱动的压缩本例应一无所获"
 
 
 async def test_plain_text_finish_wins_over_the_stop_line(monkeypatch):
@@ -335,7 +335,7 @@ async def test_plain_text_finish_wins_over_the_stop_line(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 1, "纯文本收尾不该触发恢复"
+    assert _steps(seen).count("prepare") == 2, "纯文本收尾不该触发恢复"
     assert state.task.status == "FINISHED", state.task.status
     assert not _types(seen, EventType.TASK_REQUEUED), "不得被改判成 retry 重排"
     assert "Here is the final answer." in (state.task.outputs or ""),         "越线不得吞掉模型刚交出的答复"
@@ -351,7 +351,7 @@ async def test_actor_done_wins_over_the_stop_line(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 1, "已收尾的 task 不该再压缩续跑"
+    assert _steps(seen).count("prepare") == 2, "已收尾的 task 不该再压缩续跑"
     assert state.task.status == "FINISHED", state.task.status
     assert not _types(seen, EventType.TASK_REQUEUED)
 
@@ -374,9 +374,30 @@ async def test_suspend_wins_over_the_stop_line(monkeypatch):
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
     steps = _steps(seen)
-    assert steps.count("prepare") == 1, f"挂起的 run 不该被拉回 prepare 压缩，实际 {steps}"
+    assert steps.count("prepare") == 2, f"挂起前只允许初始 prepare/compact/prepare，实际 {steps}"
     assert "suspend" in steps, steps
     assert "observe" not in steps, steps
+
+
+async def test_predispatch_compact_reassembles_then_dispatches_without_another_llm_turn(monkeypatch):
+    runtime, llm, seen = _wire(
+        monkeypatch, predispatch_compact_token_ratio=0.5,
+        responses=[_working(1), MockResponse(text="delegating", tool_calls=[ToolCall(
+            id="delegate", name="control__delegate_task",
+            arguments={"title": "sub", "description": "do part", "task_prompt": "do part"},
+        )])], inflate_on={2},
+    )
+    await initialize_all(runtime)
+    _, state = await runtime.run_single_task(template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
+    assert _steps(seen) == ["prepare", "compact", "prepare", "act", "compact", "prepare", "act", "suspend"]
+    assert llm._calls == 2
+    assert state.pending_act_turn is None
+    assert state.task.status == "SUSPENDED"
+    assert len([p for p in _types(seen, EventType.MEMORY_COMPACTED)
+                if p.get("trigger") == "pre_dispatch"]) == 1
+    dispatched = [p for p in _types(seen, EventType.CAPABILITY_INVOKED)
+                  if p.get("capability_name") == "control__delegate_task"]
+    assert len(dispatched) == 1
 
 
 async def test_quota_exhaustion_falls_back_to_the_retry_path(monkeypatch):
@@ -396,9 +417,9 @@ async def test_quota_exhaustion_falls_back_to_the_retry_path(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 3, f"配额 2 → 恰好恢复两次，实际 {_steps(seen)}"
+    assert _steps(seen).count("prepare") == 6, f"配额 2 → 恰好恢复两次，实际 {_steps(seen)}"
     assert [p for p in _types(seen, EventType.MEMORY_COMPACTED)
-            if p.get("trigger") == "compact"], "本例的压缩是有效的（与 give-up 那条相区分）"
+            if p.get("trigger") == "prepare_budget"], "本例的压缩是有效的（与 give-up 那条相区分）"
     assert state.verdict is not None and state.verdict.task_outcome == "continue"
 
 
@@ -409,5 +430,5 @@ async def test_recovery_disabled_keeps_legacy_retry_path(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 1
+    assert _steps(seen).count("prepare") == 2
     assert state.verdict is not None and state.verdict.task_outcome == "continue"

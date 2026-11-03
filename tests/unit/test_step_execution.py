@@ -201,6 +201,60 @@ async def test_foreground_event_order_and_options(fake_state_ctx):
     assert ctx.execution.options == {}
 
 
+async def test_next_step_options_are_copied_and_not_inherited(fake_state_ctx):
+    state, ctx = fake_state_ctx
+    options = {"trigger": "test"}
+    seen = []
+
+    async def prepare(current, local_ctx):
+        seen.append(dict(local_ctx.execution.options))
+        return StepOutcome("compact", next_step_options=options)
+
+    async def compact(current, local_ctx):
+        seen.append(dict(local_ctx.execution.options))
+        local_ctx.execution.options["trigger"] = "modified"
+        return StepOutcome("act")
+
+    async def act(current, local_ctx):
+        seen.append(dict(local_ctx.execution.options))
+        return StepOutcome(None)
+
+    driver = StepDriver({name: NS(name=name, execute=execute) for name, execute in
+                         [("prepare", prepare), ("compact", compact), ("act", act)]})
+    outcomes = [outcome async for outcome in driver.run(state, ctx)]
+    assert len(outcomes) == 3
+    assert seen == [{}, {"trigger": "test"}, {}]
+    assert options == {"trigger": "test"}
+    assert ctx.execution.options == {}
+
+
+async def test_foreground_observe_transition_passes_explicit_options(fake_state_ctx):
+    state, ctx = fake_state_ctx
+    state.act_exit_reason = "max_turns"
+    seen = []
+
+    async def act(current, local_ctx):
+        return StepOutcome("observe", next_step_options={
+            "boundary": "context_limit", "judge_task": False})
+
+    async def observe(current, local_ctx):
+        seen.append(dict(local_ctx.execution.options))
+        return StepOutcome("finalize")
+
+    async def finalize(current, local_ctx):
+        assert local_ctx.execution.options == {}
+        return StepOutcome(None)
+
+    driver = StepDriver({name: NS(name=name, execute=execute) for name, execute in
+                         [("act", act), ("observe", observe), ("finalize", finalize)]}, initial_step="act")
+    _ = [outcome async for outcome in driver.run(state, ctx)]
+    assert seen[0]["boundary"] == "context_limit"
+    assert seen[0]["judge_task"] is False
+    requested = next(e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_REQUESTED)
+    assert requested.payload["boundary"] == "context_limit"
+    assert requested.payload["judge_task"] is False
+
+
 async def test_registry_waiter_cancellation_does_not_cancel_work():
     registry = ExecutionRegistry()
     release = asyncio.Event()

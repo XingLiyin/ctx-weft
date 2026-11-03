@@ -19,6 +19,7 @@ session 只是从 agent 记录反查出来的。
 from __future__ import annotations
 
 import dataclasses
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -138,3 +139,57 @@ async def test_compact_session_is_gone():
     """不留 shim（spec §1）。"""
     rt = await _idle_agent()
     assert not hasattr(rt, "compact_session")
+
+
+async def test_manual_compact_has_formal_step_events_and_monotonic_sequence():
+    rt = await _idle_agent()
+    await initialize_all(rt)
+    events = []
+    original_emit = rt._event_bus.emit
+
+    async def emit(event):
+        events.append(event)
+        await original_emit(event)
+
+    rt._event_bus.emit = emit
+    await rt.compact_agent(AID)
+    started = next(e for e in events if e.type == EventType.RUN_STARTED
+                   and e.payload.get("initial_step") == "compact")
+    run = [e for e in events if e.run_id == started.run_id]
+    types = [e.type for e in run]
+    assert types[0:2] == [EventType.RUN_STARTED, EventType.STEP_STARTED]
+    assert run[1].payload["step_name"] == "compact"
+    assert types[-2:] == [EventType.STEP_COMPLETED, EventType.RUN_FINISHED]
+    assert run[-2].payload["next_step"] is None
+    assert run[-1].payload["outcome"] == "completed"
+    sequences = [e.sequence for e in run]
+    assert sequences == sorted(set(sequences))
+    assert not any(e.type in {EventType.TASK_FINISHED, EventType.TASK_FAILED, EventType.TASK_CANCELED}
+                   for e in run)
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_manual_compact_propagates_failure_and_releases_busy_guard(monkeypatch, error_type):
+    from ctx_weft.core.loop.steps.compact import CompactStep
+    rt = await _idle_agent()
+    await initialize_all(rt)
+    events = []
+    original_emit = rt._event_bus.emit
+
+    async def emit(event):
+        events.append(event)
+        await original_emit(event)
+
+    async def fail(self, state, ctx):
+        assert ctx.execution.options["after"] is None
+        assert ctx.execution.options["force"] is True
+        raise error_type("manual compact failed")
+
+    rt._event_bus.emit = emit
+    monkeypatch.setattr(CompactStep, "execute", fail)
+    with pytest.raises(error_type, match="manual compact failed"):
+        await rt.compact_agent(AID)
+    assert SID not in rt._busy_sessions
+    finished = next(e for e in events if e.type == EventType.RUN_FINISHED)
+    assert finished.payload["outcome"] == ("canceled" if error_type is asyncio.CancelledError else "interrupted")
+    assert not any(e.type == EventType.STEP_COMPLETED for e in events)

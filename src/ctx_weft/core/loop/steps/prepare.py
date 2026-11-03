@@ -5,12 +5,12 @@ compact 估算使用不带窗口预算的完整编译结果；有真实 usage �
 
 compact 触发（纯预算，spec 2026-07-01 §3.6）：
   - token_estimate / effective_limit >= compact_token_ratio
-  命中后调 escalating_compact 升级式压缩，再完整重装配一次 prompt（Q4=c 校正）。
+  命中后切换到 CompactStep，压缩后带 after_compact 参数回到本步重装配。
 
 本步还是**上下文恢复**的落点：ActStep 越过 `context_limit_stop_ratio` 时不再直接退出吃一次
 retry，而是路由回本步（见 `act._can_recover_context`）——本步照常估算 → 压缩 → 重装配，act
 随后在压缩后的 prompt 上原地续跑。act 手里的真实 `context_tokens` 刚被写成越线值，所以这条
-路径上 compact 的门必然开。压缩若一无所获，本步把 `COMPACT_NOOP_KEY` 置起，act 据此放弃恢复。
+路径上 compact 的门必然开。压缩若一无所获，CompactStep 写 `COMPACT_NOOP_KEY`，act 据此放弃恢复。
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from typing import Callable
 from ctx_weft.core.assembler import ContextRequest
 from ctx_weft.core.loop.commit import commit_round, defer_until_commit
 from ctx_weft.core.loop.driver import (
-    COMPACT_NOOP_KEY,
     LoopContext,
     LoopState,
     Step,
@@ -36,7 +35,7 @@ from ctx_weft.core.utils.estimate import (
     estimate_tool_calls_tokens,
 )
 from ctx_weft.protocols import load_records
-from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.protocols.events import EventType
 
 
 def _estimate_record_tokens(r, count: Callable[[str], int] | None = None) -> int:
@@ -88,6 +87,8 @@ class PrepareStep(Step):
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
         agent = state.agent
         session = state.session
+        options = getattr(getattr(ctx, "execution", None), "options", {})
+        after_compact = options.get("after_compact", False)
 
         # ── 0. token budget guard ─────────────────────────────────────────────
 
@@ -133,35 +134,17 @@ class PrepareStep(Step):
         token_estimate = max(
             token_estimate, _estimate_assembled_tokens(prompt, ctx.llm.tokenizer.count))
 
-        # ── 5. compact 触发：命中则跑升级式 compact，再在压缩后 memory 上重装配一次（Q4=c 校正）──
-        if await self._should_compact(state, ctx, token_estimate):
+        # ── 5. Normal preparation can route to compact; post-compact preparation only rebuilds. ──
+        if not after_compact and await self._should_compact(state, ctx, token_estimate):
             # **先提交再压缩**：压缩（L0.5 图片降级 / L1 / L3）只折 memory，够不着这一轮暂存
             # 的记录——带图的第一条消息、带图的答复就一张也降不了。提交让它们落盘、进入
             # 压缩的视野；代价是这一轮从此不可撤（LLM 开口前按暂停也不再丢弃）。
             await commit_round(state, ctx)
-            from ctx_weft.core.loop.steps.compact import escalating_compact
-            # Inline compaction keeps Prepare's continuation, but its LLM events
-            # must carry the compact origin, including the paired response finish.
-            prev_origin = state.origin
-            state.origin = EventOrigin.LOOP_COMPACT
-            try:
-                compact_events = await escalating_compact(
-                    state, ctx, token_estimate=token_estimate, trigger="compact")
-            finally:
-                state.origin = prev_origin
-            for ev in compact_events:
-                await ctx.event_bus.emit(ev)
-            # 「门开了但一条 MEMORY_COMPACTED 都没产」= 各级可折性 guard 全 noop = 这个 scope
-            # 已经压不动了。记进 state.extra 供 ActStep 的 `_can_recover_context` 读：它据此
-            # 立刻放弃上下文恢复，而不是把配额一次次耗在注定压不出东西的往返上。
-            # 每次开门都重写（含置 False）——压不动是**当时**的结论，不是永久标签：折区随
-            # 新回合增长，下一次可能就有可折对象了。
-            # 这里只作事实记录，**不判断它该不该否决恢复**：run 开头那次 prepare 的 compact
-            # 几乎必然 noop（task 层通常只有一条 USER_PROMPT），那面旗不该算在恢复头上。
-            # 解释权在 `_can_recover_context`（它只在已恢复过至少一次时才采信）。
-            state.extra[COMPACT_NOOP_KEY] = not any(
-                ev.type == EventType.MEMORY_COMPACTED for ev in compact_events)
-            inputs, prompt = await _assemble()
+            return StepOutcome(
+                next_step="compact", state_patch={"prompt_inputs": None},
+                next_step_options={"trigger": "prepare_budget", "token_estimate": token_estimate,
+                                   "force": False, "after": "prepare"},
+            )
 
         # GuidanceSource 已完成本轮所有可能的读取后，再消费一次性转向。这样 Prepare
         # 不需要知道 source 的收集函数，compact 后的第二次 assemble 也仍能看到同一 hint。

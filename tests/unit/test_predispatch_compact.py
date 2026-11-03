@@ -13,11 +13,27 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from types import SimpleNamespace
 
-from ctx_weft.core.loop.steps.compact import maybe_compact_before_dispatch
+from ctx_weft.core.loop.steps.act import _predispatch_compact_options
+from ctx_weft.core.loop.steps.compact import CompactStep
+from ctx_weft.core.loop.driver import StepExecution
+from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS
+from ctx_weft.protocols import LLMUsage, ToolCall
 from ctx_weft.protocols import MemoryAddress
 from ctx_weft.protocols import MemoryEventType as T  # noqa: F401
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
+
+async def _compact_before_dispatch(state, ctx, *, prompt_tokens):
+    calls = [ToolCall(id="dispatch", name=next(iter(DISPATCH_TOOLS)), arguments={})]
+    options = _predispatch_compact_options(state, calls, LLMUsage(prompt_tokens=prompt_tokens))
+    if options is None:
+        return []
+    ctx.execution = StepExecution(options=options)
+    outcome = await CompactStep().execute(state, ctx)
+    assert outcome.next_step == "prepare"
+    assert outcome.next_step_options == {"after_compact": True}
+    return outcome.events
+
 
 _BASE_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -146,7 +162,7 @@ def _ctx(memory):
 
 async def test_disabled_when_ratio_zero():
     mem = _FakeMemory(task_count=50)  # plenty foldable, but feature off
-    out = await maybe_compact_before_dispatch(_state(ratio=0.0), _ctx(mem), prompt_tokens=999)
+    out = await _compact_before_dispatch(_state(ratio=0.0), _ctx(mem), prompt_tokens=999)
     assert out == []
     assert mem.ingested == []
     assert mem.superseded == []
@@ -155,7 +171,7 @@ async def test_disabled_when_ratio_zero():
 async def test_skips_when_below_threshold():
     mem = _FakeMemory(task_count=50)
     # 500 / 1000 = 0.5 < ratio 0.6
-    out = await maybe_compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=500)
+    out = await _compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=500)
     assert out == []
     assert mem.ingested == []
     assert mem.superseded == []
@@ -166,7 +182,7 @@ async def test_skips_when_nothing_foldable():
     但 task_count=2 <= keep_last=2 时 collapse_task_layer 内部判定无可折,不摸任何记录
     （STARTED 事件仍可能发出——预算门本身已过,只是最终无 MemoryCompacted，收尾仍发 Finished）。"""
     mem = _FakeMemory(task_count=2)  # <= keep_last=2 → collapse 内部 noop
-    out = await maybe_compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=800)
+    out = await _compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=800)
     assert [e.type for e in out] == ["MemoryCompactStarted", "MemoryCompactFinished"]  # 无 MemoryCompacted
     assert mem.ingested == []
     assert mem.superseded == []
@@ -174,7 +190,7 @@ async def test_skips_when_nothing_foldable():
 
 async def test_compacts_task_layer_once_when_over_threshold_and_foldable():
     mem = _FakeMemory(task_count=10)  # > keep_last=2
-    out = await maybe_compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=800)
+    out = await _compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=800)
     # task layer collapsed once via collapse_task_layer → one ingested collapsed USER_PROMPT
     assert len(mem.ingested) == 1
     assert mem.ingested[0].metadata.get("collapsed") is True
@@ -188,7 +204,7 @@ async def test_compacts_task_layer_once_when_over_threshold_and_foldable():
 
 async def test_falls_back_to_loop_guard_tokens_when_prompt_tokens_zero():
     mem = _FakeMemory(task_count=10)
-    out = await maybe_compact_before_dispatch(
+    out = await _compact_before_dispatch(
         _state(ratio=0.6, context_tokens=800), _ctx(mem), prompt_tokens=0)
     # fallback to context_tokens=800 triggers compact → collapsed USER_PROMPT ingested
     assert len(mem.ingested) == 1
@@ -208,14 +224,14 @@ async def test_predispatch_uses_escalating_compact(monkeypatch):
 
     seen = {}
 
-    async def _fake_esc(state, ctx, *, token_estimate, trigger):
+    async def _fake_esc(state, ctx, *, token_estimate, trigger, **kwargs):
         seen["trigger"] = trigger
         seen["est"] = token_estimate
         return []
 
     monkeypatch.setattr(cm, "escalating_compact", _fake_esc)
     mem = _FakeMemory(task_count=10)
-    out = await cm.maybe_compact_before_dispatch(
+    out = await _compact_before_dispatch(
         _state(ratio=0.5), _ctx(mem), prompt_tokens=800)
     assert seen["trigger"] == "pre_dispatch"
     assert seen["est"] == 800

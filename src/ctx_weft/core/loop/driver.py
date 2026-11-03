@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from ctx_weft.core.hitl.service import HitlService
     from ctx_weft.core.loop.capability_gateway import CapabilityGateway
     from ctx_weft.core.loop.hitl_waiter import HitlWaiter
-    from ctx_weft.core.loop.steps.act import TurnRecord
+    from ctx_weft.core.loop.steps.act import PendingActTurn, TurnRecord
     from ctx_weft.core.loop.steps.observe import ObservationResult, Verdict
     from ctx_weft.core.orchestrator import TaskManager
     from ctx_weft.core.orchestrator.model import ResolvedModel
@@ -191,6 +191,7 @@ class StepOutcome:
     state_patch: dict[str, Any] = field(default_factory=dict)
     events: list[Event] = field(default_factory=list)
     request_pause: bool = False
+    next_step_options: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -242,6 +243,7 @@ class LoopState:
     extra: dict[str, Any] = field(default_factory=dict)
 
     origin: str = ""  # driver 每步开始前写入，make_event 默认从这里取（events-v2.md §4）
+    pending_act_turn: PendingActTurn | None = None
 
     def apply_patch(self, patch: dict[str, Any]) -> "LoopState":
         """应用 state_patch 返回新 LoopState（浅拷贝）。"""
@@ -574,6 +576,7 @@ class StepDriver:
             state, run_id=generate_id("run"), sequence_counter=0,
             extra=dict(state.extra), transcript=list(state.transcript),
             observation=None, verdict=None, run_outcome=None,
+            pending_act_turn=None,
             origin=(EventOrigin.LOOP_BACKGROUND_OBSERVE if name == "observe"
                     else _STEP_ORIGIN.get(name, EventOrigin.LOOP_DRIVER)),
         )
@@ -691,6 +694,7 @@ class StepDriver:
         await self._ensure_blackboard_subscriptions(state, ctx)
 
         next_step_name: str | None = self.initial_step
+        step_options: dict[str, Any] = {}
 
         try:
             while next_step_name is not None:
@@ -703,7 +707,10 @@ class StepDriver:
                 if tok is not None and tok.is_cancelled:
                     tok.raise_if_cancelled()
 
-                state, outcome = await self._execute_foreground(next_step_name, state, ctx)
+                state, outcome = await self._execute_foreground(
+                    next_step_name, state, ctx, options=step_options)
+                # Each transition supplies fresh invocation options; nothing is inherited.
+                step_options = dict(outcome.next_step_options)
                 yield outcome
                 next_step_name = outcome.next_step
         finally:
