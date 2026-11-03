@@ -149,7 +149,7 @@ async def test_request_started_prompt_sent_response_finished_share_request_id():
     ctx = _make_ctx(bus)
     prompt = SimpleNamespace(system="SYS", tools=[])
 
-    await _run_llm_turn(state, ctx, scripted_inputs(prompt), [], 1)
+    turn = await _run_llm_turn(state, ctx, scripted_inputs(prompt), [], 1)
 
     started = [e for e in bus.events if e.type == EventType.LLM_REQUEST_STARTED]
     prompt_sent = [e for e in bus.events if e.type == EventType.LLM_PROMPT_SENT]
@@ -160,6 +160,8 @@ async def test_request_started_prompt_sent_response_finished_share_request_id():
     assert rid  # 非空
     assert prompt_sent[0].payload["request_id"] == rid
     assert finished[0].payload["request_id"] == rid
+    assert finished[0].payload["memory_id"] == turn.anchor
+    assert turn.anchor
 
     # 顺带确认流式事件也确实搬到了 gateway 侧（TOKEN_STREAMED 携带同一 request_id）。
     tokens = [e for e in bus.events if e.type == EventType.LLM_TOKEN_STREAMED]

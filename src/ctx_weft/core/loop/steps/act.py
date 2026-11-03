@@ -473,6 +473,7 @@ async def _run_llm_turn(
         state, EventType.LLM_RESPONSE_FINISHED,
         payload={
             "request_id": req_id, "content": text, "reasoning": reasoning,
+            "memory_id": anchor,
             "tool_calls": [
                 {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls
             ],

@@ -32,6 +32,7 @@ from ctx_weft.protocols import (
     MemoryEventType,
     ProviderContext,
 )
+from ctx_weft.protocols.events import EventType
 from ctx_weft.protocols.hitl import PREFACE_NORMAL, UserTurnDelivery
 from ctx_weft.providers.events import InProcessEventBus
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
@@ -159,6 +160,32 @@ async def test_auto_plain_text_completes() -> None:
     assert task.status != "SUSPENDED"
     assert task.outputs == "Hi! Anything else?"        # auto: 文本即产出（旧行为）
     assert hitl.list_pending("s1") == []
+
+
+@pytest.mark.parametrize("unattended", [False, True])
+async def test_reply_links_memory_to_its_prompt(unattended) -> None:
+    llm = MockLLMAdapter(responses=[MockResponse(text="linked reply")])
+    state, ctx, _task, _hitl, mem = _act_state_ctx(unattended, llm)
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    ctx.event_bus.subscribe(None, collect)
+    if unattended:
+        await ActStep().execute(state, ctx)
+    else:
+        with pytest.raises(HitlPark):
+            await ActStep().execute(state, ctx)
+
+    reply, = [event for event in events if event.type == EventType.LLM_RESPONSE_FINISHED]
+    prompt, = [event for event in events if event.type == EventType.LLM_PROMPT_SENT
+               and event.payload["request_id"] == reply.payload["request_id"]]
+    record, = await mem.read_records([reply.payload["memory_id"]], ctx.provider_ctx)
+    assert record.role == "assistant"
+    assert record.content == reply.payload["content"] == "linked reply"
+    assert "request_id" not in record.metadata
+    assert prompt.task_id == reply.task_id == record.address.task_id
 
 
 async def test_finish_task_finishes_task_end_to_end() -> None:
