@@ -94,7 +94,7 @@ def test_an_unrecognized_value_does_warn(caplog) -> None:
 
 @pytest.mark.parametrize("raw", ["active", "ask_human", "done", "", "  ", None, 0, object()])
 def test_anything_unrecognized_becomes_continue_never_fail(raw: object) -> None:
-    """方向：拿不准时继续，不判死。判死是不可逆的，而『继续』有 max_retries 自己收口。"""
+    """方向：拿不准时继续；只有明确的 fail 才判失败。"""
     assert normalize_verdict(raw) == VERDICT_CONTINUE
     assert normalize_verdict(raw) != VERDICT_FAIL
 
@@ -107,18 +107,18 @@ def test_success_finishes() -> None:
     assert (d.status, d.payload["outcome"]) == ("FINISHED", VERDICT_SUCCESS)
 
 
-def test_continue_with_budget_requeues_and_says_continue_in_the_payload() -> None:
+def test_continue_preserves_budget_and_says_continue_in_the_payload() -> None:
     d = disposition_for(_completed(VERDICT_CONTINUE), retry_count=1, max_retries=3)
     assert d.status == "PENDING"
     assert d.event_type == "TaskRequeued"
     assert d.payload["outcome"] == VERDICT_CONTINUE, "payload 的词面也要跟着改，不留旧词"
-    assert d.payload["retry_count"] == 2
+    assert d.payload["retry_count"] == 1
 
 
-def test_continue_without_budget_is_the_exhaustion_path() -> None:
+def test_continue_without_exception_retry_budget_still_requeues() -> None:
     d = disposition_for(_completed(VERDICT_CONTINUE), retry_count=3, max_retries=3)
-    assert d.status == "FAILED"
-    assert d.payload["error_code"] == "TASK_FAILED_RETRY_EXHAUSTED"
+    assert d.status == "PENDING"
+    assert d.payload["retry_count"] == 3
 
 
 def test_fail_is_its_own_branch() -> None:

@@ -1290,8 +1290,7 @@ class TaskManager:
         if task is not None:
             task.status = disp.status
             if disp.event_type == "TaskRequeued":
-                # **处置表不 mutate**：新的 retry_count 只在 payload 里，必须在这里写回，
-                # 否则重试预算永不消耗、同一个 task 无限重排（旧路径是先 `+= 1` 再写 payload）。
+                # 采用处置表给出的计数：异常重试递增，observer continue 保持原值。
                 task.retry_count = disp.payload["retry_count"]
             if outcome.kind is RunOutcomeKind.INTERRUPTED:
                 # 成因随 task 走：`disp.payload` 里的 error_code 只随这一条事件走一次，

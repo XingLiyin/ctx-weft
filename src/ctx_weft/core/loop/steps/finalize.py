@@ -639,14 +639,13 @@ class FinalizeStep(Step):
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
         task = state.task
         verdict = state.verdict
-        outcome = verdict.task_outcome if verdict else "fail"
+        outcome = verdict.task_outcome if verdict else VERDICT_CONTINUE
         summary = verdict.act_recap if verdict else ""            # → task.process_report（success/fail finish 对；retry 不再写，进度由段摘要承载）
         task_summary = verdict.task_summary if verdict else ""    # → 汇报给 parent 的 process report
         events: list[Any] = []
 
-        # 交给 TaskManager 的结局：用 observer 的**原值** outcome，不经下面 retry_exhausted
-        # 的重试耗尽降级——那是 TM 的活（task_disposition.disposition_for），loop 只报
-        # 「observer 说了什么」。task 状态与状态事件都不在本 step 落地了（Task 4）。
+        # 交给 TaskManager 的结局保留 observer 的原值；continue 不按 retry_count 降级。
+        # task 状态与状态事件由 TaskManager 据此落地。
         extra = getattr(state, "extra", {})
         run_outcome = RunOutcome(
             kind=RunOutcomeKind.COMPLETED,
@@ -659,19 +658,13 @@ class FinalizeStep(Step):
             observe_report_pending=bool(extra.get("observe_decision", {}).get("verdict")),
         )
 
-        # 判 continue 但超过重试上限 → 降级 fail（不再重试）。专属 error_code 区分「程序按上限
-        # 熔断」与 observer 主动判死；死因 = 最后一轮 retry 判决暂存的受阻原因（task.error，
-        # report_observation 判 continue 且确有阻塞时写入），机械退出轮没有判决则为空。
-        # 本地降级只决定收尾副作用；已有持久化 disposition 时直接采用它，避免
-        # 冷恢复重算重试预算，把已确定的 FAILED 当 continue 并清掉最终输出。
-        # 没有持久化判决的旧路径仍按 TaskManager 同一预算规则处理。
+        # 兼容旧版本已经持久化的失败决定：恢复只补收尾，不重判已有终态。
+        # 新判决的 continue 无论 retry_count 多大，都保持非终态。
         decision = run_outcome.observe_disposition
-        retry_exhausted = outcome == VERDICT_CONTINUE and (
-            decision["status"] == "FAILED" if decision else task.retry_count >= task.max_retries)
-        if retry_exhausted:
+        if outcome == VERDICT_CONTINUE and decision and decision["status"] == "FAILED":
             outcome = VERDICT_FAIL
             task.observer_outcome = VERDICT_FAIL
-            task.error_code = TaskErrorCode.RETRY_EXHAUSTED
+            task.error_code = decision["payload"].get("error_code", TaskErrorCode.RETRY_EXHAUSTED)
 
         terminal = outcome in (VERDICT_SUCCESS, VERDICT_FAIL)
         # mem_content（= 最终输出 + task_summary，空则回退 act_recap）现在由
@@ -693,9 +686,8 @@ class FinalizeStep(Step):
         elif outcome == VERDICT_CONTINUE:
             # 未完的反馈由 observe 前台段折写的 TASK_COMPACT_SUMMARY 承载（spec 2026-07-01 §3.1）；
             # 不再写 process_report/process_report_at（旧 Progress So Far 字段路径已废）。
-            # 机械退出（max_turns/context_limit）也归到这里：重排再跑，受 max_retries 兜底。
-            # retry_count 的 +1 也搬走了：处置表算出新值，TaskManager 写回 task
-            # （在这里先加会让 TM 二次自增，重试预算一轮烧两格）。
+            # 机械退出（max_turns/context_limit）后的 continue 也重排再跑，
+            # 不消耗运行异常的 retry_count，也不因 max_retries 耗尽而收尾。
             task.outputs = None
 
         # 3) TASK_FINALIZED：**每条路径都发**，retry 也发（它把 host 投影里上一次的

@@ -44,7 +44,7 @@ class RunOutcome:
     """loop 交给 TaskManager 的全部信息：**发生了什么**，不含「task 该变成什么」。"""
 
     kind: RunOutcomeKind
-    verdict: str = ""            # COMPLETED 时：success / fail / retry
+    verdict: str = ""            # COMPLETED 时：success / fail / continue
     summary: str = ""
     outputs: object = None
     error: str = ""              # 死因 / 受阻原因（自由文本，只作溯源）
@@ -74,29 +74,12 @@ class Disposition:
 def disposition_for(
     outcome: RunOutcome, *, retry_count: int, max_retries: int,
 ) -> Disposition:
-    """结局 + 预算 → 处置。**不改变任何今天的转移结果**，只是把判断收到一处。
+    """结局 → 处置；重试预算只用于运行异常。
 
-    与今天三处实际口径逐字对照（见 task-1-report.md）：
-    - `TaskManager._handle_task_failure`：非 retriable 的运行层异常直接挂起（跳过重试
-      判断）；retriable 且 `task.retry_count < task.max_retries` 才原地重试，重试前
-      先 `task.retry_count += 1` 再把新值写进 TASK_REQUEUED payload——即
-      `retry_count=retry_count+1`。预算耗尽同样落到 `_suspend_task_interrupted`，
-      payload 里的 `retry_count` 是未增的原值。
-    - `runtime.py` 的 `will_retry`：`run_error is not None and task.retry_count <
-      task.max_retries and getattr(run_error, "retriable", True)`——即"retriable
-      且预算未尽"这一个合取条件，与上面 `_handle_task_failure` 的判断同构（只是
-      在不同调用点各查了一次）。
-    - **outage 不走上面任何一条。** 今天"outage 从不原地重试"靠的是**路径隔离**，
-      不是异常上的标志位：`LLMOutageError.retriable` 实际是 `True`
-      （`protocols/llm.py`），但 `_run_loop` 的 `except LLMOutageError` 分支从不置
-      `run_error`、从不重抛，于是既进不了 `_handle_task_failure`，也让 `will_retry`
-      的第一个合取项 `run_error is not None` 直接短路。
-    - `FinalizeStep`（finalize.py:695 附近）：`retry_exhausted = outcome == "retry"
-      and task.retry_count >= task.max_retries`；耗尽时降级为 "fail" 且
-      `error_code=TaskErrorCode.RETRY_EXHAUSTED`，否则 verdict=="fail" 时
-      `error_code=TaskErrorCode.BY_OBSERVER`；两支的 `error_message` 都取
-      `task.error`（对应这里的 `outcome.error`）。未耗尽的 retry 分支同样先
-      `task.retry_count += 1` 再把新值写进 payload。
+    observer 判 continue 表示任务尚未完成：保持 retry_count、重新入队，不按预算
+    降级成失败。只有明确的 fail 判决产生观察者失败。
+    可重试的运行异常在预算内消耗一次 retry，耗尽后停在 INTERRUPTED 等恢复。
+    outage 由调用方显式传 retriable=False，从不原地重试。
     """
     if outcome.kind is RunOutcomeKind.TASK_SWITCHED:
         return Disposition("REVIEWING", "TaskReviewing", {"reason": "user_topic_switch"})
@@ -135,7 +118,7 @@ def disposition_for(
             "retry_count": retry_count,
         })
 
-    # COMPLETED：observer 的判决 + 重试预算。
+    # COMPLETED：observer 的判决，不消耗运行异常的重试预算。
     #
     # 三态**显式匹配**（2026-09-28）：改名前这里是「success → / retry → / 其余 → FAILED」，
     # 那个兜底同时服务 `fail` 和**任何认不出的值**——一个错别字就让 task 无声判死。现在先经
@@ -146,17 +129,8 @@ def disposition_for(
             "outcome": VERDICT_SUCCESS, "summary": outcome.summary, "outputs": outcome.outputs,
         })
     if verdict == VERDICT_CONTINUE:
-        if retry_count < max_retries:
-            return Disposition("PENDING", "TaskRequeued", {
-                "outcome": VERDICT_CONTINUE, "summary": outcome.summary,
-                "retry_count": retry_count + 1,
-            })
-        # 预算耗尽 → 降级成 fail（今天在 FinalizeStep:695）。这一支只在**无人值守**那条前台
-        # 路径上走得到：park 的 task 判 continue 时压根不进本函数（带外入口在 success 之前
-        # 就返回了），所以「人正在等着」永远不会被重试预算判死。
-        return Disposition("FAILED", "TaskFailed", {
-            "error_code": TaskErrorCode.RETRY_EXHAUSTED,
-            "error_message": outcome.error,
+        return Disposition("PENDING", "TaskRequeued", {
+            "outcome": VERDICT_CONTINUE, "summary": outcome.summary,
             "retry_count": retry_count,
         })
     return Disposition("FAILED", "TaskFailed", {

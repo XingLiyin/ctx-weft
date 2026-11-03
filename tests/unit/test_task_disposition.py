@@ -35,20 +35,14 @@ def test_observer_fail_fails_with_its_own_code():
     assert d.payload["error_message"] == "观察者判死"
 
 
-def test_retry_with_budget_requeues():
-    d = disposition_for(_completed("continue", summary="再来"), retry_count=1, max_retries=3)
+@pytest.mark.parametrize("retry_count,max_retries", [(0, 0), (0, 3), (1, 3), (3, 3), (99, 3)])
+@pytest.mark.parametrize("verdict", ["continue", "retry", "unknown"])
+def test_continue_requeues_without_consuming_exception_retry_budget(retry_count, max_retries, verdict):
+    d = disposition_for(_completed(verdict, summary="再来"),
+                        retry_count=retry_count, max_retries=max_retries)
     assert d.status == "PENDING"
     assert d.event_type == "TaskRequeued"
-    assert d.payload["retry_count"] == 2      # 已 +1，与今天 finalize 的行为一致
-
-
-def test_retry_exhausted_degrades_to_failed():
-    """这条判断今天在 FinalizeStep 里——它是重试预算，属于处置不属于判决。"""
-    d = disposition_for(_completed("continue", error="本轮受阻"), retry_count=3, max_retries=3)
-    assert d.status == "FAILED"
-    assert d.event_type == "TaskFailed"
-    assert d.payload["error_code"] == "TASK_FAILED_RETRY_EXHAUSTED"
-    assert d.payload["error_message"] == "本轮受阻"
+    assert d.payload == {"outcome": "continue", "summary": "再来", "retry_count": retry_count}
 
 
 def test_awaiting_human_carries_the_hitl_id():

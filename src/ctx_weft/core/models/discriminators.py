@@ -42,6 +42,7 @@ class TaskErrorCode(StrEnum):
     """task 结局码。异常派生的码走 `CtxWeftError.code`，不在此列。"""
 
     BY_OBSERVER = "TASK_FAILED_BY_OBSERVER"
+    #: 旧版 continue 耗尽重试预算的失败码；保留用于读取历史事件与恢复已提交决定。
     RETRY_EXHAUSTED = "TASK_FAILED_RETRY_EXHAUSTED"
     BY_THRESHOLD = "TASK_FAILED_BY_THRESHOLD"
     # spec: task-handoff——依赖阻塞取消：前序依赖落 FAILED/CANCELED、后继判明
@@ -50,6 +51,5 @@ class TaskErrorCode(StrEnum):
     # （spec: tool-operations）。
     BLOCKED_BY_FAILED_DEP = "BLOCKED_BY_FAILED_DEP"
     #: 自治作业的 INTERRUPTED 退避重排预算耗尽（`TaskManager._schedule_autonomous_requeue`）。
-    #: 与 `RETRY_EXHAUSTED` 同族但不同源：那个数的是 run 内的重试，这个数的是「停下来、
-    #: 退避、再起一次」的轮数。分开是为了让 host 能区分「任务本身做不成」与「环境一直不行」。
+    #: 此预算数的是「停下来、退避、再起一次」的轮数，与运行异常的原地重试次数分开。
     AUTONOMOUS_REQUEUE_EXHAUSTED = "TASK_FAILED_AUTONOMOUS_REQUEUE_EXHAUSTED"

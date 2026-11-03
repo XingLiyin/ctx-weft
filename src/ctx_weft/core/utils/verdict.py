@@ -32,7 +32,7 @@ success-without-outputs 护栏读的是 `task.outputs`，而 park 前合成的 o
 
 认不出的值 → `continue`，**决不是 `fail`**。改名前 `disposition_for` 的末尾是个 catch-all，
 `fail` 与任何拼错的值共用它——一个错别字就让 task 无声判死。方向反了：拿不准时该继续，不该
-判死（`max_retries` 自会收口）。
+判死；continue 不消耗运行异常的重试预算，也不因预算耗尽降级为 fail。
 """
 
 from __future__ import annotations

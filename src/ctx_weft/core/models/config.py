@@ -35,6 +35,7 @@ class RuntimeConfig:
     # `task_max_concurrent + 当前要派发的交互口数`，且自治作业会被交互挤压。
     # `<= 0` 仍是总闸：一个都不派，交互 task 也不例外。详见 `TaskManager.drain`。
     task_max_concurrent: int = 4
+    #: 运行异常的重试预算；observer 判 continue 的续跑不消耗此预算。
     task_max_retries: int = 3
     # 自治作业（`Task.unattended`）落 INTERRUPTED 后的自动退避重排预算。
     #

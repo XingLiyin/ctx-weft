@@ -18,7 +18,8 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.mark.parametrize("receipt_lost", [False, True])
-async def test_stopped_requeue_submission_consumes_retry_budget_once(receipt_lost):
+@pytest.mark.parametrize("retry_kind,expected_count", [("continue", 0), ("interrupted", 1)])
+async def test_stopped_requeue_submission_preserves_committed_budget(receipt_lost, retry_kind, expected_count):
     from ctx_weft.core.models.task import Task
     from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind
     from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
@@ -48,18 +49,20 @@ async def test_stopped_requeue_submission_consumes_retry_budget_once(receipt_los
         return await original(sid, bid, events)
     store.append_batch = append_batch
     with pytest.raises(PersistenceUnavailableError):
-        await tm.apply_run_outcome(task.id, RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="continue"))
+        await tm.apply_run_outcome(task.id, RunOutcome(
+            kind=RunOutcomeKind.COMPLETED if retry_kind == "continue" else RunOutcomeKind.INTERRUPTED,
+            verdict="continue", retriable=True))
     assert task.retry_count == 0
     assert task.status == "ACTIVE" and not notified
     store.append_batch = original
     await tm.reconcile_stopped_tasks()
-    assert task.retry_count == 1 and task.status == "PENDING"
-    assert notified == [("PENDING", 1)]
+    assert task.retry_count == expected_count and task.status == "PENDING"
+    assert notified == [("PENDING", expected_count)]
     assert not tm.running_task_ids()
     assert [e.task_id for e in tm._queue.peek_all()] == [task.id]
     head = await store.committed_head("s1")
     await tm.reconcile_stopped_tasks()
-    assert task.retry_count == 1
+    assert task.retry_count == expected_count
     assert await store.committed_head("s1") == head
 
 

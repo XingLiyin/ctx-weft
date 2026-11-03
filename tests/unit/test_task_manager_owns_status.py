@@ -301,23 +301,32 @@ def _of(bus: _CapturingBus, et: EventType):
     return next(e for e in bus.events if e.type == et)
 
 
-async def test_retry_exhausted_now_decided_by_task_manager() -> None:
-    """重试耗尽的降级判断从 FinalizeStep 搬到了 TM，结果必须一模一样。"""
+async def test_continue_at_retry_limit_keeps_requeueing_without_session_failure() -> None:
+    """连续多次 continue 不按异常重试预算判死，也不计入 session 连败。"""
     bus = _CapturingBus()
     tm, t = _setup(bus, retry_count=3, max_retries=3)
+    tm._max_concurrent = 0
     tm.set_runner(_OutcomeRunner(tm, RunOutcome(
         kind=RunOutcomeKind.COMPLETED, verdict="continue", error="stuck")))
 
+    for _ in range(6):
+        await _run(tm)
+        assert t.status == "PENDING"
+        assert t.retry_count == 3
+        assert tm.session.failure_counter == 0
+
+    assert not any(e.type == EventType.TASK_FAILED for e in bus.events)
+    assert not tm._threshold_tripped
+
+    tm.set_runner(_OutcomeRunner(tm, RunOutcome(
+        kind=RunOutcomeKind.COMPLETED, verdict="fail", error="observer rejected the result")))
     await _run(tm)
-
-    ev = _of(bus, EventType.TASK_FAILED)
-    assert ev.payload["error_code"] == "TASK_FAILED_RETRY_EXHAUSTED"
-    assert ev.payload["error_message"] == "stuck"
+    assert _of(bus, EventType.TASK_FAILED).payload["error_code"] == "TASK_FAILED_BY_OBSERVER"
     assert t.status == "FAILED"
+    assert tm.session.failure_counter == 1
 
 
-async def test_retry_within_budget_writes_back_retry_count() -> None:
-    """处置表不 mutate；新的 retry_count 必须由 TM 写回 task，否则预算永不消耗。"""
+async def test_continue_preserves_existing_exception_retry_count() -> None:
     bus = _CapturingBus()
     tm, t = _setup(bus, retry_count=1, max_retries=3)
     tm._max_concurrent = 0                       # drain 空转，不再次派发
@@ -327,8 +336,8 @@ async def test_retry_within_budget_writes_back_retry_count() -> None:
     await _run(tm)
 
     ev = _of(bus, EventType.TASK_REQUEUED)
-    assert ev.payload["retry_count"] == 2
-    assert t.retry_count == 2                    # ← 写回
+    assert ev.payload["retry_count"] == 1
+    assert t.retry_count == 1
     assert t.status == "PENDING"
 
 

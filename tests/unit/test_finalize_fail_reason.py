@@ -8,7 +8,7 @@ error_message = task.error；无死因（如规则 observe 判死）置空——
 Task 4 起 **TaskFailed 由 TaskManager 发**：FinalizeStep 只产出 `RunOutcome`
 （带 observer 的原值 verdict + task.error），payload 由 `disposition_for` 算。
 本文件因此改成「跑完 FinalizeStep → 把它产出的 RunOutcome 喂处置表 → 断 payload」，
-**期望值一字未改**——变的只是这份 payload 从哪条代码路径出来。
+continue 不因异常重试预算耗尽而生成失败收尾。
 """
 
 from __future__ import annotations
@@ -76,8 +76,8 @@ def _task_failed_payload(step_outcome, task) -> dict:
     return disp.payload
 
 
-async def _retry_exhausted_state(mem, *, task_error: str | None):
-    """observer 判 retry 但 retry_count 已到上限——finalize 应降级 fail（程序熔断）。"""
+async def _continuing_state(mem, *, task_error: str | None):
+    """observer 判 continue，异常重试计数已到上限。"""
     scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="ag2")
     await mem.ingest(MemoryEvent(type=T.USER_PROMPT, address=scope, content="do it",
                                  timestamp=datetime(2026, 1, 1, tzinfo=UTC),
@@ -94,27 +94,29 @@ async def _retry_exhausted_state(mem, *, task_error: str | None):
                            scope=scope, task=task, agent=agent, verdict=verdict, extra={})
 
 
-async def test_retry_exhausted_downgrade_has_own_code_and_blocker() -> None:
-    """retry 耗尽降级：error_code 专属 TASK_FAILED_RETRY_EXHAUSTED（非 BY_OBSERVER），
-    error_message = 最后一轮 retry 判决写的受阻原因（task.error）。"""
+@pytest.mark.parametrize("task_error", ["登录页有人机校验，自动化被拦", None])
+@pytest.mark.parametrize("has_verdict", [True, False])
+async def test_continue_at_retry_limit_does_not_close_task(monkeypatch, task_error, has_verdict) -> None:
     mem = InMemoryMemoryProvider()
-    state = await _retry_exhausted_state(mem, task_error="登录页有人机校验，自动化被拦")
-    outcome = await FinalizeStep().execute(state, _loop_ctx(mem))
-    payload = _task_failed_payload(outcome, state.task)
-    assert payload["error_code"] == "TASK_FAILED_RETRY_EXHAUSTED"
-    assert payload["error_message"] == "登录页有人机校验，自动化被拦"
-    assert payload["retry_count"] == state.task.max_retries
-    assert state.task.error_code == "TASK_FAILED_RETRY_EXHAUSTED"
+    state = await _continuing_state(mem, task_error=task_error)
+    if not has_verdict:
+        state.verdict = None
 
+    async def unexpected_close(*args, **kwargs):
+        pytest.fail("continue must not write terminal memory or blackboard results")
 
-async def test_retry_exhausted_without_blocker_message_empty() -> None:
-    """耗尽但无受阻原因（旧 prompt / 机械退出轮）→ error_message 置空，host 补固定文案。"""
-    mem = InMemoryMemoryProvider()
-    state = await _retry_exhausted_state(mem, task_error=None)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.finalize.apply_task_close", unexpected_close)
     outcome = await FinalizeStep().execute(state, _loop_ctx(mem))
-    payload = _task_failed_payload(outcome, state.task)
-    assert payload["error_code"] == "TASK_FAILED_RETRY_EXHAUSTED"
-    assert payload["error_message"] == ""
+    run_outcome = outcome.state_patch["run_outcome"]
+    disp = disposition_for(run_outcome, retry_count=state.task.retry_count,
+                           max_retries=state.task.max_retries)
+    assert run_outcome.verdict == "continue"
+    assert disp.status == "PENDING" and disp.event_type == "TaskRequeued"
+    assert disp.payload["retry_count"] == state.task.max_retries
+    assert state.task.retry_count == state.task.max_retries
+    assert state.task.error == task_error
+    assert state.task.error_code is None and state.task.finished_at is None
+    assert outcome.events[0].payload["outcome"] == "continue"
 
 
 async def test_error_message_prefers_task_error() -> None:

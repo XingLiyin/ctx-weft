@@ -190,6 +190,7 @@ class Task:
     # 每轮 guidance（只发不入 memory、priority 1 受保护），随任务终结自然消失。
     next_step_hint: str | None = None
 
+    #: 运行异常的重试次数；observer 判 continue 重排不递增、不受 max_retries 限制。
     retry_count: int = 0
     max_retries: int = 3
     #: 自治作业从 `INTERRUPTED` 被自动退避重排过几次（见

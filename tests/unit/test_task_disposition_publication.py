@@ -25,8 +25,8 @@ def setup(*, retry_count=0):
 @pytest.mark.parametrize("outcome,retries,status,count", [
     (RunOutcome(RunOutcomeKind.COMPLETED, verdict="success"), 0, "FINISHED", 0),
     (RunOutcome(RunOutcomeKind.COMPLETED, verdict="fail"), 0, "FAILED", 0),
-    (RunOutcome(RunOutcomeKind.COMPLETED, verdict="continue"), 0, "PENDING", 1),
-    (RunOutcome(RunOutcomeKind.COMPLETED, verdict="continue"), 3, "FAILED", 3),
+    (RunOutcome(RunOutcomeKind.COMPLETED, verdict="continue"), 0, "PENDING", 0),
+    (RunOutcome(RunOutcomeKind.COMPLETED, verdict="continue"), 3, "PENDING", 3),
     (RunOutcome(RunOutcomeKind.INTERRUPTED, error="connection lost", error_code="LLM_OUTAGE"),
      0, "INTERRUPTED", 0),
     (RunOutcome(RunOutcomeKind.AWAITING_HUMAN, hitl_id="h1"), 0, "AWAITING_HUMAN", 0),
@@ -57,9 +57,10 @@ async def test_subscriber_queries_new_state_only_after_commit(outcome, retries, 
 
 @pytest.mark.parametrize("retry_entry", ["apply", "reconcile"])
 @pytest.mark.parametrize("retry_count", [0, 2])
-async def test_notification_retry_preserves_the_committed_budget(retry_entry, retry_count):
+@pytest.mark.parametrize("kind", [RunOutcomeKind.COMPLETED, RunOutcomeKind.INTERRUPTED])
+async def test_notification_retry_preserves_the_committed_budget(retry_entry, retry_count, kind):
     tm, task, bus, store = setup(retry_count=retry_count)
-    expected_count = retry_count + 1
+    expected_count = retry_count + (kind is RunOutcomeKind.INTERRUPTED)
     attempts = []
 
     async def notify(event):
@@ -68,7 +69,7 @@ async def test_notification_retry_preserves_the_committed_budget(retry_entry, re
             raise RuntimeError("required subscriber unavailable after commit")
 
     bus.subscribe(EventType.TASK_REQUEUED, notify, provisional=True, required=True)
-    outcome = RunOutcome(RunOutcomeKind.COMPLETED, verdict="continue")
+    outcome = RunOutcome(kind, verdict="continue", retriable=True)
     with pytest.raises(RuntimeError, match="required subscriber unavailable"):
         await tm.apply_run_outcome(task.id, outcome)
     assert task.status == "PENDING" and task.retry_count == expected_count
@@ -89,4 +90,4 @@ async def test_manager_without_bus_still_publishes_disposition():
     task = Task(id="t1", session_id="s1", status="ACTIVE")
     tm.register_task(task)
     await tm.apply_run_outcome(task.id, RunOutcome(RunOutcomeKind.COMPLETED, verdict="continue"))
-    assert (task.status, task.retry_count) == ("PENDING", 1)
+    assert (task.status, task.retry_count) == ("PENDING", 0)

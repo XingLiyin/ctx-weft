@@ -1,4 +1,4 @@
-"""A normal message exhausting four 50-turn attempts publishes current task state."""
+"""Repeated 50-turn boundaries continue until the observer explicitly fails."""
 
 import asyncio
 
@@ -14,7 +14,7 @@ from ctx_weft.protocols.capability import (
 )
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events import InMemoryEventStore
-from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
+from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse, observer_success_with
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from tests._initialization import initialize_all
 from tests.integration.test_minimal_loop import (
@@ -46,10 +46,15 @@ class _WorkTool(ToolCapabilityProvider):
 
 class _LimitLLM(MockLLMAdapter):
     def __init__(self):
-        super().__init__([
-            MockResponse(tool_calls=[ToolCall(id=f"work_{i}", name="work__advance", arguments={})])
-            for i in range(200)
-        ], observer_verdict="continue")
+        responses = []
+        for attempt in range(5):
+            responses.extend(
+                MockResponse(tool_calls=[ToolCall(
+                    id=f"work_{attempt}_{i}", name="work__advance", arguments={})])
+                for i in range(50)
+            )
+            responses.append(observer_success_with("continue" if attempt < 4 else "fail"))
+        super().__init__(responses)
 
     def complete(self, request, stream=True):
         if any(t.name == "control__update_task_metadata" for t in request.tools or []):
@@ -61,7 +66,7 @@ class _LimitLLM(MockLLMAdapter):
 
 
 @pytest.mark.asyncio
-async def test_subscribers_see_each_retry_and_final_failure_without_another_event():
+async def test_turn_limits_preserve_budget_until_explicit_observer_failure():
     provider = InlineAgentTemplateProvider()
     template = make_echo_template()
     template.capability_refs = [CapabilityRef(capability_id="work:advance", mode="required")]
@@ -87,19 +92,24 @@ async def test_subscribers_see_each_retry_and_final_failure_without_another_even
         session_id="turn-limit", template_id="agent:tpl_echo", user_prompt="Complete the work",
 
     ))
-    await handle.wait_for_finish(timeout=20)
+    await handle.wait_for_finish(timeout=30)
     tm = runtime._task_managers[handle.session_id]
     while tm._background_asyncio_tasks:
         await asyncio.gather(*list(tm._background_asyncio_tasks))
 
     assert queried == [
-        (50, EventType.TASK_REQUEUED, "PENDING", 1),
-        (100, EventType.TASK_REQUEUED, "PENDING", 2),
-        (150, EventType.TASK_REQUEUED, "PENDING", 3),
-        (200, EventType.TASK_FAILED, "FAILED", 3),
+        (50, EventType.TASK_REQUEUED, "PENDING", 0),
+        (100, EventType.TASK_REQUEUED, "PENDING", 0),
+        (150, EventType.TASK_REQUEUED, "PENDING", 0),
+        (200, EventType.TASK_REQUEUED, "PENDING", 0),
+        (250, EventType.TASK_FAILED, "FAILED", 0),
     ]
     task = tm.get_task(handle.task_id)
-    assert not task.unattended and task.error_code == "TASK_FAILED_RETRY_EXHAUSTED"
+    assert not task.unattended
+    rows = await store.read_range(handle.session_id)
+    failed, = [r.event for r in rows if r.event.type == EventType.TASK_FAILED]
+    assert failed.payload["error_code"] == "TASK_FAILED_BY_OBSERVER"
+    assert task.retry_count == 0 and tm.session.failure_counter == 1
     assert tm.is_done() and not tm.running_task_ids()
     assert (await runtime.get_agent(handle.agent_id)).data.status == "idle"
     await subscription.unsubscribe()
