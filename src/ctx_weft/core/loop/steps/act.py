@@ -12,6 +12,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from ctx_weft.core.assembler.context import PromptContext
@@ -46,6 +47,7 @@ from ctx_weft.core.utils.ids import MintedCall, generate_id, mint_turn_call_ids
 from ctx_weft.protocols import (
     LLMMessage,
     LLMUsage,
+    MemoryAddress,
     MemoryEvent,
     MemoryKind,
     MemoryScope,
@@ -145,7 +147,7 @@ class ActStep(Step):
                 # 3) assistant 回合落 memory + 接回 message 历史 + 记 transcript
                 persisted_turn = await _ingest_assistant_turn(
                     state, ctx, turn.text, turn.tool_calls, turn.usage, turn_num,
-                    anchor=turn.anchor, minted=turn.minted)
+                    anchor=turn.anchor, minted=turn.minted, timestamp=turn.memory_timestamp)
                 asst_tool_dicts = persisted_turn.tool_calls
                 state.extra["assistant_record_id"] = persisted_turn.record_id
                 appended_messages.append(LLMMessage(
@@ -372,6 +374,7 @@ class _LLMTurnOutput:
     minted: list[MintedCall] = dataclasses.field(default_factory=list)
     provider_state: dict[str, Any] = dataclasses.field(default_factory=dict)
     messages_sent: list[LLMMessage] = dataclasses.field(default_factory=list)
+    memory_timestamp: datetime | None = None
 
 
 async def _run_llm_turn(
@@ -469,7 +472,7 @@ async def _run_llm_turn(
             getattr(guard, "last_tools_signature", ""),
             getattr(guard, "last_tools_est", 0))
 
-    await ctx.event_bus.emit(make_event(
+    finished = make_event(
         state, EventType.LLM_RESPONSE_FINISHED,
         payload={
             "request_id": req_id, "content": text, "reasoning": reasoning,
@@ -480,12 +483,13 @@ async def _run_llm_turn(
             "usage": dataclasses.asdict(usage),
             # 本次调用实际使用的模型/账号（host 云端上报按此计账，不再受切换竞态影响）
             "llm_model": model, "llm_account": llm_account,
-            "finish_reason": "tool_use" if tool_calls else "stop", "turn": turn_num}))
+            "finish_reason": "tool_use" if tool_calls else "stop", "turn": turn_num})
+    await ctx.event_bus.emit(finished)
 
     return _LLMTurnOutput(
         text=text, reasoning=reasoning, tool_calls=tool_calls, usage=usage,
         anchor=anchor, minted=minted, provider_state=result.provider_state,
-        messages_sent=llm_request.messages)
+        messages_sent=llm_request.messages, memory_timestamp=finished.timestamp)
 
 
 def _can_recover_context(state: LoopState) -> bool:
@@ -568,12 +572,13 @@ class PersistedAssistantTurn:
     tool_calls: list[dict]
 
 
-async def _ingest_assistant_turn(
-    state: LoopState, ctx: LoopContext, text: str, tool_calls: list[ToolCall],
+def _assistant_memory_event(
+    address: MemoryAddress, text: str, tool_calls: list[ToolCall],
     usage: LLMUsage, turn_num: int,
     anchor: str = "", minted: list[MintedCall] | None = None,
-) -> PersistedAssistantTurn:
-    """把本轮 assistant 回合入 task 层 memory；返回结构化（record_id + tool_calls）。
+    timestamp: datetime | None = None,
+) -> tuple[MemoryEvent, list[dict]]:
+    """Build the same assistant record for live writes and finished-event recovery.
 
     派发(submit_*)/silent 工具的 tool_call 排除出 LLM_RESPONSE.metadata（派发落 agent 层
     delegate conversation turn、silent 结果不入对话），避免无配对 TOOL_RESULT 的悬挂调用破坏
@@ -595,22 +600,14 @@ async def _ingest_assistant_turn(
         asst_tool_dicts.append(d)
     _excluded = DISPATCH_TOOLS | SILENT_TOOLS
     non_dispatch_tool_dicts = [d for d in asst_tool_dicts if d["name"] not in _excluded]
-    # 经 `ingest_or_stage`：正常路径上这一轮早已提交（首 chunk 就是提交点），分流直写；
-    # 唯一走暂存的是「LLM 流一个 chunk 都没吐就正常结束」——那时窗口还开着，直写会让
-    # memory 里出现一条属于「还没算数的一轮」的 assistant 回合（崩溃后它甚至可能属于一个
-    # 日志里不存在的 task）。id 是预铸的锚，暂存安全。
-    from ctx_weft.core.loop.driver import ingest_or_stage
-    # 锚缺省（旧测试直调）时自己铸一个：暂存需要一个稳定 id，而落库返回值这条路上
-    # 已经没人再给了。生产路径恒有锚（`_run_llm_turn` 预铸）。
     record_id = anchor or generate_id("asst")
-    await ingest_or_stage(
-        ctx.memory,
+    return (
         MemoryEvent(
             id=record_id,
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
-            address=state.scope,
+            address=address,
             content=text,
-            timestamp=now_utc(),
+            timestamp=timestamp or now_utc(),
             role="assistant",
             metadata={
                 "turn": turn_num,
@@ -619,12 +616,29 @@ async def _ingest_assistant_turn(
                 "usage": dataclasses.asdict(usage),
             },
         ),
-        ctx.provider_ctx,
+        asst_tool_dicts,
+    )
+
+
+async def _ingest_assistant_turn(
+    state: LoopState, ctx: LoopContext, text: str, tool_calls: list[ToolCall],
+    usage: LLMUsage, turn_num: int,
+    anchor: str = "", minted: list[MintedCall] | None = None,
+    timestamp: datetime | None = None,
+) -> PersistedAssistantTurn:
+    """Persist or stage a live turn; recovery ingests the built event directly."""
+    from ctx_weft.core.loop.driver import ingest_or_stage
+
+    event, tool_dicts = _assistant_memory_event(
+        state.scope, text, tool_calls, usage, turn_num, anchor, minted, timestamp)
+    # Empty streams may still belong to a provisional round. Preserve staging.
+    await ingest_or_stage(
+        ctx.memory, event, ctx.provider_ctx,
         task_manager=getattr(ctx, "task_manager", None),
         # 鸭子类型的 state 替身（单测直调本函数）可能没有 task。
         task_id=getattr(getattr(state, "task", None), "id", ""),
     )
-    return PersistedAssistantTurn(record_id=record_id or "", tool_calls=asst_tool_dicts)
+    return PersistedAssistantTurn(record_id=event.id or "", tool_calls=tool_dicts)
 
 
 def _predispatch_compact_options(

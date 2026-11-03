@@ -397,6 +397,8 @@ class MemoryProvider(Protocol):
         Pending observe requests retain these references until ObserveApplied.
         Prompt input snapshots retain them for the lifetime of the prompt event,
         including any associated image blobs, even after folding/supersession.
+        Assistant records referenced by LLMResponseFinished must likewise remain
+        addressable by ID after supersession; snapshot verification trusts these IDs.
         Providers that archive folded records must keep them addressable by ID.
         Return each existing requested ID once, ordered by (timestamp, seq_no),
         retaining request order for exact ties.

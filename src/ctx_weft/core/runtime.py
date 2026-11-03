@@ -707,6 +707,7 @@ class CtxWeftRuntime:
         # /resume 并发建出两个 TaskManager、两套 drain 竞争派发（spec/07 §9）。惰性建、不回收
         # （体量微小、按 session 数有界）。
         self._resume_locks: dict[str, asyncio.Lock] = {}
+        self._assistant_memory_locks: dict[str, asyncio.Lock] = {}
         self._session_lock_owners: dict[str, asyncio.Task] = {}
         self._loaded_sessions: set[str] = set()
         self._initialized_sessions: set[str] = set()
@@ -779,7 +780,8 @@ class CtxWeftRuntime:
                 from ctx_weft.core.control.snapshot_writer import SnapshotWriter
                 writer = SnapshotWriter(self.event_store, self._event_bus,
                                         every_n_events=self._snapshot_every_n,
-                                        memory_settled=self._memory_settled)
+                                        memory_settled=self._memory_settled,
+                                        get_memory=self.providers.get_memory)
             # handle 统一暴露：required 模式 persister=None（提交走 gate）、writer 可 detach。
             self.persistence = PersistenceHandle(None, writer)
         else:
@@ -791,7 +793,7 @@ class CtxWeftRuntime:
             from ctx_weft.core.control.snapshot_writer import attach_snapshotting
             self.persistence = attach_snapshotting(
                 self._event_bus, self.event_store, every_n=self._snapshot_every_n,
-                memory_settled=self._memory_settled)
+                memory_settled=self._memory_settled, get_memory=self.providers.get_memory)
 
         self._agent_lifecycle_manager.attach_to_bus()
         self._session_registry.attach_to_bus()
@@ -1948,9 +1950,9 @@ class CtxWeftRuntime:
         await self.hitl.close_resolved(session_id, task_id=task_id)
 
     def _memory_settled(self, session_id: str) -> bool:
-        """这一刻该 session 的 memory 效果是否都已落地——**快照写入的前置条件**。
+        """输入暂存效果是否落地——快照写入前置条件。assistant 另有独立核对水位。
 
-        不变式：**有快照 ⟹ 到它的 `committed_head` 为止，memory 效果都已落地。** 恢复路径
+        对输入暂存区的不变式：**有快照 ⟹ 到切面为止，输入 memory 效果都已落地。** 恢复路径
         「以快照为准」全靠它；一张领先的快照是静默的数据丢失（它说某件事做完了，所以
         `pending_observe` / HITL `resolved` 里没有它，而 memory 里其实没有）。
 
@@ -1961,9 +1963,9 @@ class CtxWeftRuntime:
         `SnapshotWriter` 是 rest 订阅者，在补投那一步就被叫醒了。实测见
         `tests/unit/test_snapshot_not_ahead_of_memory.py`。
 
-        恢复完成后，窗口之外 memory 是同步直落的（`ingest_or_stage` 的另一支），而 `RunFinished` 在 run
-        体末尾的 `finally` 里发——那时这条 run 自己的写入已经落定。所以「恢复完成且没有开着的窗」就是
-        这个不变式的充分条件。
+        恢复完成后，窗口之外的输入写入由调用方同步等待。「恢复完成且没有开着的窗」
+        保护的是这条输入边界。assistant 写入失败仍可能进入 RunFinished 的 finally；
+        那类缺口必须由 assistant_memory_verified_position 保留，不能由本谓词宣称完成。
 
         **这个判断为什么必须在 core**：它读的是 `TaskManager` 的窗口状态，而 provider 只看得
         见 EventBus。把它留在 provider 手里，provider 只能拿「收到某个事件」当代理，而那个
@@ -2284,6 +2286,7 @@ class CtxWeftRuntime:
         sess_proj = view.sessions[session_id]
         session = session_from_projection(sess_proj)
         session.tenant_id = tenant_id
+        await self._restore_assistant_messages(session)
         recap_task_ids = {info.get("task_id", key) for key, info in view.pending_observe.items()}
         missing_recaps = {tid for tid in recap_task_ids
                           if tid not in view.tasks or not view.tasks[tid].details_complete}
@@ -2817,6 +2820,7 @@ class CtxWeftRuntime:
 
         from ctx_weft.core.loop.steps.observe import blocks_actor_recovery
         try:
+            await self._restore_assistant_messages(session)
             if task.status == "CANCELED":
                 # Repair cancellation before the obsolete observation can publish
                 # Applied and release the task retained for recovery.
@@ -3058,6 +3062,7 @@ class CtxWeftRuntime:
         tm.set_recovery_pending(True)
         await self.hitl.confirm_opens(tm.session.id)
         await self.hitl.confirm_resolutions(tm.session.id)
+        await self._restore_assistant_messages(tm.session)
         await tm.reconcile_stopped_tasks()
         await self._repair_observe_handoffs(tm)
         if resumed_task_id is not None:
@@ -3200,6 +3205,7 @@ class CtxWeftRuntime:
                 raise RuntimeError(f"Session {session_id!r} not found in event store")
 
             session = session_from_projection(proj)
+            await self._restore_assistant_messages(session)
             pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id)
             # 水合，不新建：target_agent_id 是已存在 agent。register_session 保证跨
             # 重启后 registry 为空时 materialize 的回落有正确的 session 语境（幂等）。
@@ -4555,6 +4561,47 @@ class CtxWeftRuntime:
             },
         )
 
+    async def _restore_assistant_messages(self, session: "Session") -> None:
+        """Repair only finished references after the independently verified memory cut.
+
+        State snapshots may be ahead of assistant writes; never use their state
+        cut (or their pruned task set) to skip this scan. No model/tool calls.
+        """
+        from ctx_weft.core.control.reducers import assistant_memory_floor, missing_assistant_memories
+        from ctx_weft.core.loop.steps.act import _assistant_memory_event
+        from ctx_weft.protocols import LLMUsage, ToolCall
+
+        lock = self._assistant_memory_locks.setdefault(session.id, asyncio.Lock())
+        async with lock:
+            head = await self.event_store.committed_head(session.id)
+            floor = await assistant_memory_floor(self.event_store, session.id, head=head)
+            memory = self.providers.get_memory()
+            async for missing in missing_assistant_memories(
+                    self.event_store, memory, session.id, session.tenant_id,
+                    after_position=floor, through_position=head):
+                row, = await self.event_store.read_range(
+                    session.id, after_position=missing.position - 1,
+                    through_position=missing.position,
+                    include_types=(EventType.LLM_RESPONSE_FINISHED,))
+                ev, p = row.event, row.event.payload
+                pctx = ProviderContext(session_id=session.id, tenant_id=session.tenant_id,
+                                       task_id=ev.task_id, agent_id=ev.agent_id)
+                event, _ = _assistant_memory_event(
+                    MemoryAddress(session_id=session.id, task_id=ev.task_id, agent_id=ev.agent_id),
+                    p["content"], [ToolCall(**call) for call in p.get("tool_calls", [])],
+                    LLMUsage(**p.get("usage", {})), p.get("turn", 0),
+                    anchor=p["memory_id"], timestamp=ev.timestamp)
+                try:
+                    await memory.ingest(event, pctx)
+                except Exception:
+                    # A concurrent live writer or a lost commit acknowledgement
+                    # may already have created the immutable row.
+                    if not await memory.read_records([event.id], pctx):
+                        raise
+                if not await memory.read_records([event.id], pctx):
+                    raise RuntimeError(f"Assistant memory write not confirmed: {event.id}")
+                logger.warning("Restored assistant memory %s from finished event %s", event.id, ev.id)
+
     async def _restore_appended_messages(self, session: "Session") -> None:
         """恢复期补写：`TaskMessageAppended` 记着、memory 里却没有的注入消息，按原 id / 原时间戳写回。
 
@@ -5487,6 +5534,7 @@ class _SessionTaskRunner:
             return None
         sess_id = self._session.id
         tenant_id = self._session.tenant_id
+        await self._runtime._restore_assistant_messages(self._session)
 
         # Cython 3.2 does not support structural pattern matching.
         s = t.settings

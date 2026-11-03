@@ -565,7 +565,11 @@ TM 区分前两者靠的是 **task 状态**，那本来就是它自己的领域�
 
 流式恢复：`LLMRequestStarted`/`LLMPromptSent` 每次逻辑调用只发一次。重试严格串行，旧流关闭并解除结果引用后才发废弃事件，再退避并创建全新累积状态。失败正文、思考、工具参数和 provider_state 不传入下一次请求，不写入业务 memory、不执行工具。正常结果仍由调用方发一次 `LLMResponseFinished`。次数共用 `llm_self_heal_max_attempts`；首次中途断流另启 `llm_midstream_recovery_max_duration_sec` 窗口，后续不刷新，只限制下一次首包等待和退避，不中断正常持续输出。预算耗尽沿原有 LLM outage 路径进入 INTERRUPTED。会话用户输入/HITL 的提交不随生成废弃回滚。
 
-`LLMResponseFinished.memory_id` 与 `MemoryRecord.id` 相等；再按该回复事件的 `request_id` 关联 `LLMPromptSent`，即可串起 memory、回复与生成它的 prompt。memory metadata 不额外保存 `request_id`。回复事件先于 memory 写入发出，因此此引用不代表记录已经落盘；消费者应允许暂时读不到。用户打断时保存的半截回复沿用既有行为，不发 `LLMResponseFinished`，不在此关联范围内。
+`LLMResponseFinished.memory_id` 与 `MemoryRecord.id` 相等；再按该回复事件的 `request_id` 关联 `LLMPromptSent`，即可串起 memory、回复与生成它的 prompt。memory metadata 不额外保存 `request_id`。回复事件先于 memory 写入发出，缺失时由 Runtime 从事件幂等补写；正常写入和补写共用 assistant 记录构造逻辑，并使用事件时间。事件中没有的 `raw_tool_call_id` 不猜测补造，已有内部工具调用 ID 保持原样。用户打断保存的半截回复没有此 finished 事件，沿用原有行为。
+
+`StateSnapshot.payload.assistant_memory_verified_position` 是独立的 assistant memory 核对水位 P，缺省或非法值为 0；始终满足 `0 <= P <= cut_position`。状态切面 C 可以领先于 P，不能用状态切面或已裁剪的 task 集合跳过 assistant 补写。写快照时按固定 C、分批检查 `(P, C]` 内 finished 的 memory ID（包含已 superseded 记录）：全部存在则推进到 C，发现首个缺失位置 Q 则只推进到 Q-1；读取失败保留原水位。快照只核对，不执行补写。未接 memory provider 的快照写入方不能自行推进水位。
+
+会话冷加载、活 owner 恢复、任务派发/自动重试、独立压缩和 observe 恢复在读取依赖记忆前核对 `(P, H]`，H 是本次固定的已提交位置。先按类型和位置投影读取 ID，只为缺失项读取完整事件；直接 ingest、按原 ID 幂等并回读确认，不走暂存区，也不调用模型或工具。失败向上传播，不放行依赖缺失记忆的执行。旧快照、无快照和关闭快照时 P=0，需要分批建立基线；兼容快照之后只核对水位后的增量。已写记录须保留按 ID 读取的能力，未核对完的源事件不能提前清理。这个机制修复漏写，不是检测已确认记录被外部物理删除的全量审计。
 
 ⚡ = TRANSIENT，不持久化。
 

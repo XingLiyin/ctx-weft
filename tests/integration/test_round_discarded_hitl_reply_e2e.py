@@ -114,7 +114,7 @@ async def _wait_for_wait_bubble(rt, session_id: str, timeout: float = 5.0):
 async def test_pause_before_first_chunk_puts_the_answered_bubble_back() -> None:
     llm = _StallsBeforeFirstChunkLLM(
         responses=[MockResponse(text=f"answer {i}") for i in range(8)],
-        context_limit=_MOCK_CONTEXT_LIMIT)
+        context_limit=_MOCK_CONTEXT_LIMIT, observer_verdict="continue")
     rt = _runtime(llm)
 
     await initialize_all(rt)
@@ -238,7 +238,7 @@ async def test_retyped_reply_survives_a_restart_in_the_discard_window() -> None:
     """
     llm = _StallsBeforeFirstChunkLLM(
         responses=[MockResponse(text=f"answer {i}") for i in range(8)],
-        context_limit=_MOCK_CONTEXT_LIMIT)
+        context_limit=_MOCK_CONTEXT_LIMIT, observer_verdict="continue")
     rt = _runtime(llm)
 
     await initialize_all(rt)

@@ -62,7 +62,9 @@ from ctx_weft.core.control.reducers import (
     _PROJECTION_VERSION,
     REPLAY_EXCLUDE_TYPES,
     apply_events,
+    assistant_memory_floor,
     deserialize_view,
+    missing_assistant_memories,
     prune_view_for_snapshot,
     replay_session,
     snapshot_event_payload,
@@ -105,6 +107,7 @@ class SnapshotWriter:
         *,
         every_n_events: int = DEFAULT_SNAPSHOT_EVERY_N_EVENTS,
         memory_settled: "Callable[[str], bool] | None" = None,
+        get_memory: "Callable[[], Any] | None" = None,
     ) -> None:
         self._store = event_store
         self._every_n = max(1, every_n_events)
@@ -112,6 +115,7 @@ class SnapshotWriter:
         #: （那是它自己的 ingest 路径）。见 `_is_safe_to_write` 的说明。None = 一律放行
         #: （无 TaskManager 的极简接线 / 单测）。
         self._memory_settled = memory_settled
+        self._get_memory = get_memory
         self._since_snapshot: dict[str, int] = {}
         # 这里从前还有一个 `_anchored: set[str]`（本进程已写过快照的 session），用来强制
         # 「服务每次起来的第一张快照走全量重锚」。2026-09-20 删——理由见 `_usable_base`。
@@ -125,7 +129,8 @@ class SnapshotWriter:
     def _is_safe_to_write(self, session_id: str) -> bool:
         """现在写一张快照，会不会写出一张**领先于 memory** 的？
 
-        不变式：**有快照 ⟹ 到它的 `committed_head` 为止，memory 效果都已落地。** 恢复路径
+        本门保护输入暂存等既有写入边界；assistant 回复另用独立核对水位，允许落后于状态切面。
+        对本门保护的输入，不变式是：**有快照 ⟹ 到切面为止，输入 memory 效果都已落地。** 恢复路径
         「以快照为准」全靠它——一张领先的快照就是静默的数据丢失（它说某件事做完了，所以
         `pending_observe` / HITL `resolved` 里没有它，而 memory 里其实没有）。
 
@@ -234,6 +239,23 @@ class SnapshotWriter:
         # 信号，不是边界（WP3 后 writer 收到的都是已确认事件，C ≥ 触发事件 position）。
         # H2 的修复完全在这个游标的定义里。
         head = await self._store.committed_head(session_id)
+        # Recheck after capturing the cut: another producer may have opened a
+        # provisional input window while committed_head was awaiting storage.
+        if not self._is_safe_to_write(session_id):
+            return
+        assistant_position = await assistant_memory_floor(self._store, session_id, head=head)
+        if self._get_memory is not None:
+            try:
+                async for missing in missing_assistant_memories(
+                        self._store, self._get_memory(), session_id, event.tenant_id,
+                        after_position=assistant_position, through_position=head):
+                    assistant_position = missing.position - 1
+                    break
+                else:
+                    assistant_position = head
+            except Exception:
+                # A state snapshot may advance; an unverified memory cut cannot.
+                logger.exception("SnapshotWriter: assistant memory verification failed (%s)", session_id)
         base = await self._usable_base(session_id, head)
 
         if base is not None:
@@ -319,6 +341,7 @@ class SnapshotWriter:
             # 编码器不碰它。
             payload=snapshot_event_payload(
                 view, cut=head, chain_depth=depth, reason=reason,
+                assistant_memory_verified_position=assistant_position,
                 current_task_statuses=current_task_statuses),
         )
         await self._store.append_batch(
@@ -337,6 +360,7 @@ def attach_snapshotting(
     *,
     every_n: int = 0,
     memory_settled: "Callable[[str], bool] | None" = None,
+    get_memory: "Callable[[], Any] | None" = None,
 ) -> "Any":
     """按**正确顺序**接上 EventPersister 与 SnapshotWriter，返回 `PersistenceHandle`。
 
@@ -357,5 +381,5 @@ def attach_snapshotting(
     if every_n > 0:
         handle.snapshot_writer = SnapshotWriter(
             event_store, event_bus,
-            every_n_events=every_n, memory_settled=memory_settled)
+            every_n_events=every_n, memory_settled=memory_settled, get_memory=get_memory)
     return handle

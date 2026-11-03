@@ -21,7 +21,7 @@ from ctx_weft.core.utils.content import (
     content_from_jsonable,
     content_to_jsonable,
 )
-from ctx_weft.protocols.events import Event, EventType, ProjectedEvent
+from ctx_weft.protocols.events import Event, EventType, ProjectedEvent, ProjectedStoredEvent
 from ctx_weft.protocols.hitl import (
     HITL_FORM_QUESTION,
     HITL_FORM_WAIT,
@@ -580,6 +580,7 @@ _SNAP_CUT = "cut_position"
 _SNAP_VERSION = "projection_version"
 _SNAP_DEPTH = "chain_depth"
 _SNAP_REASON = "reason"
+_SNAP_ASSISTANT_MEMORY_POSITION = "assistant_memory_verified_position"
 
 
 @dataclass(frozen=True)
@@ -597,11 +598,13 @@ class SnapshotFacts:
     snapshot_reason: str
     #: 那条快照事件自己的 id，只用于日志归因。**不是**游标（游标是 `last_commit_position`）。
     event_id: str = ""
+    assistant_memory_verified_position: int = 0
 
 
 def snapshot_event_payload(
     view: RunStateView, *, cut: int, chain_depth: int, reason: str,
     current_task_statuses: dict[str, str] | None = None,
+    assistant_memory_verified_position: int = 0,
 ) -> dict[str, Any]:
     """把一张快照打成 `StateSnapshot` 事件的 payload。
 
@@ -621,6 +624,7 @@ def snapshot_event_payload(
         _SNAP_VERSION: _PROJECTION_VERSION,
         _SNAP_DEPTH: chain_depth,
         _SNAP_REASON: reason,
+        _SNAP_ASSISTANT_MEMORY_POSITION: assistant_memory_verified_position,
         # Same cut and state machine, without execution bodies. This is part of
         # the existing snapshot, not an independently maintained startup cache.
         "startup_state_blob": startup_snapshot_blob(blob, current_task_statuses),
@@ -641,6 +645,10 @@ def snapshot_facts_from_event(ev: "Event | None") -> "SnapshotFacts | None":
     if not isinstance(blob, dict):
         return None
     cut = p.get(_SNAP_CUT)
+    verified = p.get(_SNAP_ASSISTANT_MEMORY_POSITION, 0)
+    if (type(verified) is not int or type(cut) is not int
+            or not 0 <= verified <= cut):
+        verified = 0
     return SnapshotFacts(
         state_blob=blob,
         # 不是 int 就当缺失 → `snapshot_is_usable` 判不可用（它要求这项非 None）。
@@ -649,6 +657,7 @@ def snapshot_facts_from_event(ev: "Event | None") -> "SnapshotFacts | None":
         chain_depth=p.get(_SNAP_DEPTH, 0),
         snapshot_reason=p.get(_SNAP_REASON, ""),
         event_id=ev.id,
+        assistant_memory_verified_position=verified,
     )
 
 
@@ -685,8 +694,60 @@ def snapshot_is_usable(
     return True
 
 
+async def assistant_memory_floor(event_store: Any, session_id: str, *, head: int) -> int:
+    """Read the independently verified assistant cut; legacy/invalid proofs start at zero."""
+    stored = await event_store.read_last_of_type(session_id, EventType.STATE_SNAPSHOT)
+    snapshot = snapshot_facts_from_event(stored.event if stored else None)
+    if not snapshot_is_usable(snapshot, head):
+        return 0
+    return snapshot.assistant_memory_verified_position
+
+
+async def missing_assistant_memories(
+    event_store: Any, memory: Any, session_id: str, tenant_id: str, *,
+    after_position: int, through_position: int,
+) -> AsyncIterator[ProjectedStoredEvent]:
+    """Yield missing finished references, in bounded position batches at one fixed cut.
+
+    Read only IDs first; callers fetch full events only for missing records.
+    read_records includes superseded rows, so compaction never resurrects history.
+    """
+    from ctx_weft.protocols.context import ProviderContext
+    from ctx_weft.protocols.events import EventReadProjection
+
+    projection = EventReadProjection({EventType.LLM_RESPONSE_FINISHED: (("memory_id",),)})
+    pctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
+    cursor = after_position
+    while cursor < through_position:
+        upper = min(cursor + REPLAY_BATCH, through_position)
+        rows = await event_store.read_range(
+            session_id, after_position=cursor, through_position=upper,
+            include_types=(EventType.LLM_RESPONSE_FINISHED,), projection=projection)
+        references = []
+        for row in rows:
+            ev = row.event
+            memory_id = ev.payload.get("memory_id")
+            if memory_id is None:  # Old events and non-conversation LLM calls.
+                continue
+            if (not isinstance(memory_id, str) or not memory_id
+                    or not ev.task_id or not ev.agent_id
+                    or (ev.tenant_id or "default") != (tenant_id or "default")):
+                raise ValueError(f"Invalid assistant memory reference in event {ev.id}")
+            references.append(row)
+        if references:
+            records = await memory.read_records(
+                [row.event.payload["memory_id"] for row in references], pctx)
+            existing = {record.id for record in records}
+            for row in references:
+                if row.event.payload["memory_id"] not in existing:
+                    yield row
+        cursor = upper
+
+
 async def settled_memory_floor(event_store: Any, session_id: str) -> int:
-    """到哪个 position 为止，该会话的 memory 效果**必定**都已落盘。没有可用快照 → 0。
+    """已提交输入的恢复下界。assistant 回复使用独立的 assistant_memory_floor。
+
+    本函数沿用输入暂存区的快照安全门；不得据此推断 assistant memory 已写入。
 
     这是「快照不得领先于 memory」那条不变式的**读侧用法**。写侧由
     `SnapshotWriter._is_safe_to_write` 把门（`memory_settled` 为假就不写），于是反过来
