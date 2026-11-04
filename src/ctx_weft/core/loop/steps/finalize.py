@@ -152,7 +152,10 @@ async def _ensure_dispatch_frame(memory, parent_scope, task, provider_ctx):
         content=runtime_prompt("task_memory_record", record=dict(kind="start", task_id=task.id,
             parent_task_id=task.parent_task_id or "", title=task.title, description=task.description or "", body="", outcome="")).strip(),
         timestamp=ts, role="user",
-        metadata={"origin_task_id": task.parent_task_id, "parent_task_id": task.parent_task_id,
+        # origin owns this dispatch; the child's parent is already represented
+        # by origin + child_task_id and by the rendered start label. It is not
+        # the owning task's parent relationship.
+        metadata={"origin_task_id": task.parent_task_id,
                   "child_task_id": task.id, "task_memory": task_record_metadata("start", tool_call_id)},
     ), provider_ctx)
     return ts, tool_call_id

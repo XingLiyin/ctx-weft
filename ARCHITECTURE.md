@@ -178,6 +178,18 @@ memory；首字前撤销仍丢弃整批，并恢复原气泡。
 Compact 在可能改写记忆前清除旧的增量 token 基线；重装配使用完整估算，后续真实 Act usage
 重建基线。压缩 noop 仍只回 Prepare 一次，并保留上下文恢复次数与压不动时的止损规则。
 
+旧 task 的识别由 L1 计数、L1 折叠和 L2 降级共用一套规则。任务自身的收尾记录决定
+父关系；派发记录的 origin 是拥有者，child_task_id 是子任务，旧记录中的 origin==parent
+自指关系在读侧忽略。L1 摘要只接收本次选中的不可变记录 ID，不含保留窗口和当前任务。
+摘要对应媒体降级后选定的固定 ID 快照；生成摘要期间不持有写锁。提交时与 observer
+写入互斥，只 fold 该快照的 ID，不因后台替换记录而重新摘要，也不扩大删除范围。
+后来写入的新记录继续保留，供后续压缩处理。历史摘要锚在快照中保留记录之前。
+若晚到的 task 层记录已没有收尾记录承载其归属，摘要 metadata 仅保留这些残留 task ID，
+让下次压缩仍可识别；本次到此收尾，不追着后台写入反复摘要。
+预算仍超标、确需压当前 task 时，
+先把已完成旧 task 的剩余执行细节收敛成摘要（缺少可用收尾总结时重新生成）；旧详情
+尚未收敛就不进入 L3。已达预算目标时仍立即停止，保留最近完整 task 的机会。
+
 **digest 保真契约（spec: compact-fidelity）**：L1/L3 的 digest 按五固定小节生成（`## Goal / ## Constraints / ## Done / ## Remaining / ## Evidence`，Evidence 可缺）；`summarize_for_compact` 落库前经 `parse_structured_digest` 宽松解析，缺必需节整文降级（落库点 metadata `digest_degraded`）。Evidence 引用可回取的执行身份（tool-result-recovery 的 read_tool_output）。验收三层：CI 管道层（材料传递/解析/落库/降级）+ CI 请求层（cue 契约断言——固定 mock 输出不随 cue 变化，语义不归 mock 证）+ 非 CI 语义层（`benchmarks/compact_fidelity_eval.py`，真模型）。**不可逆边界**：fold 即 supersede，对话文本原文不可恢复——本契约不承诺原文回取；可回取面 = 工具产出（结果存储）+ 图片（ref 机制）。段摘要（act_recap / Progress So Far）不在此契约内。
 
 **recognize_intent（取代已删除的 metadata_filler 后台协程）**：PrepareStep 判定需要时置 pending 标记（`core/loop/steps/prepare.py:178`），**起飞在 act 的提交点**（`core/loop/steps/act.py:304`-`306` `launch_recognize_intent`）——与 ActStep 并发、单发、不进 step 状态机。`MetadataFillerTaskSettings` 仅作 dataclass 残留（反序列化兼容）。

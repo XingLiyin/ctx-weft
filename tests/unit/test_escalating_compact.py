@@ -16,7 +16,8 @@ def _state(ratio_trigger=0.8, ratio_target=0.6, limit=1000):
             compact_keep_last=6, collapse_keep_last=3,
             compact_token_ratio=ratio_trigger, compact_target_ratio=ratio_target),
         loop_guard=SimpleNamespace(context_limit=limit))
-    return SimpleNamespace(resolved_model=model_snapshot(context_limit=limit), scope=SimpleNamespace(), task=SimpleNamespace(id="t1"),
+    return SimpleNamespace(resolved_model=model_snapshot(context_limit=limit),
+                           scope=SimpleNamespace(session_id="s1", agent_id="a", task_id="t1"), task=SimpleNamespace(id="t1"),
                            agent=agent, session=SimpleNamespace(id="s1", tenant_id="tn"),
                            extra={}, run_id="r1", sequence_counter=0)
 
@@ -48,6 +49,7 @@ async def test_escalates_l1_l2_l3(monkeypatch):
     monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o: (calls.append("L2") or 2))
     monkeypatch.setattr(cm, "collapse_task_layer", lambda s, c, k, t: (calls.append("L3") or 4))
     monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const({"c1"}))
+    monkeypatch.setattr(cm, "_old_history_remaining", lambda s, c: _const(False))
     # L3 现有可折性 guard：collapse_keep_last=3，须让 TASK 视图报 > 3 条材料，L3 才会跑
     # （v2：guard 走 len(load_view)）。
     memory = SimpleNamespace(load_view_ids=lambda *a, **kw: _const(list(range(10))),
