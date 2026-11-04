@@ -2,6 +2,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 script = Path(__file__).resolve().parents[2] / "scripts/build_cython_wheel.py"
 spec = importlib.util.spec_from_file_location("build_cython_wheel", script)
 assert spec is not None and spec.loader is not None
@@ -29,3 +31,17 @@ def test_manifest_resolves_package_and_module_imports(tmp_path):
         "urllib", "urllib.request",
     }
     assert imports == sorted(set(imports))
+
+
+def test_compact_translates_with_release_cython_directives(tmp_path):
+    cython = pytest.importorskip("Cython.Build")
+    source = script.parents[1] / "src/ctx_weft/core/loop/steps/compact.py"
+    extensions = cython.cythonize(
+        str(source), build_dir=str(tmp_path), quiet=True,
+        compiler_directives={
+            "language_level": 3, "binding": True, "annotation_typing": False,
+            "infer_types": False, "emit_code_comments": False,
+        },
+    )
+    assert len(extensions) == 1
+    assert Path(extensions[0].sources[0]).is_file()

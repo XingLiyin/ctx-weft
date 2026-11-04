@@ -294,10 +294,10 @@ def _split_for_collapse(
     if protected_call_ids or protected_record_ids:
         protected_call_ids = protected_call_ids or set()
         protected_record_ids = protected_record_ids or set()
-        cut = min([cut, *(i for i, r in enumerate(recs)
+        cut = min([cut] + [i for i, r in enumerate(recs)
             if r.id in protected_record_ids or any(
                 tc.get("id") in protected_call_ids
-                for tc in r.metadata.get("tool_calls", [])))])
+                for tc in r.metadata.get("tool_calls", []))])
     while True:
         kept_call_ids = {r.metadata.get("tool_call_id") for r in recs[cut:]
                          if r.role == "tool" and r.metadata.get("tool_call_id")}
