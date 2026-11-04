@@ -22,7 +22,13 @@ from openai.lib.streaming.chat import AsyncChatCompletionStream
 
 from ctx_weft.protocols import RAW_ARGS_KEY, LLMCallError, LLMChunk, LLMRequest, LLMUsage, ToolCall
 from ctx_weft.protocols.llm import LLMStreamBuffers, current_stream_writer
-from ctx_weft.providers.llm.adapters._errors import http_error, transport_error
+from ctx_weft.providers.llm.adapters._discovery import parse_model_ids
+from ctx_weft.providers.llm.adapters._errors import (
+    http_error,
+    provider_error,
+    sse_error,
+    transport_error,
+)
 from ctx_weft.providers.llm.adapters._modality import downgrade_for_text_only
 from ctx_weft.providers.llm.adapters._openai_chat import _map_tools, _serialize_messages
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
@@ -127,6 +133,7 @@ class OpenAIAdapter:
         if writer is not None:
             writer.attach_parser(_OfficialStreamParser(buffers))
         produced = False
+        timeout = httpx.Timeout(self._sdk.timeout)
         try:
             response = await self._sdk.chat.completions.create(
                 model=request.model if request.model and request.model != "mock" else self._model,
@@ -138,6 +145,7 @@ class OpenAIAdapter:
                 reasoning_effort=effort if effort is not None else omit,
                 stream=stream,
                 stream_options={"include_usage": True} if stream else omit,
+                timeout=timeout,
             )
             if stream:
                 # The convenience .stream() method requires strict tool schemas.
@@ -188,32 +196,42 @@ class OpenAIAdapter:
                 yield LLMChunk(kind="tool_call", tool_call=call)
             yield LLMChunk(kind="done", finish_reason=choice.finish_reason)
         except ContentFilterFinishReasonError as exc:
-            raise LLMCallError("OpenAI response was filtered", retriable=False) from exc
+            raise LLMCallError(str(exc), retriable=False) from exc
         except APIStatusError as exc:
             raise http_error("OpenAI", exc.response) from exc
         except APIConnectionError as exc:
-            raise _connection_error(exc, produced=produced) from exc
+            raise _connection_error(exc, produced=produced, timeout=timeout) from exc
         except (httpx.TransportError, httpx.InvalidURL) as exc:
-            raise transport_error("OpenAI", exc, produced=produced) from exc
+            raise transport_error("OpenAI", exc, produced=produced, timeout=timeout) from exc
         except APIError as exc:
-            raise LLMCallError("OpenAI SDK rejected the response", retriable=False) from exc
+            body = exc.body if exc.body is not None else str(exc)
+            if stream:
+                raise sse_error("OpenAI", body) from exc
+            raise provider_error(
+                "OpenAI", body, operation="response",
+            ) from exc
 
     async def list_models(self) -> list[str]:
+        timeout = httpx.Timeout(self._sdk.timeout)
         try:
-            return [model.id async for model in self._sdk.models.list()]
+            response = await self._sdk.models.with_raw_response.list(timeout=timeout)
+            return parse_model_ids("OpenAI", response.http_response)
         except APIStatusError as exc:
             raise http_error("OpenAI", exc.response) from exc
         except APIConnectionError as exc:
-            raise _connection_error(exc, produced=False) from exc
+            raise _connection_error(exc, produced=False, timeout=timeout) from exc
         except APIError as exc:
-            raise LLMCallError("OpenAI SDK rejected the model list", retriable=False) from exc
+            raise provider_error(
+                "OpenAI", exc.body if exc.body is not None else str(exc), operation="model discovery",
+            ) from exc
 
 
-def _connection_error(exc: APIConnectionError, *, produced: bool) -> LLMCallError:
-    cause = exc.__cause__
-    if cause is not None:
-        return transport_error("OpenAI", cause, produced=produced)
-    return LLMCallError("OpenAI connection failed", retriable=True, outage=True)
+def _connection_error(
+    exc: APIConnectionError, *, produced: bool, timeout: httpx.Timeout | None = None,
+) -> LLMCallError:
+    return transport_error(
+        "OpenAI", exc.__cause__ or exc, produced=produced, timeout=timeout, retriable=True,
+    )
 
 
 class _OfficialStreamParser:

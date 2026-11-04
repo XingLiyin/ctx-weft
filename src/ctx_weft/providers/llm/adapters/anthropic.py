@@ -13,9 +13,21 @@ from typing import Any
 import httpx
 
 from ctx_weft.protocols import (
-    LLMChunk, LLMClient, LLMMessage, LLMRequest, LLMTool, LLMUsage, ToolCall,
+    LLMCallError,
+    LLMChunk,
+    LLMClient,
+    LLMMessage,
+    LLMRequest,
+    LLMTool,
+    LLMUsage,
+    ToolCall,
 )
-from ctx_weft.providers.llm.adapters._errors import http_error, transport_error
+from ctx_weft.providers.llm.adapters._discovery import list_model_ids
+from ctx_weft.providers.llm.adapters._errors import (
+    sse_error,
+    stream_http_error,
+    transport_error,
+)
 from ctx_weft.providers.llm.adapters._finalize import build_finalize_chunks, parse_tool_arguments
 from ctx_weft.providers.llm.adapters._modality import downgrade_for_text_only
 from ctx_weft.providers.llm.adapters._schema import sanitize_boolean_schemas
@@ -93,6 +105,7 @@ class AnthropicAdapter(LLMClient):
         payload = self._build_payload(request)
         headers = self._headers()
         url = self._api_url("messages")
+        timeout = httpx.Timeout(self._timeout, read=self._timeout)
 
         produced = False  # 是否已向消费者吐过 chunk（流已开始）
         state = begin_parsed_attempt()
@@ -109,10 +122,10 @@ class AnthropicAdapter(LLMClient):
             # ReadTimeout → 抛 outage，由 gateway 决定首包前重试或流中断。
             async with self._client.stream(
                 "POST", url, headers=headers, json=payload,
-                timeout=httpx.Timeout(self._timeout, read=self._timeout),
+                timeout=timeout,
             ) as resp:
                 if resp.status_code != 200:
-                    raise http_error("Anthropic", resp)
+                    raise await stream_http_error("Anthropic", resp) from None
 
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
@@ -124,6 +137,10 @@ class AnthropicAdapter(LLMClient):
                         event = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(event, dict):
+                        raise LLMCallError("Anthropic SSE event is not a JSON object", retriable=True, outage=True)
+                    if event.get("type") == "error" or event.get("error") is not None:
+                        raise sse_error("Anthropic", event) from None
 
                     event_type = event.get("type", "")
 
@@ -204,8 +221,12 @@ class AnthropicAdapter(LLMClient):
                             # reasoning_tokens 恒 0：thinking 计入 output_tokens 无单列，
                             # 不用流式 thinking 文本估算——估算值混进计费口径就是错账
                         )
-                        finish_reason = stop_reason or "stop"
-                        break  # 终止事件 → 跳出循环做统一收尾
+                        if stop_reason is not None:
+                            finish_reason = stop_reason
+                            break
+                    elif event_type == "message_stop":
+                        finish_reason = finish_reason or "stop"
+                        break
 
                 # 流以任何方式结束（message_delta / 自然结束）→ 统一收尾：
                 # 截断判定、native 规整、文本/思考还原、usage、done（见 _finalize）。
@@ -222,14 +243,14 @@ class AnthropicAdapter(LLMClient):
                 return
 
         except (httpx.TransportError, httpx.InvalidURL) as exc:
-            raise transport_error("Anthropic", exc, produced=produced) from exc
+            raise transport_error("Anthropic", exc, produced=produced, timeout=timeout) from exc
 
     async def list_models(self) -> list[str]:
         """List available model ids via GET {base}/v1/models. Raises on HTTP error."""
-        resp = await self._client.get(self._api_url("models"), headers=self._headers())
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-        return [m["id"] for m in data if isinstance(m, dict) and "id" in m]
+        return await list_model_ids(
+            "Anthropic", self._client, self._api_url("models"), self._headers(),
+            httpx.Timeout(self._timeout, read=self._timeout),
+        )
 
     def _api_url(self, operation: str) -> str:
         """Standard API path. Hosts may override URL policy by subclassing."""

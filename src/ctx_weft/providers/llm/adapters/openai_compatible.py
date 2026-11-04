@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from ctx_weft.protocols import (
+    LLMCallError,
     LLMChunk,
     LLMClient,
     LLMMessage,
@@ -20,7 +21,12 @@ from ctx_weft.protocols import (
     LLMUsage,
     ToolCall,
 )
-from ctx_weft.providers.llm.adapters._errors import http_error, transport_error
+from ctx_weft.providers.llm.adapters._discovery import list_model_ids
+from ctx_weft.providers.llm.adapters._errors import (
+    sse_error,
+    stream_http_error,
+    transport_error,
+)
 from ctx_weft.providers.llm.adapters._finalize import build_finalize_chunks, parse_tool_arguments
 from ctx_weft.providers.llm.adapters._modality import downgrade_for_text_only
 from ctx_weft.providers.llm.adapters._openai_chat import (
@@ -105,11 +111,13 @@ class OpenAICompatibleAdapter(LLMClient):
         payload = self._build_payload(request)
         headers = self._headers()
         url = self._chat_url()
+        timeout = httpx.Timeout(self._timeout, read=self._timeout)
 
         produced = False  # 是否已向消费者吐过 chunk（流已开始）
         state = begin_parsed_attempt()
         last_tc_idx: int | None = None  # 供缺 index 的续传 delta 归到最后活跃桶
         finish_reason: str | None = None
+        saw_done = False
         usage: LLMUsage | None = None
         try:
             # 流式 read 超时 = 闲置(自上一字节起)超时,而非整段时长上限:正常流(token/思考/
@@ -118,21 +126,26 @@ class OpenAICompatibleAdapter(LLMClient):
             # → 抛 outage，由 gateway 决定首包前重试或流中断。
             async with self._client.stream(
                 "POST", url, headers=headers, json=payload,
-                timeout=httpx.Timeout(self._timeout, read=self._timeout),
+                timeout=timeout,
             ) as resp:
                 if resp.status_code != 200:
-                    raise http_error("OpenAI", resp)
+                    raise await stream_http_error("OpenAI", resp) from None
 
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
                         continue
                     data = line[6:]
                     if data == "[DONE]":
+                        saw_done = True
                         break
                     try:
                         event = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(event, dict):
+                        raise LLMCallError("OpenAI SSE event is not a JSON object", retriable=True, outage=True)
+                    if event.get("type") == "error" or event.get("error") is not None:
+                        raise sse_error("OpenAI", event) from None
 
                     # usage 可能随 finish_reason 同包，也可能在其后的 choices=[] 尾包里——
                     # 任何带 usage 的 event 都更新，并读到流尾再产出（不再 finish 即 return）。
@@ -204,7 +217,7 @@ class OpenAICompatibleAdapter(LLMClient):
                     content_text=state.content_text,
                     native_tool_calls=_parse_buffers(state.tool_buffers),
                     had_native_buffer=bool(state.tool_buffers),
-                    saw_terminal=finish_reason is not None,
+                    saw_terminal=finish_reason is not None or (saw_done and not state.tool_buffers),
                     usage=usage,
                     finish_reason=finish_reason,
                     emitted_visible_len=state.gate.emitted_len,
@@ -213,14 +226,14 @@ class OpenAICompatibleAdapter(LLMClient):
                 return
 
         except (httpx.TransportError, httpx.InvalidURL) as exc:
-            raise transport_error("OpenAI", exc, produced=produced) from exc
+            raise transport_error("OpenAI", exc, produced=produced, timeout=timeout) from exc
 
     async def list_models(self) -> list[str]:
         """List available model ids via GET {base}/v1/models. Raises on HTTP error."""
-        resp = await self._client.get(self._api_url("models"), headers=self._headers())
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-        return [m["id"] for m in data if isinstance(m, dict) and "id" in m]
+        return await list_model_ids(
+            "OpenAI", self._client, self._api_url("models"), self._headers(),
+            httpx.Timeout(self._timeout, read=self._timeout),
+        )
 
     def _make_client(self) -> httpx.AsyncClient:
         """Build the httpx client. Overridable to inject SSL verification."""

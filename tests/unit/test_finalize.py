@@ -116,18 +116,14 @@ def test_already_streamed_text_is_not_re_emitted():
     assert _kinds(chunks) == ["done"]
 
 
-def test_text_with_no_terminal_but_content_is_kept_not_raised():
-    # Non-compliant provider that ends a plain-text reply without finish_reason.
-    chunks = build_finalize_chunks(
-        content_text="some answer",
-        native_tool_calls=[],
-        had_native_buffer=False,
-        saw_terminal=False,
-        usage=None,
-        finish_reason=None,
-        emitted_visible_len=len("some answer"),
-    )
-    assert _kinds(chunks) == ["done"]
+def test_text_without_terminal_is_an_outage_not_a_completed_answer():
+    with pytest.raises(LLMCallError, match="before a terminal event") as caught:
+        build_finalize_chunks(
+            content_text="some answer", native_tool_calls=[], had_native_buffer=False,
+            saw_terminal=False, usage=None, finish_reason=None,
+            emitted_visible_len=len("some answer"),
+        )
+    assert caught.value.retriable and caught.value.outage
 
 
 def test_text_embedded_tool_call_is_recovered():

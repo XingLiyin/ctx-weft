@@ -115,6 +115,7 @@ def build_finalize_chunks(
         raise LLMCallError(
             "LLM stream ended before tool call completed (truncated response)",
             retriable=True,
+            outage=True,
         )
     # N4：没终止事件、没缓冲、正文也空 → 流异常空（连接早断/网关吞流）→ 重试，
     # 别让上层把「空」当成「纯文本让位用户」而误暂停。
@@ -122,6 +123,12 @@ def build_finalize_chunks(
         raise LLMCallError(
             "LLM stream ended empty without a terminal event",
             retriable=True,
+            outage=True,
+        )
+    if not saw_terminal:
+        raise LLMCallError(
+            "LLM response stream ended before a terminal event (truncated response)",
+            retriable=True, outage=True,
         )
 
     out: list[LLMChunk] = []

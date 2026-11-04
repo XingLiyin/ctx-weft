@@ -4,7 +4,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from ctx_weft.protocols.llm import LLMMessage, LLMRequest
+from ctx_weft.protocols.llm import LLMCallError, LLMMessage, LLMRequest
 from ctx_weft.providers.llm.adapters.anthropic import AnthropicAdapter
 from ctx_weft.providers.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
@@ -51,8 +51,10 @@ async def test_list_models_raises_on_http_error():
 
     a = OpenAICompatibleAdapter(api_key="bad", base_url="https://api.openai.com")
     a._client = _mock_client(handler)
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(LLMCallError) as caught:
         await a.list_models()
+    assert caught.value.status_code == 401
+    assert caught.value.retriable is False
 
 
 @pytest.mark.parametrize("adapter_type,operation", [

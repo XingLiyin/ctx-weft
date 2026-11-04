@@ -43,21 +43,10 @@ from ctx_weft.protocols.context import ContentPart, normalize_content_parts
 
 
 class LLMCallError(RuntimeError):
-    """LLM API 调用错误，携带 HTTP 状态码与分类标志。
+    """LLM failure with its original message and retry metadata.
 
-    三类故障各走不同路径（retriable × outage 组合）：
-
-    retriable=False              认证 / 参数 / 模型 / 明确的 TLS 或 HTTP 配置错误
-                                 → 跳过请求恢复，交由运行时中断处置。
-    retriable=True, outage=True  基础设施类瞬时故障（429 限流 / 5xx / 网络 / transport 断流）
-                                 → 由自愈层（stream_llm_resilient）进程内退避等待 LLM 恢复；
-                                 预算耗尽则 _run_loop 走 INTERRUPTED（可 /resume）。**不**经
-                                 TaskManager 重试、**不**增 failure_counter——LLM 宕机不是任务失败。
-    retriable=True, outage=False 内容类可重试错（_finalize 截断 / 半截 tool call / 空响应）：
-                                 LLM 在线但本轮输出退化 → 由 TaskManager 有界重试该任务（重跑一轮
-                                 通常即可），不当作基础设施中断。outage 标志由 adapter 在抛错点按
-                                 来源设置（只有 adapter 能区分"断流"与"内容截断"），核心层只读不猜。
-    retry_after_sec              provider 给了 Retry-After 时，自愈退避优先采用。
+    retriable controls whether to retry. outage selects request recovery rather
+    than restarting a task. HTTP status and Retry-After remain available to callers.
     """
 
     def __init__(

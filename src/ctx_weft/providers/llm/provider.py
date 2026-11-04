@@ -110,7 +110,9 @@ class LLMProvider:
         if persist:
             self._store.save(account)
         self._accounts[account.name] = account
-        logger.info("LLMProvider: registered account '%s'", account.name)
+        logger.info(
+            "LLMProvider: registered account %r timeout_sec=%s", account.name, account.timeout_sec,
+        )
 
     def delete_account(self, name: str) -> None:
         self.get_account(name)

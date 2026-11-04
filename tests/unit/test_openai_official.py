@@ -157,7 +157,7 @@ async def test_image_capability_and_tool_image_relocation(image_input):
 
 
 @pytest.mark.parametrize("status,retriable", [(400, False), (401, False), (403, False), (429, True), (503, True)])
-async def test_sdk_http_errors_are_sanitized_and_not_retried(status, retriable):
+async def test_sdk_http_errors_preserve_message_and_are_not_retried(status, retriable):
     seen = []
 
     def handler(req):
@@ -170,7 +170,7 @@ async def test_sdk_http_errors_are_sanitized_and_not_retried(status, retriable):
     assert caught.value.status_code == status
     assert caught.value.retriable is retriable and caught.value.outage is retriable
     assert caught.value.retry_after_sec == 2
-    assert "secret-upstream-body" not in str(caught.value)
+    assert "secret-upstream-body" in str(caught.value)
 
 
 async def test_transport_error_retains_outage_classification():
@@ -180,7 +180,7 @@ async def test_transport_error_retains_outage_classification():
     with pytest.raises(LLMCallError) as caught:
         await collect(adapter(handler))
     assert caught.value.retriable and caught.value.outage
-    assert "secret-network-address" not in str(caught.value)
+    assert "secret-network-address" in str(caught.value)
 
 
 async def test_stream_without_terminal_is_not_success():

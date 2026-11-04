@@ -763,8 +763,9 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
         if tok is not None:
             tok.raise_if_cancelled()
         if monotonic() >= deadline:
+            logger.warning("LLM recovery deadline exceeded after %d attempt(s)", attempt)
             raise LLMOutageError(
-                f"LLM first-chunk recovery deadline exceeded after {attempt} attempt(s)",
+                str(last_error) if last_error is not None else "LLM recovery deadline exceeded",
                 status_code=getattr(last_error, "status_code", 0),
             ) from last_error
         attempt += 1
@@ -807,8 +808,9 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
         except TimeoutError as e:
             if first_timeout is None or not first_timeout.expired():
                 raise
+            logger.warning("LLM recovery deadline exceeded after %d attempt(s)", attempt)
             raise LLMOutageError(
-                f"LLM first-chunk recovery deadline exceeded after {attempt} attempt(s)",
+                str(last_error) if last_error is not None else "LLM recovery deadline exceeded",
                 status_code=getattr(last_error, "status_code", 0),
             ) from e
         except LLMCallError as e:
@@ -840,8 +842,9 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
                         "llm_model": model, "llm_account": llm_account,
                     }))
             if not will_retry:
+                logger.warning("LLM retry budget exhausted after %d attempt(s): %s", attempt, e)
                 raise LLMOutageError(
-                    f"LLM self-heal exhausted after {attempt} attempt(s): {e}",
+                    str(e),
                     status_code=getattr(e, "status_code", 0),
                 ) from e
             delay = _compute_delay(

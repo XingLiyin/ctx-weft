@@ -3,6 +3,7 @@
 import asyncio
 import json
 import ssl
+import traceback
 from types import SimpleNamespace
 
 import httpx
@@ -80,8 +81,58 @@ async def test_network_and_http_faults_share_one_attempt_budget(protocol, fault)
 
 
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+@pytest.mark.parametrize("fault", [httpx.ReadError, httpx.ReadTimeout])
+@pytest.mark.parametrize("tls_fault", [ssl.SSLWantReadError, ssl.SSLEOFError])
+async def test_tls_wrapped_midstream_read_failure_recovers_without_retaining_partial_output(
+    protocol, fault, tls_fault,
+):
+    prefix = (_sse({"choices": [{"delta": {"content": "discard me"}}]})
+              if protocol == "openai" else
+              _sse({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": "discard me"}}))
+
+    class BrokenBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield prefix
+            try:
+                raise tls_fault("sensitive upstream details")
+            except ssl.SSLError:
+                raise fault("sensitive upstream details") from None
+
+        async def aclose(self):
+            self.closed = True
+
+    body, calls = BrokenBody(), []
+
+    def respond(request):
+        calls.append(request.content)
+        if len(calls) == 1:
+            return httpx.Response(200, stream=body)
+        return httpx.Response(200, content=_success(protocol))
+
+    adapter = _adapter(protocol, respond)
+    stream = stream_llm_resilient(
+        _ctx(adapter, llm_self_heal_max_attempts=2), None,
+        LLMRequest(model="m", system="", messages=[]),
+    )
+    try:
+        async with stream:
+            async for _ in stream:
+                pass
+            result = stream.get_final_result()
+        assert result.text == "answer"
+        assert len(calls) == 2
+        assert calls[0] == calls[1]
+        assert body.closed
+    finally:
+        await adapter._client.aclose()
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
 @pytest.mark.parametrize("fault", [httpx.ConnectError, 503])
-async def test_exhausted_budget_is_not_multiplied_by_adapter(protocol, fault):
+async def test_exhausted_budget_is_not_multiplied_and_preserves_reason(caplog, protocol, fault):
     calls = []
 
     def respond(request):
@@ -95,23 +146,23 @@ async def test_exhausted_budget_is_not_multiplied_by_adapter(protocol, fault):
         with pytest.raises(LLMOutageError) as error:
             await _drain(_ctx(adapter, llm_self_heal_max_attempts=3))
         assert len(calls) == 3
-        assert "sensitive" not in str(error.value)
+        original = "sensitive upstream body" if isinstance(fault, int) else "sensitive upstream error"
+        assert str(error.value) == original
+        assert "retry budget exhausted after 3 attempt(s)" in caplog.text
     finally:
         await adapter._client.aclose()
 
 
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
-@pytest.mark.parametrize("fault", [400, 401, 403, 404, "certificate", "protocol"])
-async def test_permanent_failure_is_single_attempt_and_redacted(protocol, fault):
+@pytest.mark.parametrize("fault", [400, 401, 403, 404, "url"])
+async def test_permanent_failure_is_single_attempt_and_preserves_message(protocol, fault):
     calls = []
 
     def respond(request):
         calls.append(request)
         if isinstance(fault, int):
             return httpx.Response(fault, text="secret-key sensitive body")
-        if fault == "protocol":
-            raise httpx.UnsupportedProtocol("sensitive endpoint")
-        raise httpx.ConnectError("secret-key") from ssl.SSLCertVerificationError("secret-key")
+        raise httpx.InvalidURL("sensitive endpoint")
 
     adapter = _adapter(protocol, respond)
     try:
@@ -120,10 +171,11 @@ async def test_permanent_failure_is_single_attempt_and_redacted(protocol, fault)
         assert error.value.retriable is False
         assert error.value.outage is False
         assert len(calls) == 1
-        assert "secret-key" not in str(error.value)
-        assert "sensitive" not in str(error.value)
+        original = "sensitive endpoint" if fault == "url" else "secret-key"
+        assert original in str(error.value)
         if not isinstance(fault, int):
             assert error.value.__cause__ is not None
+            assert original in "".join(traceback.format_exception(error.value))
     finally:
         await adapter._client.aclose()
 
@@ -237,7 +289,7 @@ async def test_act_pause_closes_a_request_while_waiting_for_first_chunk():
         await adapter._client.aclose()
 
 
-async def test_retry_after_beyond_deadline_waits_without_sending_early(monkeypatch):
+async def test_retry_after_beyond_deadline_waits_without_sending_early(monkeypatch, caplog):
     now, delays, calls = [0.0], [], []
     monkeypatch.setattr(llm_gateway, "monotonic", lambda: now[0])
     monkeypatch.setattr(llm_gateway.random, "uniform", lambda *_: 0)
@@ -250,13 +302,15 @@ async def test_retry_after_beyond_deadline_waits_without_sending_early(monkeypat
 
     def respond(request):
         calls.append(request)
-        return httpx.Response(429, headers={"Retry-After": "120"})
+        return httpx.Response(429, headers={"Retry-After": "120"}, text="upstream rate limit")
 
     adapter = _adapter("openai", respond)
     try:
         with pytest.raises(LLMOutageError) as error:
             await _drain(_ctx(adapter, llm_self_heal_max_duration_sec=10))
         assert error.value.status_code == 429
+        assert str(error.value) == "upstream rate limit"
+        assert "LLM recovery deadline exceeded after 1 attempt(s)" in caplog.text
         assert delays == [10]
         assert len(calls) == 1
     finally:
@@ -397,7 +451,7 @@ async def test_exhausted_midstream_fault_does_not_execute_incomplete_output(prot
     state, ctx, task, _, _ = _act_state_ctx(True, adapter, gateway=UnexpectedToolGateway())
     ctx.config = RuntimeConfig(llm_self_heal_max_attempts=1, llm_self_heal_base_delay_sec=0)
     try:
-        with pytest.raises(LLMOutageError, match="exhausted after 1"):
+        with pytest.raises(LLMOutageError, match="offline"):
             await ActStep().execute(state, ctx)
         assert len(calls) == 1
         assert body.closed
