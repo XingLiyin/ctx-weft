@@ -47,5 +47,6 @@ def test_summary_decoration_happens_during_compile():
 
     prompt = compile_prompt([block], prompt_request(task_id="t1"))
     text = "\n".join(str(message.content) for message in prompt.messages)
-    assert "## Progress So Far" in text
-    assert "段落摘要" in text
+    assert prompt.messages[0].role == "user"
+    assert '<task_recap task_id="t1">\n段落摘要\n</task_recap>' in text
+    assert "## Progress So Far" not in text

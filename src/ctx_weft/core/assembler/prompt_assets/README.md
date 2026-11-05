@@ -38,6 +38,13 @@ Python supplies facts only. `record` has `kind` (`start`, `result`, `recap`,
 Framework records use the user role; a delivered final reply keeps the assistant
 role. These are historical facts, not new user instructions or callable tools.
 
+TASK-scoped SUMMARY records are presented as user-role `<task_recap>` records,
+regardless of their stored role. This is a Jinja-only projection shared by model
+prompts, inherited snapshots and token estimates; it does not rewrite storage.
+Assistant summaries no longer receive a progress heading or explanatory suffix.
+Observe locates its recap boundary using the current task's latest `<task_recap>`
+and actual user input, excluding framework records from user-input boundaries.
+
 New AGENT conversation records persist the rendered text and
 `metadata.task_memory = {version: 1, kind, group_id}`. Grouping and compaction use
 metadata, never parse labels, so the macro can change freely. New records retain

@@ -103,9 +103,8 @@ async def test_latest_prior_root_returns_none_when_no_prior_root() -> None:
     assert _latest_prior_root_task(tm, current) is None
 
 
-async def test_inherit_preserves_assistant_segment_summary() -> None:
-    """parent 段摘要（role=assistant）inherit 后透传为 child 的 assistant 回合，
-    且不误加 tool_calls；user 锚点恒在其前（段摘要非首条，R1 守护）。"""
+async def test_inherit_presents_segment_summary_as_a_user_recap() -> None:
+    """Inherited summaries match the parent's user-role recap view; source storage is unchanged."""
     mem = InMemoryMemoryProvider()
     parent_scope = MemoryAddress(session_id="s1", task_id="p1", agent_id="ag1")
     await mem.ingest(_ev(T.USER_PROMPT, parent_scope, "原始诉求", 0, role="user"), _ctx())
@@ -126,8 +125,11 @@ async def test_inherit_preserves_assistant_segment_summary() -> None:
 
     child_scope = MemoryAddress(session_id="s1", task_id="c1", agent_id="ag2")
     turns = list(reversed(await mem.recall_recent(child_scope, [T.AGENT_CONVERSATION_TURN], 100, _ctx())))
-    summary = next(t for t in turns if t.content == "段①摘要")
-    assert summary.role == "assistant"
+    summary = next(t for t in turns if "段①摘要" in t.content)
+    assert summary.role == "user"
+    assert summary.content == '<task_recap task_id="p1">\n段①摘要\n</task_recap>'
     assert not summary.metadata.get("tool_calls"), "段摘要无 tool_calls，不应误加"
     # 段摘要非首条：其前有 user 锚点
     assert turns[0].role == "user" and turns[0].content == "原始诉求"
+    original = await mem.recall_recent(parent_scope, [T.TASK_COMPACT_SUMMARY], 100, _ctx())
+    assert original[0].role == "assistant" and original[0].content == "段①摘要"

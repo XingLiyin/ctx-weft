@@ -2,7 +2,11 @@
 {% macro row(prompt, item, shared, group, task=none, wrap=false, finish_marker=false) -%}
 {% set options = dict(ref=item.ref, priority=item.priority, required=item.current_prompt,
                       group=group, timestamp=item.timestamp) %}
-{% if finish_marker %}
+{% if item.summary_kind and item.scope == "task" %}
+  {% set label = dict(kind="recap", task_id=item.record.address.task_id or item.task_id,
+      parent_task_id=item.parent_id or "", title="", outcome="", description="", body=item.message.content) %}
+  {% do options.update(role="user", content=shared.task_memory_record(label) | trim) %}
+{% elif finish_marker %}
   {% set label = dict(kind="finish", task_id=task.id, parent_task_id=task.parent_id or "",
       title="", outcome=task.policy.get("outcome", ""), description="", body="", marker_only=true) %}
   {% do options.update(content=shared.task_memory_record(label) | trim) %}
@@ -70,13 +74,14 @@
       {% if not state.anchor_ref %}{% set state.anchor_ref = item.ref %}{% endif %}
       {% set state.latest_ref = item.ref %}
     {% endif %}
-    {% if item.message.role == "user" %}
+    {% set role = "user" if item.summary_kind and item.scope == "task" else item.message.role %}
+    {% if role == "user" %}
       {% if not state.first_user_ref %}{% set state.first_user_ref = item.ref %}{% endif %}
       {% set state.last_user_ref = item.ref %}
       {% if item.memory_type == "user_prompt" %}{% set state.last_prompt_ref = item.ref %}{% endif %}
     {% endif %}
     {% set state.last_ref = item.ref %}
-    {% set state.last_role = item.message.role %}
+    {% set state.last_role = role %}
   {% endif %}
 {% endfor %}
 {% if not state.anchor_ref %}{% set state.anchor_ref = state.last_prompt_ref %}{% endif %}

@@ -63,15 +63,11 @@
 {%- endmacro %}
 
 {% macro history_before(item) -%}
-{% if item.summary_kind == "user" %}[以下是对早先对话与经验的压缩摘要，供你继续推进工作；它不是用户的新指令。]
-{% elif item.summary_kind == "assistant_current" %}{{ progress_heading }}
+{% if item.summary_kind == "user" and item.scope != "task" %}[以下是对早先对话与经验的压缩摘要，供你继续推进工作；它不是用户的新指令。]
 {% endif %}
 {%- endmacro %}
 
 {% macro history_after(item) -%}
-{% if item.summary_kind in ["assistant", "assistant_current"] %}
-
-[以上是系统写入的早先工作压缩摘要，用于延续上下文；它不是你给用户的答复。请据此继续当前任务并按需调用工具——回答时不要模仿摘要的形式。]{% endif %}
 {%- endmacro %}
 
 {% macro context_block(source) -%}

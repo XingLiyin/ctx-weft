@@ -293,9 +293,8 @@ async def test_dispatch_ack_points_at_the_final_reply() -> None:
     assert "final reply" in ack.lower(), f"导读须提到最终回复；实得 {ack!r}"
 
 
-async def test_closed_capsule_summary_has_no_progress_heading() -> None:
-    """`## Progress So Far` 是「当前 task 上一段的复述」标题。闭合后的胶囊由**别的** task
-    装配，段摘要不得再冠这个标题（否则新任务会把旧任务的进度读成自己的）。"""
+async def test_segment_summary_keeps_its_task_identity_as_a_user_recap() -> None:
+    """Current and historical task summaries use user recaps with their source task ID."""
     from ctx_weft.core.assembler.sources._history import record_to_history_block
     from tests.assembler_testkit import compile_prompt, prompt_request
     mem = InMemoryMemoryProvider()
@@ -314,9 +313,10 @@ async def test_closed_capsule_summary_has_no_progress_heading() -> None:
     other = compile_prompt([block], prompt_request(task_id="t2"))
     own_text = "\n".join(str(message.content) for message in own.messages)
     other_text = "\n".join(str(message.content) for message in other.messages)
-    assert "## Progress So Far" in own_text, "当前 task 自己的段摘要仍要冠标题"
-    assert "## Progress So Far" not in other_text, \
-        f"跨 task（闭合胶囊）不得冠 Progress So Far；实得 {other_text!r}"
+    for prompt, text in ((own, own_text), (other, other_text)):
+        assert prompt.messages[0].role == "user"
+        assert '<task_recap task_id="t1">\n第1段做了啥\n</task_recap>' in text
+        assert "## Progress So Far" not in text
 
 
 # ─── recap 槽的收束尾注 ──────────────────────────────────────────────────────

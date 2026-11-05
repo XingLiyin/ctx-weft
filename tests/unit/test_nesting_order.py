@@ -207,6 +207,8 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
             return "P:FINISH_call"
         if "<task_finish" in c:
             return "C:FINISH_report" if 'task_id="C"' in c else "P:FINISH_report"
+        if m.role == "user" and "<task_recap" in c and "段1 摘要" in c:
+            return "C:SUMMARY"
         if m.role == "user":
             if "auth 改成 JWT" in m.content:
                 return "P:UP"
@@ -216,8 +218,6 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
             c = m.content
             if "委派子任务" in c:
                 return "P:LLM"
-            if "段1 摘要" in c:
-                return "C:SUMMARY"
             if "段2" in c:
                 return "C:LLM2"
             if "段1：读" in c:

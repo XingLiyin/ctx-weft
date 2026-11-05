@@ -11,9 +11,9 @@
 
 {{ boundary(ctx.boundary_kind) }}
 
-Coverage for `act_recap`: include only the actor's work after the most recent `{{ progress_heading }}` or the latest user message in the conversation, whichever is later, through the end of this segment described above. On the first observation, start with the actor's work after the task-opening user message. Do not repeat anything at or before that starting boundary. This recap will become the next `{{ progress_heading }}` if the task continues.
+Coverage for `act_recap`: include only the actor's work after the most recent `<task_recap>` record belonging to the current task or the latest actual user message, whichever is later, through the end of this segment described above. Framework-generated task records and compressed summaries are not actual user messages. If no recap exists, start after the task-opening user message or a later actual user message. Do not repeat anything at or before that starting boundary. If the task continues, this recap will be presented as the next user-role `<task_recap>` record.
 
-These markers locate the source range only; they are not recap content. In `act_recap`, do not mention `{{ progress_heading }}`, the user-message boundary, where the range starts or ends, or that you are summarizing. Write the recap itself directly.{% if ctx.final_output %}
+These markers locate the source range only; they are not recap content. In `act_recap`, do not include `<task_recap>` tags or mention the user-message boundary, where the range starts or ends, or that you are summarizing. Write the recap itself directly.{% if ctx.final_output %}
 
 {{ final_output_heading }}
 
