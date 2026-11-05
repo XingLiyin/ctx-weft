@@ -201,8 +201,10 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
             return "P:DELEGATE_call"
         if "<task_result" in c:
             return "P:DELEGATE_result"
-        if "<task_final_reply" in c:
-            return "C:FINISH_call" if 'task_id="C"' in c else "P:FINISH_call"
+        if c == "JWT 迁移子任务完成":
+            return "C:FINISH_call"
+        if c == "JWT 迁移完成":
+            return "P:FINISH_call"
         if "<task_finish" in c:
             return "C:FINISH_report" if 'task_id="C"' in c else "P:FINISH_report"
         if m.role == "user":
@@ -231,9 +233,11 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
         "P:DELEGATE_call",
         "C:UP", "C:SUMMARY", "C:LLM2",
         "C:FINISH_call",
+        "C:FINISH_report",
         "P:DELEGATE_result",
         "P:RESUME",
         "P:FINISH_call",
+        "P:FINISH_report",
     ]
     assert labels == expected, f"nested order broke under async backfill:\n got={labels}\nwant={expected}"
 
@@ -242,7 +246,7 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
 
     # (1) C 子树严格落在 P delegate 对 与 P 续跑 之间 —— NOT 混入 P 后续回合
     c_subtree = [pos["C:UP"], pos["C:SUMMARY"], pos["C:LLM2"],
-                 pos["C:FINISH_call"]]
+                 pos["C:FINISH_call"], pos["C:FINISH_report"]]
     assert pos["P:DELEGATE_call"] < min(c_subtree), "C subtree must start after its start label"
     assert max(c_subtree) < pos["P:RESUME"], (
         "C subtree must end BEFORE P's resume (would mis-order if seq_no-primary / write-time ts)"
@@ -250,8 +254,9 @@ async def test_g1_nested_order_survives_async_backfill() -> None:
 
     # Terminal labels follow the inline execution; only real tools need adjacency.
     assert max(c_subtree) < pos["P:DELEGATE_result"] < pos["P:RESUME"]
-    # Full capsules expose the final reply; their minimal report stays hidden.
-    assert "C:FINISH_report" not in pos and "P:FINISH_report" not in pos
+    # Every full capsule ends with its finish report before the parent resumes.
+    assert pos["C:FINISH_call"] < pos["C:FINISH_report"]
+    assert pos["P:FINISH_call"] < pos["P:FINISH_report"]
 
     # (4) tool 邻接：C 子树不被插进任一 assistant-tool_call 与其 tool_result 之间
     #     即每个 assistant(带 tool_calls) 后紧跟其 tool 结果

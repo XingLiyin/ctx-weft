@@ -33,10 +33,9 @@ def test_dispatch_text_unchanged(ref):
 
 
 @pytest.mark.parametrize("ref", BASELINE["finish"])
-def test_finish_text_unchanged(ref):
+def test_final_reply_is_plain_text(ref):
     rendered = render_task_record("final_reply", task_id="t", title=ref, body="final result")
-    assert "final result" in rendered and rendered.endswith("</task_final_reply>")
-    assert "finish_task" not in rendered
+    assert rendered == "final result"
 
 
 

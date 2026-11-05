@@ -36,7 +36,12 @@
 
 {# 完整胶囊展示 recap/final_reply；finish 是与之互斥的最小任务胶囊。 #}
 {% macro task_memory_record(record) -%}
-<task_{{ record.kind }} task_id="{{ record.task_id | e }}"{% if record.parent_task_id %} parent_task_id="{{ record.parent_task_id | e }}"{% endif %}{% if record.title %} title="{{ record.title | e }}"{% endif %}{% if record.outcome %} outcome="{{ record.outcome | e }}"{% endif %}>
+{% if record.kind == "final_reply" -%}
+{{ record.body }}
+{%- else -%}
+<task_{{ record.kind }} task_id="{{ record.task_id | e }}"{% if record.parent_task_id %} parent_task_id="{{ record.parent_task_id | e }}"{% endif %}{% if record.title %} title="{{ record.title | e }}"{% endif %}{% if record.outcome %} outcome="{{ record.outcome | e }}"{% endif %}{% if record.kind == "finish" and record.get("marker_only") %} />{% else %}>
 {% if record.kind == "start" %}{{ record.description }}{% else %}{{ record.body }}{% endif %}
 </task_{{ record.kind }}>
+{%- endif %}
+{%- endif %}
 {%- endmacro %}

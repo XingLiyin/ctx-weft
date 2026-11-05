@@ -74,7 +74,9 @@ async def test_followup_sees_one_representation_of_the_finished_task(lean):
         assert f'<task_finish task_id="{first.task_id}"' in text
         assert "<task_recap" not in text and "<task_final_reply" not in text
     else:
-        assert f'<task_final_reply task_id="{first.task_id}"' in text
-        assert "<task_recap" in text and "<task_finish" not in text
+        assert "<task_final_reply" not in text
+        assert any(m.role == "assistant" and m.content == "First delivered answer"
+                   for m in llm.actor_requests[-1].messages)
+        assert "<task_recap" in text and text.count("<task_finish") == 1
         assert text.count("First delivered answer") == 1
     assert "Second request" in text

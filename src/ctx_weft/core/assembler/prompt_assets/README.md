@@ -59,8 +59,10 @@ and metadata, without changing stored rows or parsing rendered tags. When no chi
 closure is available, historical timestamps are retained.
 
 Closed tasks have mutually exclusive full and minimal prompt views. A full capsule
-shows its retained task body, recap and final reply; its stored finish report is
-hidden. Short tasks label the original assistant answer using the persisted
+shows its retained task body, recap, final reply and a self-closing finish marker
+with task ID, parent ID (if any) and outcome, without the report body. The stored
+finish report retains its summary and alone forms the minimal view. This is a
+template-only presentation choice; storage is unchanged. Short tasks select the original assistant answer using the persisted
 `finish_policy.final_reply_record_id`, without copying its body into AGENT memory.
 Legacy raw answers are projected when an unambiguous final prose turn survives.
 

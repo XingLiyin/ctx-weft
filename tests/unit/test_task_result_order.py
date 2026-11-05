@@ -77,10 +77,10 @@ def test_old_result_at_start_is_projected_after_full_or_minimal_child(legacy, mi
         closed[0].metadata["finish_policy"].update(capsule_state="lean", slot_count=1)
     records = [start, result, *body(), *closed, body("p", seconds=10)[0]]
     rendered = text(records)
-    final_tag = "task_finish" if minimal else "task_final_reply"
+    final = '<task_finish task_id="t"' if minimal else "Delivered answer"
     assert (
         rendered.index('<task_start task_id="t"')
-        < rendered.index(f'<{final_tag} task_id="t"')
+        < rendered.index(final)
         < rendered.index('<task_result task_id="t"')
         < rendered.index("## Current Task")
     )
@@ -92,8 +92,8 @@ def test_nested_results_close_their_own_subtrees_before_parent_resumes():
         *dispatch(),
         *body(),
         *dispatch("g", "t", seconds=2),
-        *body("g", seconds=3),
-        *closure("g", parent="t", seconds=5),
+        *body("g", text="Grandchild answer", seconds=3),
+        *closure("g", reply="Grandchild answer", parent="t", seconds=5),
         *closure(parent="p", seconds=8),
         body("p", seconds=10)[0],
     ]
@@ -101,9 +101,9 @@ def test_nested_results_close_their_own_subtrees_before_parent_resumes():
     tags = [
         '<task_start task_id="t"',
         '<task_start task_id="g"',
-        '<task_final_reply task_id="g"',
+        "Grandchild answer",
         '<task_result task_id="g"',
-        '<task_final_reply task_id="t"',
+        "Delivered answer",
         '<task_result task_id="t"',
     ]
     positions = [rendered.index(tag) for tag in tags]
@@ -165,7 +165,7 @@ async def test_terminal_result_uses_durable_completion_time_after_sqlite_reopen(
         assert result.timestamp == completion + timedelta(microseconds=3)
         if same_agent:
             rendered = text(rows)
-            assert rendered.index('<task_final_reply task_id="t"') < rendered.index(
+            assert rendered.index("Delivered answer") < rendered.index(
                 '<task_result task_id="t"'
             )
         else:
@@ -206,6 +206,6 @@ async def test_inherited_snapshot_preserves_the_repaired_legacy_order():
         memory, MemoryAddress(session_id="s", agent_id="b"), MemoryScope.AGENT, CTX
     )
     rendered = text(rows, "inheritor")
-    assert rendered.index('<task_final_reply task_id="t"') < rendered.index(
+    assert rendered.index("Delivered answer") < rendered.index(
         '<task_result task_id="t"'
     )

@@ -141,7 +141,7 @@ async def test_close_writes_recap_then_reply_then_report() -> None:
     assert recap.timestamp < anchor.timestamp <= report.timestamp
 
 
-async def test_anchor_wraps_reply_with_notes() -> None:
+async def test_anchor_preserves_plain_reply() -> None:
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
@@ -149,13 +149,12 @@ async def test_anchor_wraps_reply_with_notes() -> None:
     await _close(mem, _task(), scope)
 
     anchor = (await _agent_turns(mem))[1]
-    assert anchor.content == render_task_record("final_reply", task_id="t1",
-        title="抽取配置解析", outcome="success", body=_REPLY)
+    assert anchor.content == _REPLY
+    assert task_record_kind(anchor) == "final_reply"
 
 
 
-async def test_root_task_without_title_falls_back_to_bare_id() -> None:
-    """无标题 → 称呼退化为裸 id（仍是可用句柄）；UNTITLED 变体只在连 id 都没有时才用。"""
+async def test_root_task_without_title_keeps_identity_in_metadata() -> None:
     mem = InMemoryMemoryProvider()
     scope = _sc("t1")
     await _seed_long_conv(mem, scope)
@@ -163,12 +162,12 @@ async def test_root_task_without_title_falls_back_to_bare_id() -> None:
     await _close(mem, _task(title=""), scope)
 
     anchor = (await _agent_turns(mem))[1]
-    assert 'task_id="t1"' in anchor.content
-    assert 'title=""' not in anchor.content
+    assert anchor.content == _REPLY
+    assert anchor.metadata["origin_task_id"] == "t1"
 
 
 async def test_untitled_record_keeps_its_kind() -> None:
-    assert render_task_record("final_reply", body="x") == '<task_final_reply task_id="">\nx\n</task_final_reply>'
+    assert render_task_record("final_reply", body="x") == "x"
 
 
 
@@ -278,13 +277,13 @@ async def test_rendered_messages_put_finish_call_on_the_reply() -> None:
     blocks = await recalled_blocks(req, deps)
     msgs = history_messages(blocks, task_id="t2")
 
-    tail = msgs[-2:]
-    assert [m.role for m in tail] == ["user", "assistant"], \
+    tail = msgs[-3:]
+    assert [m.role for m in tail] == ["user", "assistant", "user"], \
         f"尾部应是 recap → 答复 → 报告；实得 {[(m.role, str(m.content)[:24]) for m in msgs]}"
     assert not tail[0].tool_calls, "recap 那条不带 tool_calls"
     assert all(not message.tool_calls for message in tail)
     assert _REPLY in tail[1].content
-    assert all("<task_finish" not in str(m.content) for m in msgs)
+    assert "<task_finish" in str(tail[2].content)
 
 
 async def test_dispatch_ack_points_at_the_final_reply() -> None:

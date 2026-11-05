@@ -96,13 +96,19 @@ def blocks(records):
 
 
 @pytest.mark.parametrize("retained_raw", [True, False])
-def test_full_capsule_has_one_answer_and_no_finish(retained_raw):
+def test_full_capsule_has_one_answer_and_one_finish(retained_raw):
     raw = body()
     records = raw + closure(reply="" if retained_raw else "Delivered answer")
     visible, capsules = history_view(records)
     assert len(capsules) == 1
-    assert sum("<task_final_reply" in str(r.content) for r in visible) == 1
-    assert not any(task_record_kind(r) == "finish" for r in visible)
+    assert sum(r.role == "assistant" and r.content == "Delivered answer" for r in visible) == 1
+    assert all("<task_final_reply" not in str(r.content) for r in visible)
+    assert sum(task_record_kind(r) == "finish" for r in visible) == 1
+    assert visible[-1].role == "user"
+    assert visible[-1].content == '<task_finish task_id="t" outcome="success" />'
+    assert "Goal achieved; essential result" not in visible[-1].content
+    assert "Goal achieved; essential result" in capsules[0].lean[0].content
+    assert "Goal achieved; essential result" in records[-1].content
     assert sum("Delivered answer" in r.content for r in visible) == 1
     assert raw[-1].content == "Delivered answer"  # read projection is immutable
     assert len(capsules[0].lean) == 1 and "<task_finish" in capsules[0].lean[0].content
@@ -113,6 +119,18 @@ def test_minimal_capsule_has_only_the_finish_even_with_old_stray_recap():
     visible, capsules = history_view(records)
     assert [task_record_kind(r) for r in visible] == ["finish"]
     assert capsules == []
+
+
+@pytest.mark.parametrize("locale", ["en", "zh"])
+def test_finish_marker_keeps_child_identity_without_exposing_the_report(locale):
+    from ctx_weft.core.assembler.builder import compile_history
+
+    records = body() + closure(parent="parent")
+    messages = compile_history(records, locale=locale).messages
+    (finish,) = [m for m in messages if "<task_finish" in str(m.content)]
+    assert finish.role == "user"
+    assert finish.content == '<task_finish task_id="t" parent_task_id="parent" outcome="success" />'
+    assert "Goal achieved; essential result" in records[-1].content
 
 
 def test_partial_closure_does_not_hide_its_last_surviving_record():
@@ -152,12 +170,12 @@ def test_legacy_raw_answer_is_labeled_without_converting_business_tools():
         metadata={"task_id": "t", "tool_calls": [{"id": "real", "name": "fs__read", "input": {}}]},
     )
     visible, _ = history_view([*raw, tool, old, report])
-    assert any(r.id == "t-reply" and "<task_final_reply" in r.content for r in visible)
+    assert any(r.id == "t-reply" and r.content == "Delivered answer" for r in visible)
     assert (
         next(r for r in visible if r.id == "business").metadata["tool_calls"][0]["name"]
         == "fs__read"
     )
-    assert not any(task_record_kind(r) == "finish" for r in visible)
+    assert sum(task_record_kind(r) == "finish" for r in visible) == 1
 
 
 def test_budget_replaces_the_entire_capsule_and_preserves_the_new_request():
@@ -174,9 +192,11 @@ def test_budget_replaces_the_entire_capsule_and_preserves_the_new_request():
     lean = compile_prompt(blocks(records), request)
     full_text = "\n".join(str(m.content) for m in full.messages)
     lean_text = "\n".join(str(m.content) for m in lean.messages)
-    assert "<task_final_reply" in full_text and "<task_finish" not in full_text
+    assert "Delivered answer" in full_text and full_text.count("<task_finish") == 1
+    assert "Goal achieved; essential result" not in full_text
     assert "<task_finish" in lean_text
     assert "<task_recap" not in lean_text and "<task_final_reply" not in lean_text
+    assert "Delivered answer" not in lean_text
     assert lean_text.count("Goal achieved; essential result") == 1
     assert "New request" in lean_text and lean.token_count <= budget
     assert lean_text.index("<task_finish") < lean_text.index("New request")
@@ -232,7 +252,7 @@ def test_capsule_selection_does_not_depend_on_the_jinja_label_spelling(monkeypat
     monkeypatch.setattr(prompts, "_JINJA", environment)
     visible, capsules = history_view(body() + closure(reply=""))
     assert any(r.content == "CUSTOM final_reply: Delivered answer" for r in visible)
-    assert all("CUSTOM finish" not in r.content for r in visible)
+    assert sum("CUSTOM finish" in r.content for r in visible) == 1
     assert capsules[0].lean[0].content == "CUSTOM finish: Goal achieved; essential result"
 
 
@@ -256,7 +276,7 @@ async def test_failed_observation_cannot_demote_uncovered_raw_history():
     records = body() + closed
     visible, capsules = history_view(records)
     assert all(task_record_kind(r) != "recap" for r in visible)
-    assert any("<task_final_reply" in str(r.content) for r in visible)
+    assert any(r.role == "assistant" and r.content == "Delivered answer" for r in visible)
     assert capsules == []  # The template does not register an unusable alternative.
     for record in records:
         await memory.ingest(record, CTX)
@@ -338,8 +358,8 @@ async def test_inherited_snapshot_matches_the_parents_selected_capsule_view(lean
         memory, MemoryAddress(session_id="s", agent_id="b"), MemoryScope.AGENT, CTX
     )
     text = "\n".join(r.content for r in inherited)
-    assert ("<task_finish" in text) is lean
-    assert ("<task_final_reply" in text) is not lean
+    assert text.count("<task_finish") == 1
+    assert "<task_final_reply" not in text
     assert text.count("Delivered answer") == (0 if lean else 1)
 
 
@@ -410,8 +430,8 @@ async def test_raw_answer_reference_and_lean_state_survive_sqlite_reopen(tmp_pat
         raw = await load_records(memory, SCOPE, MemoryScope.TASK, CTX)
         assert agent[-1].metadata["finish_policy"]["final_reply_record_id"] == "t-reply"
         visible, _ = history_view([*agent, *raw])
-        assert sum("<task_final_reply" in str(r.content) for r in visible) == 1
-        assert not any(task_record_kind(r) == "finish" for r in visible)
+        assert sum(r.role == "assistant" and r.content == "Delivered answer" for r in visible) == 1
+        assert sum(task_record_kind(r) == "finish" for r in visible) == 1
         await demote_kept_capsules(
             SimpleNamespace(scope=SCOPE), SimpleNamespace(memory=memory, provider_ctx=CTX), {"t"}
         )

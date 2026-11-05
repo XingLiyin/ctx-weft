@@ -25,7 +25,7 @@ def test_facts_retain_all_candidates_and_unwrapped_raw_answers():
     assert task["source"]["message"].content == "Delivered answer"
     assert task["closing"]["kind"] == "finish"
     assert all("visible" not in row and "show_finish" not in row for row in rows)
-    assert "<task_finish" not in "\n".join(
+    assert "<task_finish" in "\n".join(
         str(m.content) for m in compile_history(records).messages
     )
 
@@ -44,13 +44,13 @@ async def test_only_editing_the_template_changes_prompt_snapshot_and_token_estim
     program = (
         Path(prompts.__file__).with_name("prompt_assets") / "steps/_history.jinja"
     ).read_text(encoding="utf-8")
-    rule = "{% set choice.show = item.ref != task.closing.ref %}"
+    rule = "{% set choice.show = true %}"
     assert program.count(rule) == 1
     environment = prompts._JINJA.overlay(
         loader=ChoiceLoader(
             [
                 DictLoader(
-                    {"steps/_history.jinja": program.replace(rule, "{% set choice.show = true %}")}
+                    {"steps/_history.jinja": program.replace(rule, "{% set choice.show = item.ref != task.closing.ref %}")}
                 ),
                 prompts._JINJA.loader,
             ]
@@ -58,9 +58,9 @@ async def test_only_editing_the_template_changes_prompt_snapshot_and_token_estim
     )
     monkeypatch.setattr(prompts, "_JINJA", environment)
     full = compile_prompt(blocks(records), prompt_request(task_id="next"))
-    assert any("<task_finish" in str(m.content) for m in full.messages)
-    assert any("<task_finish" in str(r.content) for r in history_records(records))
-    assert await _active_memory_tokens(state, ctx) > before
+    assert all("<task_finish" not in str(m.content) for m in full.messages)
+    assert all("<task_finish" not in str(r.content) for r in history_records(records))
+    assert await _active_memory_tokens(state, ctx) < before
     await _copy_memory_for_inherit(
         source_agent_id="a",
         child_task=SimpleNamespace(id="child"),
@@ -72,7 +72,7 @@ async def test_only_editing_the_template_changes_prompt_snapshot_and_token_estim
     inherited = await load_records(
         memory, MemoryAddress(session_id="s", agent_id="b"), MemoryScope.AGENT, CTX
     )
-    assert any("<task_finish" in str(r.content) for r in inherited)
+    assert all("<task_finish" not in str(r.content) for r in inherited)
     # The parent facts and persisted rows were never filtered or rewritten.
     assert len(history_facts(records)[0]) == len(records)
     assert len(await load_records(memory, SCOPE, MemoryScope.TASK, CTX)) == 2
@@ -104,12 +104,13 @@ def test_generic_group_alternative_keeps_decorations_and_exact_budget():
     assert builder.refs == ("original",)
 
 
-def test_hidden_finish_does_not_receive_the_active_instruction():
+def test_active_instruction_stays_outside_the_finish_record():
     records = body() + closure()
     context = context_from_blocks(prompt_request(task_id="next"), blocks(records))
     context._skill_definition = {"skill_name": "test", "instructions": "Unique active directive"}
     prompt = PromptBuilder(len).compile(context)
     joined = "\n".join(str(m.content) for m in prompt.messages)
-    assert "<task_finish" not in joined
-    assert any("You are still working" in str(m.content) for m in prompt.messages)
+    assert "<task_finish" in joined
+    finish = next(m for m in prompt.messages if "<task_finish" in str(m.content))
+    assert "Unique active directive" not in str(finish.content)
     assert joined.count("Unique active directive") == 1

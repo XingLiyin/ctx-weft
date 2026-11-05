@@ -196,9 +196,9 @@ async def _run_dispatch_and_close(mem, *, restart: str | None):
 
 def _assert_capsule_present(messages) -> None:
     labels = _labels(messages)
-    assert any("<task_final_reply" in (m.content or "") for m in messages), labels
-    assert all("<task_finish" not in (m.content or "") for m in messages), labels
-    assert any("子任务最终产出：做完了" in (m.content or "") for m in messages), labels
+    assert all("<task_final_reply" not in (m.content or "") for m in messages), labels
+    assert any(m.role == "user" and "<task_finish" in (m.content or "") for m in messages), labels
+    assert any(m.role == "assistant" and m.content == "子任务最终产出：做完了" for m in messages), labels
     assert any("子任务 act 复述" in (m.content or "") for m in messages), labels
     assert not any("is running now" in (m.content or "") for m in messages), labels
     assert all(not m.tool_calls and m.role != "tool" for m in messages)
