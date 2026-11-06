@@ -1371,7 +1371,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
                 info = view.pending_observe.setdefault(key, {})
                 for name in ("task_id", "observe_id", "boundary", "agent_id", "segment_end_at",
                              "judge_task", "execution_mode", "verdict", "disposition",
-                             "report_boundary", "short_leaf", "context_record_ids"):
+                             "report_boundary", "short_leaf", "context_record_ids", "waiting_hitl_id", "act_turns"):
                     if name in p:
                         info[name] = p[name]
                 if t == EventType.OBSERVE_STARTED and p.get("observe_id"):

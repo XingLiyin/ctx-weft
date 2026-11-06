@@ -108,7 +108,7 @@ def build_llm_tools(caps: list[Capability], purpose: str, *, terminal_only: bool
             props = tool.input_schema.get("properties", {})
             if "task_status" in props:
                 props["task_status"] = {"type": "string", "enum": ["success", "fail"],
-                                        "description": "Final verdict on the old goal; continue is not allowed."}
+                                        "description": "Final verdict on the old goal; continue and waiting are not allowed."}
                 props.get("next_step_hint", {}).update(description="Leave empty: the old task will not resume.")
                 props["task_failure_reason"] = {"type": "string", "description": "Required for fail: explain the unfinished original goal and the user topic switch. Empty for success."}
                 required = tool.input_schema.setdefault("required", [])

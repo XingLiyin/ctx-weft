@@ -42,7 +42,7 @@ async def assert_cold_recovery_is_noop(store, memory, mode, root):
 @pytest.mark.parametrize("snapshot", [False, True])
 @pytest.mark.parametrize("cut", ["observe_completed", "segment_fold", "recovery_segment_fold"])
 async def test_non_close_completed_recovers_real_fold(tmp_path, snapshot, cut):
-    mode = "background_retry"
+    mode = "background_waiting"
     await run_worker(tmp_path, mode, "observe_completed" if cut == "recovery_segment_fold" else cut)
     if cut == "recovery_segment_fold":
         await run_worker(tmp_path, mode, "segment_fold", recovering=True)
@@ -68,6 +68,40 @@ async def test_non_close_completed_recovers_real_fold(tmp_path, snapshot, cut):
             assert_lifecycles(rows)
             view = await rebuild_view(store, "crash-session")
             assert not view.pending_observe and not view.open_runs
+            await assert_cold_recovery_is_noop(store, memory, mode, root)
+
+
+@pytest.mark.parametrize("snapshot", [False, True])
+@pytest.mark.parametrize("cut", ["observe_completed", "segment_fold", "hitl_resolved",
+                                 "task_requeued", "observe_applied"])
+async def test_background_continue_recovers_and_runs_once(tmp_path, snapshot, cut):
+    mode = "background_continue"
+    await run_worker(tmp_path, mode, cut)
+    async with open_sqlite_event_store(tmp_path / "events.db") as store:
+        async with open_sqlite_memory(tmp_path / "memory.db") as memory:
+            rt = await restart(store, memory, mode, snapshot)
+            # The pre-crash actor and review have already happened. Replaying
+            # their accepted continuation must not call either one again.
+            rt._llm.actor_count = rt._llm.judgements = 1
+            root = (await rt.get_session("crash-session")).data.root_agent_id
+            await rt.recover_agent(root, session_id="crash-session")
+            tm = rt._task_managers["crash-session"]
+            async with asyncio.timeout(10):
+                while (tm._background_asyncio_tasks or tm._dispatch_tasks
+                       or any(t.status in {"PENDING", "ACTIVE"} for t in tm._tasks.values())):
+                    await asyncio.sleep(0.01)
+            task, = tm._tasks.values()
+            assert task.status == "FINISHED"
+            assert task.outputs == "done"
+            assert rt._llm.actor_count == rt._llm.judgements == 2
+            assert not rt.hitl.registry.list_pending("crash-session")
+            rows = await store.read_range("crash-session")
+            requeues = [r for r in rows if r.event.type == EventType.TASK_REQUEUED
+                        and r.event.payload.get("outcome") == "continue"]
+            assert len(requeues) == 1
+            view = await rebuild_view(store, "crash-session")
+            assert not view.pending_observe and not view.open_runs
+            assert_lifecycles(rows)
             await assert_cold_recovery_is_noop(store, memory, mode, root)
 
 

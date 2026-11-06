@@ -142,44 +142,50 @@ async def test_second_verdict_is_rejected() -> None:
 
 # ── retry / fail 维持 park（S5）────────────────────────────────────────────────
 
-async def test_retry_verdict_keeps_it_parked() -> None:
-    """观察者说「没做完」→ 字段落地，但状态不动：有人在场时该由人拍板下一步。
-
-    这与 `test_retry_verdict_requeues_it` 的差别是那条用的是**旧**语义（走处置表重排）。
-    S5 之后 retry 不再自动重跑，也不烧 `retry_count`——`max_retries` 是给无人值守的自动
-    重跑设的失控护栏，不该被一段正常的多轮对话烧光。
-    """
+async def test_waiting_verdict_keeps_it_parked():
     tm, bus = _tm()
-    task = _parked(tm, retry_count=0, max_retries=3)
-
+    task = _parked(tm, retry_count=0, max_retries=3, error="previous blocker")
     accepted = await tm.apply_out_of_band_verdict(
-        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="continue"),
-        process_report="卡住了", next_step_hint="Next Step Hint: 先取凭据",
-    )
+        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="waiting"),
+        process_report="asked user")
+    assert accepted
+    assert task.status == "AWAITING_HUMAN"
+    assert task.observer_outcome == "waiting"
+    assert task.retry_count == 0
+    assert task.error is None
+    assert bus.events == []
 
-    assert accepted is True                       # 判决被接受：字段落地了
-    assert task.status == "AWAITING_HUMAN"        # 但仍在等人
+
+async def test_continue_always_requeues_and_preserves_exception_budget():
+    tm, bus = _tm()
+    task = _parked(tm, outputs="interim", retry_count=99, max_retries=0)
+    seen = []
+    async def resume():
+        seen.append((task.status, list(bus.events)))
+    assert await tm.apply_out_of_band_verdict("A",
+        RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="continue"),
+        next_step_hint="finish work", resume=resume)
+    assert task.status == "PENDING"
     assert task.observer_outcome == "continue"
-    assert task.process_report == "卡住了"
-    assert task.next_step_hint == "Next Step Hint: 先取凭据"
-    assert task.retry_count == 0                  # 预算一点没烧
-    assert bus.events == []                       # 没有状态事件
+    assert task.retry_count == 99
+    assert task.outputs is None
+    assert task.next_step_hint == "finish work"
+    assert seen == [("PENDING", [])]
+    assert _types(bus) == [EventType.TASK_REQUEUED]
+    assert [entry.task_id for entry in tm._queue.peek_all()] == ["A"]
+    assert not await tm.apply_out_of_band_verdict("A",
+        RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="continue"))
 
 
-async def test_fail_verdict_keeps_it_parked_too() -> None:
-    """fail 同理：agent 说它做不到，也让人来决定，而不是系统直接判死。"""
+async def test_fail_verdict_closes_the_task():
     tm, bus = _tm()
     task = _parked(tm)
-
-    accepted = await tm.apply_out_of_band_verdict(
-        "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="fail", error="外部接口下线"),
-        process_report="查清了原因",
-    )
-
-    assert accepted is True
-    assert task.status == "AWAITING_HUMAN"
+    assert await tm.apply_out_of_band_verdict("A",
+        RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="fail", error="API unavailable"))
+    assert task.status == "FAILED"
     assert task.observer_outcome == "fail"
-    assert bus.events == []
+    assert task.error == "API unavailable"
+    assert EventType.TASK_FAILED in _types(bus)
 
 
 # ── 带外收尾钩子（2026-09-27）──────────────────────────────────────────────────
@@ -254,7 +260,7 @@ async def test_finalize_is_not_called_when_the_verdict_is_rejected() -> None:
     assert called == []
 
 
-async def test_finalize_is_not_called_for_retry() -> None:
+async def test_terminal_finalize_is_not_called_for_continue() -> None:
     """retry 维持 park——task 没终结，没有收尾可言。"""
     tm, _bus = _tm()
     _parked(tm)
@@ -264,7 +270,7 @@ async def test_finalize_is_not_called_for_retry() -> None:
         "A", RunOutcome(kind=RunOutcomeKind.COMPLETED, verdict="continue"),
         finalize=lambda: called.append(1) or _noop())
     assert called == []
-    assert tm.get_task("A").status == "AWAITING_HUMAN"
+    assert tm.get_task("A").status == "PENDING"
 
 
 async def _noop() -> None:

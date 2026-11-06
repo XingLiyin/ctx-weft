@@ -766,8 +766,8 @@ async def _finish_plain_text_turn(
     """纯文本回合（无 tool call）收尾。
 
     **有人在场**就让位 → `_park_await_user`（HITL input 冷 park、raises HitlPark；park
-    与后台 observe 并行，observer 判 success 则经带外入口终结本 task、判 retry/fail 则
-    维持 park 等人）。unattended / 非普通任务 / 无 hitl：纯文本即任务产出，发 stop 事件
+    与后台 observe 并行，observer 判 success 则经带外入口终结本 task、判 continue 则自动续跑，判 waiting 则
+    维持 park 等人，判 fail 则失败收尾）。unattended / 非普通任务 / 无 hitl：纯文本即任务产出，发 stop 事件
     路由前台 observe。
 
     判据 2026-09-22 从 `interaction_mode == "interactive"` 换成 `not unattended`：
@@ -974,6 +974,7 @@ async def _cold_park(
         await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
             "turn": await_user_turn, "reason": "await_user"}))
     if observe_request is not None:
+        observe_request["waiting_hitl_id"] = req.id
         await StepDriver.for_context(ctx).start_durable(
             "observe", state, ctx, options=observe_request)
     # 不建等待槽 —— 本调用方随即 park 释放协程而非 await，应答必然走冷续跑。

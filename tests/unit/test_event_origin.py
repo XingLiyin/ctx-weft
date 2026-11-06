@@ -127,7 +127,7 @@ class _RouterLLM(MockLLMAdapter):
             return self._stream(MockResponse(text=""), request)
         if "control__report_observation" in names:
             return self._stream(MockResponse(tool_calls=[ToolCall(id="review",
-                name="control__report_observation", arguments={"task_status": "continue",
+                name="control__report_observation", arguments={"task_status": "waiting",
                     "act_recap": "Asked the user a question."})]), request)
         return self._stream(MockResponse(text="Hi! Anything else?"), request)
 

@@ -28,6 +28,39 @@ def state():
     return result
 
 
+@pytest.mark.parametrize("locale", ["en", "zh"])
+@pytest.mark.parametrize("boundary", ["max_turns", "context_limit", "plain_text"])
+@pytest.mark.parametrize("judge_task", [False, True])
+def test_turn_limit_prompt_reviews_capability_and_shows_rounds(monkeypatch, locale, boundary, judge_task):
+    from functools import partial
+
+    from ctx_weft.core.assembler import ReviewIntent, prompts
+    from ctx_weft.core.assembler.builder import PromptBuilder
+    from tests.assembler_testkit import context_from_blocks
+    from tests.model_testkit import model_snapshot
+
+    monkeypatch.setattr(prompts, "render_purpose", partial(prompts.render_purpose, locale=locale))
+    request = NS(resolved_model=model_snapshot(100000, 0), purpose="observe",
+        intent=ReviewIntent(judge_task=judge_task),
+        extra={"observe_boundary": boundary, "observe_act_turns": 37},
+        task=Task(id="t1", session_id="s1", status="ACTIVE", user_prompt_in_memory=True),
+        agent=NS(id="a1"), template=None, token_counter=len,
+        session=NS(context_limit=100000, reserved_output_tokens=0))
+    context = context_from_blocks(request, ())
+    context = type(context).from_payload(context.to_payload())
+    prompt = PromptBuilder(len).compile(context, tools=[])
+    text = prompt.system + "\n" + "\n".join(str(m.content) for m in prompt.messages)
+    instruction = ("return `fail` only if you clearly cannot complete it"
+                   if locale == "en" else
+                   "若明确无法完成，填 `fail`")
+    assert (instruction in text) == (judge_task and boundary == "max_turns")
+    if judge_task and boundary == "max_turns":
+        assert ("37 actor turns" if locale == "en" else "37 轮") in text
+        assert "task_failure_reason" in text
+        assert ("Never return `waiting` or `success`" if locale == "en" else
+                "不得填 `waiting` 或 `success`") in text
+
+
 @pytest.mark.parametrize("standalone", [False, True])
 @pytest.mark.parametrize("judge_task", [False, True])
 async def test_same_tool_and_purpose_with_optional_judgement(monkeypatch, standalone, judge_task):
@@ -102,7 +135,7 @@ async def test_missing_verdict_is_retried_before_accepting_submission(monkeypatc
 
 @pytest.mark.parametrize("standalone", [False, True])
 @pytest.mark.parametrize("boundary", ["max_turns", "context_limit"])
-async def test_step_overrides_success_at_mechanical_limits(monkeypatch, standalone, boundary):
+async def test_only_turn_limit_forces_continuation(monkeypatch, standalone, boundary):
     current = state()
     current.act_exit_reason = boundary
 
@@ -115,9 +148,32 @@ async def test_step_overrides_success_at_mechanical_limits(monkeypatch, standalo
     monkeypatch.setattr(ObserveStep, "_llm_observe", observe)
     monkeypatch.setattr(ObserveStep, "_fold_retry_segment", fold)
     outcome = await _collect(current, _make_ctx(""), background=standalone)
-    assert outcome.state_patch["verdict"].task_outcome == "success"
+    expected = "continue" if boundary == "max_turns" else "success"
+    assert outcome.state_patch["verdict"].task_outcome == expected
     assert outcome.state_patch["observation"].act_recap == "recap"
-    assert current.task.observer_outcome == (None if standalone else "success")
+    assert current.task.observer_outcome == (None if standalone else expected)
+
+
+@pytest.mark.parametrize("verdict", ["success", "waiting", "continue", "fail", None, "error"])
+@pytest.mark.parametrize("boundary", ["max_turns", "normal"])
+async def test_turn_limit_is_deterministic_even_when_observation_fails(monkeypatch, verdict, boundary):
+    current = state()
+
+    async def observe(*args):
+        if verdict == "error":
+            raise RuntimeError("observer unavailable")
+        return ObservationResult("segment recap", "whole task",
+            Verdict(verdict, "segment recap", "whole task", reported=True) if verdict else None)
+
+    monkeypatch.setattr(ObserveStep, "_llm_observe", observe)
+    result = await ObserveStep()._observe(current, _make_ctx(""), [], True, boundary)
+    expected = "continue" if boundary == "max_turns" and verdict != "fail" else (
+        "success" if verdict in (None, "error") else verdict)
+    assert result.verdict.task_outcome == expected
+    if boundary == "max_turns" and verdict != "fail":
+        assert result.task_summary == result.verdict.task_summary == ""
+    elif verdict == "fail":
+        assert result.verdict.task_summary == "whole task"
 
 
 @pytest.mark.parametrize("boundary", ["plain_text", "finish_park"])

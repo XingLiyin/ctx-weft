@@ -26,7 +26,7 @@ from ctx_weft.core.orchestrator.task.disposition import (
 )
 from ctx_weft.core.orchestrator.task.queue import QueueEntry, TaskQueue
 from ctx_weft.core.utils.task_ref import task_ref, task_ref_parts
-from ctx_weft.core.utils.verdict import VERDICT_SUCCESS, normalize_verdict
+from ctx_weft.core.utils.verdict import VERDICT_CONTINUE, VERDICT_SUCCESS, VERDICT_WAITING, normalize_verdict
 from ctx_weft.core.orchestrator.task.runner import AgentBinding, TaskRunner, effective_agent_id
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.status import TaskStatus
@@ -110,6 +110,7 @@ class TaskManager:
         self._children_of: dict[str, set[str]] = {}  # parent_task_id → set[child_task_ids]
         self._runner: TaskRunner | None = None
         self._running_tasks: set[str] = set()
+        self._applying_observe_tasks: set[str] = set()
         # Actor/settlement handles, not cancellation state: failed commits may leave a slot behind.
         self._dispatch_tasks: dict[str, asyncio.Task] = {}
         # 派发后登记的「真实执行 agent id」（task_id → binding.agent_id）——
@@ -893,6 +894,7 @@ class TaskManager:
                 entry = self._queue.pop(
                     skip=lambda e: (
                         self.is_task_tree_canceled(e.task_id)
+                        or e.task_id in self._applying_observe_tasks
                         or
                         self._effective_agent(self._tasks.get(e.task_id)) in busy_agents
                         or self._session_unhealthy(e.task_id)
@@ -1052,7 +1054,7 @@ class TaskManager:
             await self.finish_observe(outcome, task_id)
             # **收尾的最后一步**：这次停下来等的问题若已经有答复，说明那条应答落在了本段
             # 收尾里、它的重排被「还在跑」挡掉了。槽位此刻已经释放，补做即可。
-            if outcome.kind is RunOutcomeKind.AWAITING_HUMAN:
+            if outcome.kind is RunOutcomeKind.AWAITING_HUMAN or outcome.verdict == VERDICT_WAITING:
                 await self._wake_if_already_answered(task_id, outcome.hitl_id)
         except PersistenceUnavailableError:
             # spec: event-commit——同 assemble 分支：不提交、不处置、不重排。
@@ -1195,20 +1197,34 @@ class TaskManager:
             if task is None or self.is_task_tree_canceled(task_id) or (
                     task.status in _TERMINAL_STATUSES and task.status != decision["status"]):
                 return False
-            task.outputs = outcome.outputs
+            if decision["status"] == "PENDING" and task.status == "ACTIVE":
+                return False  # A newer actor already owns this task.
+            task.outputs = None if outcome.verdict == VERDICT_CONTINUE else outcome.outputs
             task.observer_outcome = outcome.verdict
             task.error = outcome.error or None
             task.switch_requested = decision["payload"].get("reason") == "user_topic_switch"
-            if not settled:
+            if not settled or decision["status"] == "PENDING":
+                # Startup exposes unowned PENDING work as INTERRUPTED. The
+                # accepted continuation still owns its dispatch after a crash
+                # between TaskRequeued and the in-memory queue insertion.
                 task.status = decision["status"]
+            if decision["status"] == "PENDING":
+                self._applying_observe_tasks.add(task_id)
         await finalize()
+        if self.is_task_tree_canceled(task_id):
+            self._applying_observe_tasks.discard(task_id)
+            return False
         if not settled:
             payload = dict(decision["payload"])
             if decision["event_type"] == "TaskFinished":
                 payload["outputs"] = outcome.outputs
             payload["observe_id"] = observe_id
             await self._emit(EventType(decision["event_type"]), task_id=task_id, payload=payload)
+            self._applying_observe_tasks.discard(task_id)
             await self._settle(task_id, decision["status"])
+        elif decision["status"] == "PENDING" and task.status == "PENDING":
+            self._applying_observe_tasks.discard(task_id)
+            await self._settle(task_id, "PENDING")
         return True
 
     async def finish_observe(self, outcome, task_id):
@@ -1412,7 +1428,7 @@ class TaskManager:
                     status = await self.apply_run_outcome(task_id, outcome)
                     await self._settle(task_id, status)
                     await self.finish_observe(outcome, task_id)
-                    if outcome.kind is RunOutcomeKind.AWAITING_HUMAN:
+                    if outcome.kind is RunOutcomeKind.AWAITING_HUMAN or outcome.verdict == VERDICT_WAITING:
                         await self._wake_if_already_answered(task_id, outcome.hitl_id)
             except PersistenceUnavailableError:
                 logger.error("Recovered foreground %s halted: storage unavailable", task_id)
@@ -1674,54 +1690,20 @@ class TaskManager:
         next_step_hint: str = "",
         finalize: "Callable[[], Awaitable[None]] | None" = None,
         before_apply=None,
+        resume=None,
+        is_current=None,
     ) -> bool:
-        """**带外判决**：一条不属于任何活跃 run 的结局（2026-09-22）。
+        """Arbitrate a parked verdict before applying its durable disposition.
 
-        切换后的 REVIEWING 只接受 success / fail，两者都进入终态收尾。
-        下述「只有 success 收尾、其余维持 park」专指 AWAITING_HUMAN。
-
-        唯一调用方是后台 observe：park 之后 run 就地结束了（`_cold_park` 抛 `HitlPark`
-        释放协程），它判完时这个 task 没有任何 run 在跑，`_close_report` 那条「同 run 内
-        由 finalize 取用」的路走不通。
-
-        返回 **True = 判决被接受**（observer 字段已落地），**False = 被仲裁拒绝、task 一个
-        字段都没动**。注意 True 不等于「task 终结了」：只有 `success` 才走处置表，
-        `retry` / `fail` 维持 park——「没做完」在有人在场时该由人拍板，不该由系统自动
-        重排或判死（`max_retries` 是给无人值守的自动重跑设的失控护栏）。
-
-        仲裁判据：只接受仍停在 `AWAITING_HUMAN` 的 task。人可能已经开口重排了它——
-        `_inject_user_turn` 写 USER_PROMPT 时**不等**后台 observe，所以「人先开口」是
-        常态而非边角。那时这份判决已经过时：人还有话说，这个 task 显然没完。
-
-        **检查与转移在同一个锁内**，中间没有 await。否则「检查时还是 AWAITING_HUMAN、
-        转移时已被重排」的窗口依然在，仲裁就成了摆设。事件发射与队列收尾留在锁外：
-        那时 `task.status` 已是终态，人的消息会在 `send_message` 层走
-        「current_task 已终态 → `_start_task_for_agent` 建新 task」，不会丢。
-
-        observer 的三个文本字段由调用方传进来在锁内一并写：后台 observe 跑在
-        ObserveStep 返回的结果上，提交工具不写 task，
-        判决被拒时它们也就不该落地。
-
-        ``finalize``：**带外收尾**——在「状态已写定」与「转移已宣布」之间那个窗口里跑
-        （2026-09-27）。三条约束各钉一侧，顺序不能动：
-
-        - **在仲裁之后**：判决被拒时一个字都不能写。收气泡、bubble 给 parent、软删自身
-          对话，对一个还要继续跑的 task 全是破坏。
-        - **在 `_settle` 之前**：`_settle` → `on_task_finished` → `_try_resume_parent`
-          会唤醒 parent，parent 不能在子任务的产出落地之前醒过来装配。
-        - **状态写留在锁内**，这是关门点：`task.status` 一落终态，人的消息在
-          `send_message` 层就按 `_task_is_terminal` 走新建分支，不会再 `requeue` 这个
-          正在收尾的 task。所以带 IO 的这一段跑在锁外是安全的。
-
-        只在真发生了转移（即 `success`）时调用——`retry`/`fail` 维持 park，没有收尾可言。
-        **失败不吞掉转移**：抛异常只记日志，照常往下发 `TaskFinished` + `_settle`。状态
-        已经是终态了，不发事件宿主永远不知道、不 `_settle` 则槽位永不释放、交互线永久
-        占着；降级成「这个 task 少了收尾副作用」远好过卡住整个会话。
+        waiting records the observation without waking the task. continue requeues;
+        success/fail close. Application callbacks finish memory/HITL work before
+        announcing the transition or starting another actor.
         """
         async with self._lock:
             task = self._tasks.get(task_id)
             if (task is None or task.status not in ("AWAITING_HUMAN", "REVIEWING")
-                    or self.is_task_tree_canceled(task_id)):
+                    or self.is_task_tree_canceled(task_id)
+                    or is_current is not None and not is_current()):
                 logger.info(
                     "out-of-band verdict rejected for task %s (status=%s): it is no longer "
                     "parked — another disposition won",
@@ -1748,11 +1730,12 @@ class TaskManager:
             verdict = normalize_verdict(outcome.verdict) if outcome.verdict else ""
             if verdict:
                 task.observer_outcome = verdict
-            if verdict != VERDICT_SUCCESS and not terminal_only:
+            if verdict in ("", VERDICT_WAITING) and not terminal_only:
+                if verdict == VERDICT_WAITING:
+                    task.error = None
                 if before_apply is not None:
                     await before_apply(True, None)
-                # retry / fail → 维持 park。字段已写（hint 供下一轮 act 用），但不转移
-                # 状态：观察者说「没做完」时，在有人在场的会话里该由人决定下一步。
+                # Only waiting (or an absent verdict) leaves the task parked.
                 logger.info(
                     "out-of-band verdict '%s' for task %s: fields recorded, staying parked "
                     "for the user",
@@ -1768,14 +1751,18 @@ class TaskManager:
                 planned.payload["reason"] = "user_topic_switch"
             if before_apply is not None:
                 await before_apply(True, planned)
-            task.outputs = outcome.outputs
+            task.error = None if verdict == VERDICT_SUCCESS else outcome.error or None
+            task.outputs = None if verdict == VERDICT_CONTINUE else outcome.outputs
             disp = self._decide_and_write(task_id, outcome)
+            if verdict == VERDICT_CONTINUE:
+                self._applying_observe_tasks.add(task_id)
             if terminal_only:
                 disp.payload["reason"] = "user_topic_switch"
 
-        if finalize is not None:
+        callback = resume if verdict == VERDICT_CONTINUE else finalize
+        if callback is not None:
             try:
-                await finalize()
+                await callback()
             except Exception:
                 if before_apply is not None:
                     raise
@@ -1785,7 +1772,11 @@ class TaskManager:
                     "strand the slot and hold the interaction line forever)", task_id)
         if outcome.observe_id:
             disp.payload["observe_id"] = outcome.observe_id
+        if self.is_task_tree_canceled(task_id):
+            self._applying_observe_tasks.discard(task_id)
+            return True
         await self._emit(EventType(disp.event_type), task_id=task_id, payload=disp.payload)
+        self._applying_observe_tasks.discard(task_id)
         await self._settle(task_id, disp.status)
         return True
 
@@ -1827,8 +1818,13 @@ class TaskManager:
         if status == "PENDING":
             # observer 判 retry（本轮未完成，含机械退出）或崩溃后可重试：重新入队。
             async with self._lock:
+                task = self._tasks.get(task_id)
+                if task is None or task.status not in ("PENDING", "INTERRUPTED"):
+                    return
+                task.status = "PENDING"  # Restore a committed requeue after startup repair.
                 self._release_slot(task_id)
-                self._queue.push(QueueEntry(task_id=task_id, session_id=self._session_id))
+                if not any(entry.task_id == task_id for entry in self._queue.peek_all()):
+                    self._queue.push(QueueEntry(task_id=task_id, session_id=self._session_id))
             await self.drain()
             return
         # 终态：用处置算出的那个，避免把 FAILED/CANCELED 覆盖成 FINISHED

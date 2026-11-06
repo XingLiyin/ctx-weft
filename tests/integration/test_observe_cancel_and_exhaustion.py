@@ -1,5 +1,7 @@
 """Cancellation ownership and exhausted mechanical reports on real runtime paths."""
 
+import asyncio
+
 import pytest
 
 from ctx_weft.core.control.reducers import rebuild_view, reduce_events
@@ -55,57 +57,31 @@ async def test_cancel_parked_task_revokes_old_observer(tmp_path, tmp_path_factor
             assert await stored_content(store, memory) == actual
 
 
-@pytest.mark.parametrize("order,size", [(o, s) for o in ("early", "late") for s in ("short", "long")])
 @pytest.mark.parametrize("snapshot", [False, True])
-@pytest.mark.parametrize("cut", ["summary_completed", "task_finalized", "report_replaced"])
-async def test_exhausted_continue_uses_finish_report(tmp_path, tmp_path_factory, order, size, snapshot, cut):
-    mode = f"exhausted_{order}_{size}"
-    expected = await baseline(tmp_path_factory, mode)
+@pytest.mark.parametrize("mode", ["retry", "mechanical_retry"])
+@pytest.mark.parametrize("cut", ["observe_completed", "task_finalized", "task_requeued"])
+async def test_continue_with_zero_exception_budget_recovers_without_failure(tmp_path, snapshot, mode, cut):
     await run_worker(tmp_path, mode, cut)
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
-            rt, root = await recover_and_drain(store, memory, mode, snapshot)
+            rt, root = await recover_and_drain(store, memory, "foreground", snapshot)
+            tm = rt._task_managers["crash-session"]
+            async with asyncio.timeout(10):
+                while (tm._dispatch_tasks or tm._background_asyncio_tasks
+                       or any(t.status in {"ACTIVE", "PENDING"} for t in tm._tasks.values())):
+                    await asyncio.sleep(0.01)
+            task, = tm._tasks.values()
+            assert task.status == "FINISHED"
+            assert task.max_retries == task.retry_count == 0
+            rows = await store.read_range("crash-session")
+            assert not any(r.event.type == EventType.TASK_FAILED for r in rows)
+            requeues = [r for r in rows if r.event.type == EventType.TASK_REQUEUED
+                        and r.event.payload.get("outcome") == "continue"]
+            assert len(requeues) == 1
             view = await rebuild_view(store, "crash-session")
-            rows = await store.read_range("crash-session")
-            task, = reduce_events([r.event for r in rows], "").tasks.values()
-            assert task.status == "FAILED"
             assert not view.pending_observe and not view.open_runs
-            rows = await store.read_range("crash-session")
             assert_lifecycles(rows)
-            request, = [r.event.payload for r in rows if r.event.type == EventType.OBSERVE_REQUESTED]
-            assert request["verdict"]["task_outcome"] == "continue"
-            assert request["disposition"]["status"] == "FAILED"
-            assert request["report_boundary"] in ("finish", "normal")
-            assert sum(r.event.type == EventType.TASK_FAILED for r in rows) == 1
-            actual = await stored_content(store, memory)
-            assert actual == expected
-            assert "reviewed" in str(actual[1])
-            assert "no process recap" not in str(actual[1])
-            assert rt._llm.actor_count == 0
-            await assert_cold_recovery_is_noop(store, memory, mode, root)
-            assert await stored_content(store, memory) == actual
-
-
-@pytest.mark.parametrize("size", ["short", "long"])
-@pytest.mark.parametrize("snapshot", [False, True])
-async def test_exhaustion_after_real_retry_keeps_terminal_report(tmp_path, tmp_path_factory, size, snapshot):
-    mode = f"exhausted_budget_early_{size}"
-    expected = await baseline(tmp_path_factory, mode)
-    await run_worker(tmp_path, mode, "task_finalized")
-    async with open_sqlite_event_store(tmp_path / "events.db") as store:
-        async with open_sqlite_memory(tmp_path / "memory.db") as memory:
-            rt, root = await recover_and_drain(store, memory, mode, snapshot)
-            rows = await store.read_range("crash-session")
-            requests = [r.event.payload for r in rows if r.event.type == EventType.OBSERVE_REQUESTED]
-            assert [r["disposition"]["status"] for r in requests] == ["PENDING", "FAILED"]
-            assert all(r["verdict"]["task_outcome"] == "continue" for r in requests)
-            assert sum(r.event.type == EventType.TASK_REQUEUED for r in rows) == 1
-            assert sum(r.event.type == EventType.TASK_FAILED for r in rows) == 1
-            assert_lifecycles(rows)
-            assert await stored_content(store, memory) == expected
-            assert "reviewed" in str(expected[1])
-            assert rt._llm.actor_count == 0
-            await assert_cold_recovery_is_noop(store, memory, mode, root)
+            await assert_cold_recovery_is_noop(store, memory, "foreground", root)
 
 
 async def test_public_cancel_does_not_overwrite_an_already_committed_verdict(tmp_path, monkeypatch):

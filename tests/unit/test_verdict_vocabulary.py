@@ -1,27 +1,4 @@
-"""复核裁决的值域：`success | continue | fail`，别名与未知值的去向（2026-09-28 改名）。
-
-## 为什么第二态从 `retry` 改成 `continue`
-
-那一态要表达的是「**这个 task 还没结束**」，有三个来源：机械退出（max_turns / context_limit）、
-复核判本段不合格、以及**actor 在问用户话、正等着回答**。`retry` 只贴合中间那一种，对第三种是
-误导——而第三种是交互产品里每天都在发生的形态。
-
-误导的后果不是文字不美观，是**把观察者推去判 success**：词面上「重试」暗示这次失败了，观察者
-看着一段礼貌的澄清提问被要求打上"重试"，会觉得标签不对而转投 `success`；字段上
-`task_failure_reason` 对 `retry` 曾是必填，一个正常的提问没有 blocker，要么编一个、要么换个
-status。判 success 的代价是实打实的：task 就此终结，用户正要说的那一轮被丢掉。
-
-纯文本 park 这条路上**没有机械护栏**能挡住它：`report_observation` 那道
-success-without-outputs 护栏读 `task.outputs`，而 park 前合成的 outputs 正是那段提问本身、非空
-——护栏原地失效（本文件最后一条钉住这个事实，免得有人以为还有一层保险）。
-
-## 本文件钉三件事
-
-1. 归一：`retry` 是永久别名；认不出的值归 `continue`，**决不归 `fail`**。
-2. 处置表四支显式，尤其「未知值不判死」——改名前那里是个 catch-all，`fail` 与任何拼错的值
-   共用它，一个错别字就让 task 无声判死。
-3. 工具边界：模型吐 `retry`（prompt 缓存 / 老 transcript / 模型先验都会）照样归到 `continue`。
-"""
+"""Four verdicts: continue always runs; waiting yields to the user."""
 
 from __future__ import annotations
 
@@ -39,6 +16,7 @@ from ctx_weft.core.orchestrator.task.disposition import (
 )
 from ctx_weft.core.utils.verdict import (
     VERDICT_CONTINUE,
+    VERDICT_WAITING,
     VERDICT_FAIL,
     VERDICT_SUCCESS,
     VERDICTS,
@@ -62,12 +40,12 @@ def _ctx(task: Task) -> ControlContext:
 # ── ① 归一 ────────────────────────────────────────────────────────────────────
 
 
-def test_the_vocabulary_is_exactly_three_words() -> None:
-    assert VERDICTS == (VERDICT_SUCCESS, VERDICT_CONTINUE, VERDICT_FAIL)
-    assert VERDICTS == ("success", "continue", "fail")
+def test_the_vocabulary_is_exactly_four_words() -> None:
+    assert VERDICTS == (VERDICT_SUCCESS, VERDICT_WAITING, VERDICT_CONTINUE, VERDICT_FAIL)
+    assert VERDICTS == ("success", "waiting", "continue", "fail")
 
 
-@pytest.mark.parametrize("value", ["success", "continue", "fail"])
+@pytest.mark.parametrize("value", ["success", "waiting", "continue", "fail"])
 def test_canonical_values_pass_through(value: str) -> None:
     assert normalize_verdict(value) == value
 
@@ -153,16 +131,30 @@ def test_the_tool_normalizes_garbage_to_continue() -> None:
     assert t.observer_outcome == VERDICT_CONTINUE
 
 
-def test_a_continue_verdict_needs_no_failure_reason() -> None:
-    """契约的另一半：`continue` 不再必填受阻原因。
+@pytest.mark.parametrize("verdict", [VERDICT_CONTINUE, VERDICT_WAITING])
+def test_nonterminal_verdict_needs_no_failure_reason(verdict):
+    t = _task(outputs="unfinished")
+    submit_and_apply(task_status=verdict, act_recap="unfinished", ctx=_ctx(t))
+    assert t.observer_outcome == verdict
+    assert t.error is None
 
-    必填是把观察者推去判 success 的第二只手——一个正常的澄清提问没有任何 blocker，要填这个
-    字段就只能编。空着不得引起降级、不得写脏 task.error。
-    """
-    t = _task(outputs="一段提问")
-    submit_and_apply(task_status=VERDICT_CONTINUE, act_recap="在等用户回答", ctx=_ctx(t))
-    assert t.observer_outcome == VERDICT_CONTINUE
-    assert t.error is None, "没有受阻原因时不该在 task 上留下空的死因"
+
+def test_waiting_parks_instead_of_requeueing():
+    d = disposition_for(RunOutcome(kind=RunOutcomeKind.COMPLETED,
+        verdict=VERDICT_WAITING, hitl_id="hit_wait"), retry_count=99, max_retries=0)
+    assert d.status == "AWAITING_HUMAN"
+    assert d.event_type == "TaskAwaitingHuman"
+    assert d.payload == {"hitl_id": "hit_wait", "outcome": "waiting"}
+
+
+@pytest.mark.parametrize("waiting_allowed", [False, True])
+def test_waiting_requires_a_user_entrance(waiting_allowed):
+    from ctx_weft.core.capabilities.control_tools import report_observation
+    from ctx_weft.core.loop.steps.observe import ObserveStep
+
+    submission = report_observation("asked user", task_status="waiting")
+    error = ObserveStep()._submission_error(submission, waiting_allowed=waiting_allowed)
+    assert (error is None) == waiting_allowed
 
 
 # ── ④ 那道机械护栏管不到「在问人」这件事 ──────────────────────────────────────
@@ -175,7 +167,7 @@ def test_the_no_outputs_guard_cannot_catch_a_question() -> None:
     `_synthesize_final_outputs` 已经把那段话写成了 outputs——哪怕它整段都是在问用户，
     outputs 也非空，护栏不触发，判 success 就会原样通过。
 
-    所以「向用户要东西 → 一律 continue」这条只能由 prompt（ROLE 的判断准则 + 工具字段描述 +
+    所以「向用户要东西 → 一律 waiting」这条只能由 prompt（ROLE 的判断准则 + 工具字段描述 +
     cue 的边界提醒）保证。谁将来想省掉那几段文案，先看这条测试。
     """
     asking = _task(outputs="这两个方案你想选哪个？")

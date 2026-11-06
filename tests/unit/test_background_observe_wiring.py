@@ -158,7 +158,8 @@ async def test_mechanical_verdict_requests_one_report(monkeypatch, child, bounda
     assert [e.type for e in stages] == [EventType.OBSERVE_REQUESTED,
         EventType.OBSERVE_STARTED, EventType.OBSERVE_COMPLETED]
     assert stages[0].payload["judge_task"] is True
-    assert stages[-1].payload["result"]["verdict"]["task_outcome"] == "success"
+    assert stages[-1].payload["result"]["verdict"]["task_outcome"] == (
+        "continue" if boundary == "max_turns" else "success")
     assert outcome.state_patch["verdict"].reported is False
     assert outcome.state_patch["verdict"].act_recap == ""
 

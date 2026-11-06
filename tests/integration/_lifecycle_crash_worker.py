@@ -6,11 +6,10 @@ import os
 import sys
 from pathlib import Path
 
-from tests._initialization import initialize_all
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from tests._initialization import initialize_all
 from ctx_weft import SessionStartParams
 from ctx_weft.protocols import LLMChunk, MemoryKind, MemoryScope, ToolCall
 from ctx_weft.protocols.events import EventType, PersistenceUnavailableError
@@ -46,7 +45,9 @@ class LifecycleLLM(_FinishEveryTaskLLM):
                     raise RuntimeError("observer unavailable")
                     yield
                 return unavailable()
-            verdict = ("continue" if self.mode in {"background_retry", "parked_cancel_retry", "parked_interrupt_retry"} or
+            verdict = ("continue" if self.mode == "background_continue" and self.actor_count == 1 and self.judgements == 1 else
+                       "waiting" if self.mode == "background_waiting" else
+                       "continue" if self.mode in { "parked_cancel_retry", "parked_interrupt_retry"} or
                        self.mode in {"retry", "mechanical_retry"} and self.judgements == 1 else
                        "fail" if self.mode == "threshold" else "success")
             return self._stream(MockResponse(tool_calls=[ToolCall(
@@ -61,7 +62,7 @@ class LifecycleLLM(_FinishEveryTaskLLM):
                     yield LLMChunk(kind="token", text="working ")
                     await asyncio.sleep(0.01)
             return hold_root()
-        if self.mode.startswith("exhausted_") or self.mode in {"plain_text", "background_retry", "parked_cancel_retry", "parked_interrupt_retry"} or (self.mode == "mechanical_retry" and self.actor_count == 1):
+        if self.mode.startswith("exhausted_") or self.mode in {"plain_text", "background_waiting", "parked_cancel_retry", "parked_interrupt_retry"} or (self.mode in {"mechanical_retry", "background_continue"} and self.actor_count == 1):
             return self._stream(MockResponse(text="completed answer"), request)
         return super().complete(request, stream)
 
@@ -71,7 +72,7 @@ def make_lifecycle_runtime(store, memory, mode):
     template = make_echo_template()
     if mode in {"mechanical", "mechanical_retry"} or mode.startswith(("handoff_", "exhausted_")):
         template.identity.pop("observe")
-    if mode == "background_retry":
+    if mode in {"background_waiting", "background_continue"}:
         template.loop_config = dataclasses.replace(template.loop_config, short_segment_token_threshold=0)
     if mode.startswith("handoff_"):
         template.loop_config = dataclasses.replace(
@@ -84,7 +85,8 @@ def make_lifecycle_runtime(store, memory, mode):
     llm = LifecycleLLM(mode)
     from ctx_weft.core.models.config import RuntimeConfig
     rt = make_runtime(agent_provider=provider, event_store=store, llm=llm,
-                      config=RuntimeConfig(task_max_retries=1 if "budget" in mode else 0) if mode.startswith("exhausted_") else None)
+                      config=RuntimeConfig(task_max_retries=1 if "budget" in mode else 0)
+                      if mode.startswith("exhausted_") or mode in {"retry", "mechanical_retry"} else None)
     rt.providers.register_memory(memory)
     return rt, llm
 
@@ -303,6 +305,8 @@ async def worker(directory, mode, cut, recovering=False):
             store.append_batch = crash_after_commit
             await initialize_all(rt)
             if recovering:
+                if mode == "background_continue":
+                    llm.actor_count = llm.judgements = 1
                 session = await rt.get_session("crash-session")
                 await rt.recover_agent(session.data.root_agent_id, session_id="crash-session")
                 tm = rt._task_managers.get("crash-session")

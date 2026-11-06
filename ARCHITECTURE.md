@@ -15,6 +15,17 @@
 任务裁剪不裁这份执行信息。启动校准复用快照加增量，不再另读完整 run 历史；旧版本快照回退全量日志。
 
 前后台 observe 共用 `ObserveRequested → ObserveStarted → ObserveCompleted → ObserveApplied`。
+
+`report_observation.task_status` 使用四态：`success` / `fail` 结束任务，`continue`
+一律自动重新入队执行，`waiting` 停在 `AWAITING_HUMAN` 等待用户回复。`continue`
+不消耗运行异常重试预算，也不兼容为旧的等待语义。交互任务的纯文本回合先临时 park，
+后台判 `continue` 后先完成段摘要、收口本轮等待入口，再发布 `TaskRequeued` 并启动下一轮；
+判 `waiting` 则保留入口。前台判 `waiting` 同样建立可应答的 HITL 入口。
+后台自动续跑以 `ObserveCompleted.action="continue"` 持久化，恢复时完成原决定而不重新判决。
+`max_turns` 复核会展示本段已执行轮数：明确超出能力范围可判 `fail`，其余结果
+由代码收敛为 `continue`，不允许 `waiting` 或 `success`，观察失败也继续执行；其余场景
+观察没有可用判决时的机械 `success` 兜底保持不变。
+
 机械判决在前台调度入口由同步方法先返回，随后将 `verdict`、任务处置计划及
 `judge_task=false` 写入 `ObserveRequested`。前台直接进入 finalize，不调用 ObserveStep；
 后台沿同一个 `observe_id` 执行一次 ObserveStep 生成报告。执行是否判决只由 `judge_task` 控制。

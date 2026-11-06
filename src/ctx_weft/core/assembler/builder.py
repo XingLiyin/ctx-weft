@@ -282,6 +282,7 @@ def _prompt_facts(context, records=None, template=None, *, capabilities=None,
         ctx.update(
             task_label=ref,
             boundary_kind=(boundary if boundary in supported_boundaries else "normal"),
+            act_turns=context.observe_act_turns,
             final_output=output_text.strip() if inject else "",
         )
         if judge_task:

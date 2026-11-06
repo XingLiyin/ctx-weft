@@ -401,14 +401,15 @@ def report_observation(
     act_recap: Annotated[str, _ACT_RECAP_DESC],
     task_status: Annotated[
         str | None,
-        "Only fill when the observation prompt requests a task verdict. Outcome of the current task — one of 'success' | 'continue' | 'fail'. "
+        "Only fill when the observation prompt requests a task verdict. Outcome of the current task — one of 'success' | 'waiting' | 'continue' | 'fail'. "
         "'success': the task's goal is achieved and the task ends here. "
-        "'continue': the task is NOT over — it needs another actor turn, or it is waiting on the user. "
+        "'continue': the task is NOT over and the agent must keep executing without user input. "
+        "'waiting': stop execution until the user provides information, a choice, confirmation, or an action. "
         "IF THE ACTOR'S MESSAGE ASKS THE USER FOR ANYTHING — a question, missing information, a choice "
         "between options, a confirmation, or an action only the user can take — THE ANSWER IS ALWAYS "
-        "'continue', never 'success' and never 'fail'. That holds even when the message is polished and "
+        "'waiting', never 'success', 'continue' or 'fail'. That holds even when the message is polished and "
         "everything the actor could do alone is done: a turn that ends by handing the floor back is not a "
-        "delivered task. 'continue' carries no criticism of the actor; it only says the task has not ended. "
+        "delivered task. 'waiting' carries no criticism of the actor; it only says the task has not ended. "
         # 调用时机由 review/judge 模板说明；这里仅描述字段语义。
         "'fail': the goal cannot be achieved as stated and should NOT be attempted again.",
     ] = None,
@@ -421,12 +422,12 @@ def report_observation(
         "This report must remain useful when the task's conversation and final reply are compressed away. "
         "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
         "deliverable shown to the user is the actor's closing message text, "
-        "not any tool argument. Leave empty for 'continue'.",
+        "not any tool argument. Leave empty for 'continue' and 'waiting'.",
     ] = "",
     task_failure_reason: Annotated[
         str,
         "Required when task_status is 'fail'. For 'continue', fill it ONLY when something actually blocked "
-        "or fell short this round — LEAVE IT EMPTY when the actor is simply waiting on the user, or the work "
+        "or fell short this round — LEAVE IT EMPTY for 'waiting', or when the work "
         "is merely unfinished. Do not invent a failure in order to fill this field. "
         "For 'fail': explain specifically what went wrong — which step failed, what error or unexpected "
         "result was encountered, and the root cause. "

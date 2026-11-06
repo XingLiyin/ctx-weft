@@ -176,7 +176,8 @@ class HitlService:
             "agent_id": req.agent_id,
             "resume_state": req.resume_state,
             "reply_as_result": req.reply_as_result,
-            **({"observe_request": observe_request} if observe_request else {}),
+            **({"observe_request": {**observe_request, "waiting_hitl_id": req.id}}
+               if observe_request else {}),
         })
         self._pending_opens[req.id] = (req, (*preceding_events, event))
         await self.confirm_opens(session_id, task_id=task_id)

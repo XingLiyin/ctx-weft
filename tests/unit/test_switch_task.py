@@ -121,14 +121,15 @@ async def test_switched_review_settles_both_terminal_results_without_failure_thr
     assert not await tm.apply_out_of_band_verdict(old.id, RunOutcome(RunOutcomeKind.COMPLETED, verdict=verdict))
 
 
-async def test_continue_cannot_resume_a_switched_task():
+@pytest.mark.parametrize("verdict", ["continue", "waiting"])
+async def test_nonterminal_verdict_cannot_resume_a_switched_task(verdict):
     tm, old, _, _ = setup_switch()
     old.status = "REVIEWING"
-    assert not await tm.apply_out_of_band_verdict(old.id, RunOutcome(RunOutcomeKind.COMPLETED, verdict="continue"))
+    assert not await tm.apply_out_of_band_verdict(old.id, RunOutcome(RunOutcomeKind.COMPLETED, verdict=verdict))
     assert old.status == "REVIEWING"
     assert tm.requeue_resumable() == []
     assert ObserveStep()._submission_error(
-        report_observation("recap", "continue"), terminal_only=True,
+        report_observation("recap", verdict), terminal_only=True,
     )
 
 

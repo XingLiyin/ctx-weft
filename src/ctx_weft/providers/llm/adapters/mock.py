@@ -64,7 +64,7 @@ class MockLLMAdapter(LLMClient):
     """Script actor responses without letting observer calls consume the actor queue.
 
     Unscripted observer calls return an empty response by default, exercising the
-    runtime success fallback. Pass observer_verdict="continue" to keep waiting for
+    runtime success fallback. Pass observer_verdict="waiting" to keep waiting for
     the user, or supply a scripted observation to test a particular judgement."""
 
     def __init__(

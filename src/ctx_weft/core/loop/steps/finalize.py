@@ -16,7 +16,6 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.models.discriminators import TaskErrorCode
 from ctx_weft.core.loop.driver import LoopContext, LoopState, Step, StepOutcome, make_event
 from ctx_weft.core.loop.task_memory_fold import (
     build_finish_slots,
@@ -31,6 +30,7 @@ from ctx_weft.core.utils.verdict import (
     VERDICT_CONTINUE,
     VERDICT_FAIL,
     VERDICT_SUCCESS,
+    VERDICT_WAITING,
 )
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryKind, MemoryScope, MemoryAddress, load_records
 
@@ -657,18 +657,11 @@ class FinalizeStep(Step):
             summary=summary,
             outputs=task.outputs,
             error=task.error or "",
+            hitl_id=extra.get("waiting_hitl_id", ""),
             observe_id=extra.get("observe_id", ""),
             observe_disposition=(extra.get("observe_decision") or extra.get("observe_completion", {})).get("disposition"),
             observe_report_pending=bool(extra.get("observe_decision", {}).get("verdict")),
         )
-
-        # 兼容旧版本已经持久化的失败决定：恢复只补收尾，不重判已有终态。
-        # 新判决的 continue 无论 retry_count 多大，都保持非终态。
-        decision = run_outcome.observe_disposition
-        if outcome == VERDICT_CONTINUE and decision and decision["status"] == "FAILED":
-            outcome = VERDICT_FAIL
-            task.observer_outcome = VERDICT_FAIL
-            task.error_code = decision["payload"].get("error_code", TaskErrorCode.RETRY_EXHAUSTED)
 
         terminal = outcome in (VERDICT_SUCCESS, VERDICT_FAIL)
         # mem_content（= 最终输出 + task_summary，空则回退 act_recap）现在由
@@ -687,7 +680,7 @@ class FinalizeStep(Step):
         if outcome in (VERDICT_SUCCESS, VERDICT_FAIL):
             task.finished_at = now_utc()
             task.process_report = summary
-        elif outcome == VERDICT_CONTINUE:
+        elif outcome in (VERDICT_CONTINUE, VERDICT_WAITING):
             # 未完的反馈由 observe 前台段折写的 TASK_COMPACT_SUMMARY 承载（spec 2026-07-01 §3.1）；
             # 不再写 process_report/process_report_at（旧 Progress So Far 字段路径已废）。
             # 机械退出（max_turns/context_limit）后的 continue 也重排再跑，

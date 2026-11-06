@@ -220,7 +220,7 @@ class Task:
     switch_requested: bool = False  # transient routing intent; status belongs to TaskManager
     switch_review_ready: Any = field(default=None, repr=False, compare=False)
     suspend_requested: bool = False
-    # observe 裁决（三态）：success|retry|fail。retry 置 status=PENDING 重排（机械退出也归 retry）。
+    # observe verdict: success/fail close, continue requeues, waiting awaits user input.
     observer_outcome: str | None = None
     # observer 产出的整段综合总结（执行历程+结果）→ finish 对 tool 槽（spec 2026-06-30）。
     task_summary: str | None = None

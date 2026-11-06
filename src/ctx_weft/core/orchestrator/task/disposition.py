@@ -21,6 +21,7 @@ from enum import StrEnum
 from ctx_weft.core.models.discriminators import TaskErrorCode
 from ctx_weft.core.utils.verdict import (
     VERDICT_CONTINUE,
+    VERDICT_WAITING,
     VERDICT_SUCCESS,
     normalize_verdict,
 )
@@ -44,7 +45,7 @@ class RunOutcome:
     """loop 交给 TaskManager 的全部信息：**发生了什么**，不含「task 该变成什么」。"""
 
     kind: RunOutcomeKind
-    verdict: str = ""            # COMPLETED 时：success / fail / continue
+    verdict: str = ""            # COMPLETED 时：success / waiting / continue / fail
     summary: str = ""
     outputs: object = None
     error: str = ""              # 死因 / 受阻原因（自由文本，只作溯源）
@@ -127,6 +128,10 @@ def disposition_for(
     if verdict == VERDICT_SUCCESS:
         return Disposition("FINISHED", "TaskFinished", {
             "outcome": VERDICT_SUCCESS, "summary": outcome.summary, "outputs": outcome.outputs,
+        })
+    if verdict == VERDICT_WAITING:
+        return Disposition("AWAITING_HUMAN", "TaskAwaitingHuman", {
+            "hitl_id": outcome.hitl_id, "outcome": VERDICT_WAITING,
         })
     if verdict == VERDICT_CONTINUE:
         return Disposition("PENDING", "TaskRequeued", {

@@ -447,7 +447,7 @@ async def test_mechanical_verdict_full_mapping_through_execute(monkeypatch) -> N
     """整张表走一遍 `execute`（含那道 max_turns 强制覆盖）：只有 `actor_done` 判 success。"""
     _capture_launches(monkeypatch)
     for exit_reason, expected in [
-        ("max_turns", "success"), ("context_limit", "success"),
+        ("max_turns", "continue"), ("context_limit", "success"),
         ("normal", "success"),          # 2026-09-28：纯文本不算收尾
         ("actor_done", "success"),       # 唯一的 success
     ]:
@@ -573,4 +573,5 @@ async def test_requested_mechanical_limit_without_completed_turn_retains_continu
     outcome = await _foreground_observe(state, ctx)
     requested = next(e for e in ctx.event_bus.emitted if e.type == EventType.OBSERVE_REQUESTED)
     assert "verdict" not in requested.payload
-    assert outcome.state_patch["verdict"].task_outcome == "success"
+    assert outcome.state_patch["verdict"].task_outcome == (
+        "continue" if boundary == "max_turns" else "success")

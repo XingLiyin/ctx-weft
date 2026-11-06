@@ -57,6 +57,7 @@ class PromptContext:
     terminal_only: bool = False
     compact_scope: str = "task"
     observe_boundary: str = "normal"
+    observe_act_turns: int | None = None
     subtasks: list[dict] = field(default_factory=list)
     memory_blocks: list[dict] = field(default_factory=list)
     capabilities: list[dict] = field(default_factory=list)
@@ -99,6 +100,7 @@ class PromptContext:
             terminal_only=bool(getattr(intent, "terminal_only", False)),
             compact_scope=getattr(intent, "scope", extra.get("compact_scope", "task")),
             observe_boundary=extra.get("observe_boundary", "normal"),
+            observe_act_turns=extra.get("observe_act_turns"),
             subtasks=json_value(extra.get("subtasks", [])),
         )
 

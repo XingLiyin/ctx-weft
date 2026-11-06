@@ -171,7 +171,7 @@ class _TurnRouterLLM(MockLLMAdapter):
         elif "control__report_observation" in names:
             response = MockResponse(tool_calls=[self._tc("control__report_observation", {
                 "act_recap": "said hi, awaiting the user's next message",
-                "task_status": "success" if self._act_calls > 1 else "continue",
+                "task_status": "success" if self._act_calls > 1 else "waiting",
                 "task_summary": "done" if self._act_calls > 1 else "",
             })])
         else:

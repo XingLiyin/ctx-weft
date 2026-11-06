@@ -19,6 +19,7 @@ from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.capabilities.control_tools import REPORT_OBSERVATION_NAME
 from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop.driver import (
+    ACT_TURNS_USED_KEY,
     ExecutionMode,
     LoopContext,
     LoopState,
@@ -47,6 +48,7 @@ from ctx_weft.core.utils.verdict import (
     VERDICT_CONTINUE,
     VERDICT_FAIL,
     VERDICT_SUCCESS,
+    VERDICT_WAITING,
     normalize_verdict,
 )
 from ctx_weft.protocols import LLMMessage, MemoryScope, load_records
@@ -165,11 +167,13 @@ class ObserveStep(Step):
                         "reason": "foreground_interrupted"}))
                 await _park_for_interrupt(state, ctx, edit=True, preceding_events=closure)
             result = assessment.result()
+        if result.verdict and result.verdict.task_outcome == VERDICT_WAITING:
+            await ensure_waiting(state, ctx)
         if not completion:
             await complete(state, ctx, result, disposition=planned_disposition(state, result)
                            if result.verdict else None, action="foreground")
         apply_foreground_assessment(state, result, boundary)
-        if result.verdict and result.verdict.task_outcome == VERDICT_CONTINUE:
+        if result.verdict and result.verdict.task_outcome in (VERDICT_CONTINUE, VERDICT_WAITING):
             await self._fold_retry_segment(state, ctx, result.verdict, events)
         return self._outcome(result, "finalize", events)
 
@@ -193,7 +197,14 @@ class ObserveStep(Step):
                 logger.warning("ObserveStep LLM failed; retaining raw history: %s", exc)
         if judge_task:
             verdict = result.verdict
-            if verdict is None:
+            if boundary == "max_turns" and (verdict is None or verdict.task_outcome != VERDICT_FAIL):
+                # At the turn limit, only an explicit inability verdict ends
+                # the task. Other results (including report failure) continue.
+                verdict = (dataclasses.replace(verdict, task_outcome=VERDICT_CONTINUE,
+                                               task_summary="") if verdict is not None else
+                           Verdict(VERDICT_CONTINUE, result.act_recap))
+                result.task_summary = ""
+            elif verdict is None:
                 verdict = dataclasses.replace(
                     self._mechanical_verdict(state, boundary),
                     act_recap=result.act_recap, task_summary=result.task_summary)
@@ -215,7 +226,8 @@ class ObserveStep(Step):
         cache = ctx.capability_cache
         # Session-global control tools survive per-agent cache eviction.
         bound = cache.get(state.agent.id) if cache is not None else []
-        extra = {"observe_boundary": boundary}
+        extra = {"observe_boundary": boundary,
+                 "observe_act_turns": execution.options.get("act_turns")}
         record_ids = execution.options.get("context_record_ids")
         if record_ids is not None:
             extra["observe_record_ids"] = list(record_ids)
@@ -235,7 +247,9 @@ class ObserveStep(Step):
         submitted, last_text = await self._run_react(
             state, ctx, inputs=inputs, max_rounds=state.agent.loop_config.max_turns_per_observe,
             terminal_tool_name=REPORT_OBSERVATION_NAME,
-            validate_submission=lambda result: self._submission_error(result, judge_task=judge_task, terminal_only=boundary == "task_switch"),
+            validate_submission=lambda result: self._submission_error(
+                result, judge_task=judge_task, terminal_only=boundary == "task_switch",
+                waiting_allowed=not getattr(state.task, "unattended", False) and getattr(ctx, "hitl", None) is not None),
         )
         if record_ids is not None and all(record_id in inputs._records for record_id in record_ids):
             # The gateway's compiler loaded these immutable records for prompting.
@@ -412,18 +426,21 @@ class ObserveStep(Step):
                 missing_output = runtime_prompt("observation_missing_output")
                 hint = f"{hint}\n\n{missing_output}" if hint else missing_output
             failure_reason = meta.get(K.OBSERVER_FAILURE_REASON, "") or ""
-            if outcome == VERDICT_SUCCESS:
+            if outcome in (VERDICT_SUCCESS, VERDICT_WAITING):
                 failure_reason = ""
             result.verdict = Verdict(outcome, result.act_recap, result.task_summary,
                                      reported=True, next_step_hint=hint,
                                      failure_reason=failure_reason)
         return result
 
-    def _submission_error(self, result, *, judge_task=True, terminal_only=False) -> str | None:
+    def _submission_error(self, result, *, judge_task=True, terminal_only=False, waiting_allowed=True) -> str | None:
+        if (judge_task and not waiting_allowed
+                and (result.metadata or {}).get(K.OBSERVER_OUTCOME) == VERDICT_WAITING):
+            return "waiting requires an available user and HITL service. Continue executable work, or report fail if the goal cannot be achieved."
         if terminal_only:
             meta = result.metadata or {}
             if meta.get(K.OBSERVER_OUTCOME) not in (VERDICT_SUCCESS, VERDICT_FAIL):
-                return "This review requires a terminal task_status: success or fail. continue is not allowed."
+                return "This review requires a terminal task_status: success or fail. continue and waiting are not allowed."
             if meta.get(K.OBSERVER_OUTCOME) == VERDICT_FAIL and not str(meta.get(K.OBSERVER_FAILURE_REASON) or "").strip():
                 return "A failed terminal review requires task_failure_reason describing the unfinished goal."
             if meta.get(K.OBSERVER_NEXT_STEP_HINT):
@@ -535,7 +552,7 @@ class ObserveStep(Step):
         protect TASK_COMPACT_SUMMARY → 多轮 retry 段摘要累积（不替换），由 L3 按 collapse_keep_last
         坍缩控界。无 keep_last 门、无额外 LLM。
 
-        仅当 verdict.task_outcome=="continue" 才折（三来源：max_turns/context_limit/observer 判未完）；
+        continue / waiting 都保留未完成任务的段摘要；
         其余 outcome 不折，no-op。
 
         act_recap 来自本轮 observation；空则不折、段保 raw（不写占位摘要）。
@@ -546,7 +563,7 @@ class ObserveStep(Step):
         2026-07-21）：交互任务中若有免折残留的前段 raw，不被跨段合折。
         """
 
-        if verdict.task_outcome != VERDICT_CONTINUE or state.extra.get("observe_keep_raw"):
+        if verdict.task_outcome not in (VERDICT_CONTINUE, VERDICT_WAITING) or state.extra.get("observe_keep_raw"):
             return
         summary = (verdict.act_recap or "").strip()
         if not summary:
@@ -662,7 +679,7 @@ class ObserveStep(Step):
                 # Report 至少存其一」，段摘要与 finish 对同时存在就是把同一段记了两遍。所以
                 # 「这一段归谁记账」只有拿到判决才知道，不能先折了再判。
                 #
-                # 判 retry/fail、判决缺失、仲裁被拒（人先开口）→ 没有 close，段摘要照产；
+                # 判 waiting、判决缺失、仲裁被拒（人先开口）→ 没有 close，段摘要照产；
                 # 人先开口那一支还多一层保障：段结束时间让折叠只认这次 launch 之前的记录，
                 # 新那条 user 回合不会被卷进来。
                 if not judging:
@@ -673,7 +690,8 @@ class ObserveStep(Step):
                 usable_recap = bool(act_recap) and (not judging or
                     observation.verdict is not None and observation.verdict.reported)
                 if (usable_recap and boundary not in CLOSE_BOUNDARIES and not short_segment
-                        and not closed and not state.extra.get("observe_keep_raw")):
+                        and not closed and not state.extra.get("observe_continued")
+                        and not state.extra.get("observe_keep_raw")):
                     # v2 P3c：策展上移——段作用域折叠（护 user 回合与既有段摘要、锚点/
                     # 段尾语义，与 observe._fold_retry_segment 同门）由框架侧 segment_fold
                     # 执行原子 fold。旧 apply_compact 的 TypeError 协议错配特判随之消亡
@@ -708,7 +726,7 @@ _PARK_CLOSED_BY_VERDICT = runtime_prompt('park_closed_by_verdict')
 async def submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> bool:
     """把 observer 的判决交给 TaskManager 的带外入口。
 
-    返回 **这次判决是否把 task close 掉了**（= 判 success 且仲裁接受）。调用方据它决定
+    返回 **这次判决是否把 task close 掉了**（= 判 success / fail 且仲裁接受）。调用方据它决定
     这一段归谁记账：close 掉了就由带外 finalize 的 finish 对承载，**不能再产段摘要**
     （`finalize._supersede_final_raw_segment` 的不变量：同一段不记两遍）。
 
@@ -720,7 +738,7 @@ async def submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> 
     """
     completion = state.extra.get("observe_completion")
     if completion:
-        if not completion["accepted"] or completion["action"] != "close":
+        if not completion["accepted"] or completion["action"] not in ("close", "continue"):
             return False
         tm = ctx.task_manager
         decision = completion["disposition"]
@@ -731,13 +749,14 @@ async def submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> 
         accepted = await tm.resume_observe_decision(
             state.task.id, decision, observe_id=state.extra["observe_id"],
             outcome=outcome, settled=_execution(ctx).options.get("settled", False),
-            finalize=partial(_out_of_band_finalize, state, ctx, meta))
-        return accepted is not False
+            finalize=partial(_out_of_band_continue if completion["action"] == "continue"
+                             else _out_of_band_finalize, state, ctx, meta))
+        return accepted is not False and completion["action"] == "close"
 
     raw = (meta.get(K.OBSERVER_OUTCOME) or "").strip()
     # 空 = 压根没判（工具没被调 / LLM 失败）→ 维持 park。非空才归一：`retry` 是别名，
     # 认不出的归 continue。**不能**把空串也喂进 normalize_verdict——那会把「没判决」
-    # 变成「判了 continue」，两者对本函数的意义相同（都维持 park），但日志会说谎。
+    # 变成「判了 continue」并意外驱动自动续跑。
     verdict = normalize_verdict(raw) if raw else ""
     if not verdict:
         logger.info(
@@ -762,22 +781,55 @@ async def submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> 
         if result is None:
             return
         await complete(state, ctx, result, accepted=accepted, disposition=disposition,
-                       action="close" if disposition else "recap")
+                       action=("continue" if disposition and disposition.status == "PENDING"
+                               else "close" if disposition else "recap"))
+    waiting_id = _execution(ctx).options.get("waiting_hitl_id")
+    def is_current():
+        # A later user turn may already have parked the same task again.
+        hitl = getattr(ctx, "hitl", None)
+        req = hitl.registry.get(waiting_id) if hitl is not None and waiting_id else None
+        return not waiting_id or req is not None and req.effective_decision is None
     accepted = await tm.apply_out_of_band_verdict(
         state.task.id, outcome,
         process_report=meta.get(K.OBSERVER_ACT_RECAP, "") or "",
         task_summary=meta.get(K.OBSERVER_TASK_SUMMARY, "") or "",
         next_step_hint=meta.get(K.OBSERVER_NEXT_STEP_HINT, "") or "",
-        # 带外收尾：只在真发生转移（success）时被调，跑在「状态已写定」与「转移已宣布」
+        # 带外终态收尾：success / fail，跑在「状态已写定」与「转移已宣布」
         # 之间。见 `apply_out_of_band_verdict` 的 docstring 对那个窗口的三条约束。
         finalize=partial(_out_of_band_finalize, state, ctx, meta),
+        resume=partial(_out_of_band_continue, state, ctx, meta),
+        is_current=is_current,
         before_apply=record if state.extra.get("observe_id") else None,
     )
     logger.info(
         "background observe verdict '%s' for task %s: %s",
         verdict, state.task.id, "accepted" if accepted else "rejected (the user spoke first)")
-    return bool(accepted) and (verdict == VERDICT_SUCCESS or (
-        getattr(state.task, "switch_requested", False) and verdict == VERDICT_FAIL))
+    return bool(accepted) and verdict in (VERDICT_SUCCESS, VERDICT_FAIL)
+
+
+async def _out_of_band_continue(state, ctx, meta):
+    """Apply a durable continuation before another actor can consume its history."""
+    completion = state.extra.get("observe_completion") or {}
+    recap = (meta.get(K.OBSERVER_ACT_RECAP) or "").strip()
+    if recap and not completion.get("short_segment") and not state.extra.get("observe_keep_raw"):
+        from ctx_weft.core.loop.task_memory_fold import segment_fold
+        async with StepDriver.for_context(ctx).executions.task_guard(state.task.id, "finish_report"):
+            if ctx.task_manager.is_task_tree_canceled(state.task.id):
+                return
+            await segment_fold(
+                ctx.memory, state.scope, MemoryScope.TASK, recap, ctx.provider_ctx,
+                _execution(ctx).started_at, operation_id=state.extra.get("observe_id", ""),
+                context_record_ids=_execution(ctx).options.get("context_record_ids"))
+    if ctx.task_manager.is_task_tree_canceled(state.task.id):
+        return
+    await _close_park_bubble(state, ctx, message="")
+    if ctx.task_manager.is_task_tree_canceled(state.task.id):
+        return
+    state.task.outputs = None
+    state.task.error = meta.get(K.OBSERVER_FAILURE_REASON) or None
+    from ctx_weft.core.loop.steps.finalize import task_finalized_event
+    await emit_effect(state, ctx, task_finalized_event(state, state.task, outcome=VERDICT_CONTINUE))
+    state.extra["observe_continued"] = True
 
 
 async def _out_of_band_finalize(
@@ -830,39 +882,19 @@ async def _out_of_band_finalize(
         events.append(task_finalized_event(state, state.task, outcome=meta.get(K.OBSERVER_OUTCOME) or VERDICT_SUCCESS))
     for event in events:
         await emit_effect(state, ctx, event)
-    await _close_park_bubble(state, ctx)
+    await _close_park_bubble(state, ctx, message=(
+        "" if meta.get(K.OBSERVER_OUTCOME) == VERDICT_FAIL else _PARK_CLOSED_BY_VERDICT))
 
 
-async def _close_park_bubble(state: "LoopState", ctx: "LoopContext") -> None:
-    """判 success 终结了这个 task 之后，收口它 park 时开的那个「等你说话」气泡。
+async def _close_park_bubble(
+    state: "LoopState", ctx: "LoopContext", *, message: str = _PARK_CLOSED_BY_VERDICT,
+) -> None:
+    """Retire this observation's temporary user-turn entrance.
 
-    **不分 root 与子任务**（2026-09-27 定）：task 被判完成了，那个让位入口就用掉了。人后面
-    还想说话就再发一条消息——`send_message` 看到 `current_task_id` 已终态，自己会开新的一轮
-    （`_start_task_for_agent`），根本不需要留着这个气泡当入口。
-
-    留着它的代价是实打实的，两头都疼：
-
-    - 宿主折会话状态时气泡**优先于** task 终态（`SessionStatusFold.status` 里 `pending_hitl`
-      排在 `terminal` 之前），于是会话永久停在 PAUSED——SSE 的终态收口不触发，投影里
-      `sessions.status` 一直 PAUSED，重启还被 `list_active_session_ids` 当活会话捞回来，
-      `session_is_quiescent` 也一律拒绝逐出（宿主的空闲逐出器形同虚设）。
-    - 子任务更糟：线已经交回 parent（`_try_resume_parent` 随即接管），再没有人会来答它，
-      每个这样的子任务留一个、会累积。
-
-    `faedd25` 曾为 root 保下这个气泡，两条理由只有一条成立，而那条也只是「会话会显示
-    已完成」——判决说它完成了，显示已完成是实话。另一条「投递路径跟着状态分叉」本就与气泡
-    无关：`send_message` 的路由只看 `current_task_id` 是否终态（`_task_is_terminal`），从不
-    看气泡；那个分叉来自「判决抵达 vs 人先开口」的仲裁，收不收气泡都在。
-
-    按 **task + user_turn 投递** 双重过滤：task 收窄是因为同一 agent 上可能还挂着别的
-    请求（某个兄弟任务的 `ask_user`），投递收窄是因为「等人开口」和「等人拍板」是两回事
-    ——后者即便挂在这个 task 上也该由它自己的路径处置，本函数只认前者。
-
-    只在 `success` 时被调到（带外入口只在真发生转移时调 `finalize`）。`retry`/`fail` 维持
-    park，那个气泡正是它等人的入口。
-
-    关闭也是结果应用的一部分：失败向上传播，保留 Completed 待办；
-    TaskManager 不得宣布任务终态，observe 不得发送 Applied。
+    success/fail close it when ending the task; continue closes it before automatic
+    execution resumes. waiting never calls this function. Match the recorded HITL
+    identity so a delayed observer cannot retire a newer turn's wait or a tool's
+    approval request. Failed cancellation leaves the durable observation unapplied.
     """
     from ctx_weft.protocols.hitl import UserTurnDelivery
 
@@ -873,10 +905,12 @@ async def _close_park_bubble(state: "LoopState", ctx: "LoopContext") -> None:
     for req in hitl.registry.list_pending(state.session.id):
         if req.task_id != task.id or not isinstance(req.delivery, UserTurnDelivery):
             continue
-        await hitl.cancel(req.id, message=_PARK_CLOSED_BY_VERDICT)
+        waiting_id = _execution(ctx).options.get("waiting_hitl_id")
+        if waiting_id and req.id != waiting_id:
+            continue
+        await hitl.cancel(req.id, message=message)
         logger.info(
-            "closed the park bubble %s of task %s (judged complete; the next message "
-            "opens a new round)", req.id, task.id)
+            "closed the park bubble %s of task %s after observation", req.id, task.id)
 
 
 EFFECT_TYPES = {EventType.TASK_FINALIZED, EventType.BLACKBOARD_PUBLISHED,
@@ -904,6 +938,24 @@ async def emit_effect(state, ctx, event):
 def observation_task(state):
     """The original producer's task snapshot, shared by prompting and judgement."""
     return getattr(state, "extra", {}).get("observe_context_task", state.task)
+
+
+async def ensure_waiting(state, ctx):
+    """Open a real, idempotent user-turn entrance for a foreground waiting verdict."""
+    from ctx_weft.core.hitl.registry import HITL_STAGE_TOOL
+    from ctx_weft.protocols.hitl import HITL_FORM_WAIT, PREFACE_NORMAL, HitlAsk, UserTurnDelivery
+
+    for req in ctx.hitl.registry.list_pending(state.session.id):
+        if req.task_id == state.task.id and isinstance(req.delivery, UserTurnDelivery):
+            state.extra["waiting_hitl_id"] = req.id
+            return
+    req = await ctx.hitl.open(
+        HitlAsk(form=HITL_FORM_WAIT,
+                delivery=UserTurnDelivery(task_id=state.task.id, preface=PREFACE_NORMAL)),
+        session_id=state.session.id, task_id=state.task.id, agent_id=state.agent.id,
+        tool_call_id=state.extra["observe_id"], stage=HITL_STAGE_TOOL,
+        unattended=state.task.unattended, tenant_id=state.session.tenant_id)
+    state.extra["waiting_hitl_id"] = req.id
 
 
 def apply_foreground_assessment(state, result, boundary):
@@ -939,6 +991,8 @@ async def request(state, ctx, boundary, judging):
     if not options.get("observe_id"):
         options.update(observe_id=generate_id("obs"), segment_end_at=now_utc().isoformat(),
                        execution_mode=mode, boundary=boundary, judge_task=judging)
+        if boundary == "max_turns":
+            options["act_turns"] = act_turns(state)
         await capture_context(state, ctx, options)
         await ctx.event_bus.emit(make_event(state, EventType.OBSERVE_REQUESTED, {
             "task_id": state.task.id, "agent_id": state.agent.id, **options}))
@@ -1006,7 +1060,8 @@ def planned_disposition(state, result):
     verdict = result.verdict
     return disposition_for(RunOutcome(kind=RunOutcomeKind.COMPLETED,
         verdict=verdict.task_outcome, summary=verdict.act_recap, outputs=state.task.outputs,
-        error=(verdict.failure_reason if verdict.reported else state.task.error) or ""),
+        error=(verdict.failure_reason if verdict.reported else state.task.error) or "",
+        hitl_id=state.extra.get("waiting_hitl_id", "")),
         retry_count=state.task.retry_count,
         max_retries=state.task.max_retries)
 
@@ -1090,12 +1145,18 @@ async def context_records(state, ctx):
     return records
 
 
+def act_turns(state):
+    """Count the completed actor rounds in this segment, before history folding."""
+    return state.extra.get(ACT_TURNS_USED_KEY, getattr(state.agent.loop_config, "max_turns_per_act", 0))
+
+
 def make_observe_request(state, boundary, judging, *, mode="background"):
     """Build an intent, also embedded atomically in HitlOpened for park."""
     return {"observe_id": generate_id("obs"), "task_id": state.task.id,
             "agent_id": state.agent.id, "boundary": boundary,
             "segment_end_at": now_utc().isoformat(), "execution_mode": mode,
-            "judge_task": judging}
+            "judge_task": judging,
+            **({"act_turns": act_turns(state)} if boundary == "max_turns" else {})}
 
 
 async def request_background_observe(state, ctx, options):
@@ -1124,7 +1185,7 @@ def blocks_actor_recovery(info):
     """An accepted close must finish before actor execution may be considered."""
     completion = info.get("completion") or {}
     return (info.get("execution_mode") == "foreground" or
-            completion.get("accepted", False) and completion.get("action") == "close")
+            completion.get("accepted", False) and completion.get("action") in ("close", "continue"))
 
 
 async def wait_disposition(state, ctx, ready):

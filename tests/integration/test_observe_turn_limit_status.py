@@ -1,4 +1,4 @@
-"""Repeated 50-turn boundaries continue until the observer explicitly fails."""
+"""At each 50-turn boundary, continue work or fail for a capability limitation."""
 
 import asyncio
 
@@ -53,10 +53,14 @@ class _LimitLLM(MockLLMAdapter):
                     id=f"work_{attempt}_{i}", name="work__advance", arguments={})])
                 for i in range(50)
             )
-            responses.append(observer_success_with("continue" if attempt < 4 else "fail"))
+            responses.append(observer_success_with(
+                ["waiting", "success", "continue", "waiting", "fail"][attempt]))
         super().__init__(responses)
 
     def complete(self, request, stream=True):
+        if any(t.name == "control__report_observation" for t in request.tools or []):
+            text = request.system + "\n" + "\n".join(str(m.content) for m in request.messages)
+            assert "50 actor turns" in text
         if any(t.name == "control__update_task_metadata" for t in request.tools or []):
             return self._stream(MockResponse(tool_calls=[ToolCall(
                 id="metadata", name="control__update_task_metadata",
@@ -66,7 +70,7 @@ class _LimitLLM(MockLLMAdapter):
 
 
 @pytest.mark.asyncio
-async def test_turn_limits_preserve_budget_until_explicit_observer_failure():
+async def test_turn_limits_continue_until_an_explicit_capability_failure():
     provider = InlineAgentTemplateProvider()
     template = make_echo_template()
     template.capability_refs = [CapabilityRef(capability_id="work:advance", mode="required")]
@@ -107,6 +111,9 @@ async def test_turn_limits_preserve_budget_until_explicit_observer_failure():
     task = tm.get_task(handle.task_id)
     assert not task.unattended
     rows = await store.read_range(handle.session_id)
+    requests = [r for r in rows if r.event.type == EventType.OBSERVE_REQUESTED]
+    assert len(requests) == 5
+    assert all(r.event.payload["act_turns"] == 50 for r in requests)
     failed, = [r.event for r in rows if r.event.type == EventType.TASK_FAILED]
     assert failed.payload["error_code"] == "TASK_FAILED_BY_OBSERVER"
     assert task.retry_count == 0 and tm.session.failure_counter == 1

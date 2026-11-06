@@ -24,14 +24,16 @@ These markers locate the source range only; they are not recap content. In `act_
 
 {% macro judge(ctx) -%}
 {% if ctx.terminal_only %}{% if ctx.switch_reason %}Reason for goal replacement: {{ ctx.switch_reason }}
-{% endif %}Evaluate ONLY the original task goal. Return success if it was achieved, otherwise fail; never continue. Explain unfinished work and the user topic switch in task_failure_reason. Fill task_summary with completed and remaining work. Leave next_step_hint empty. Judge from actual execution evidence; a final prose deliverable is not required for this switch review.{% endif %}
+{% endif %}Evaluate ONLY the original task goal. Return success if it was achieved, otherwise fail; never continue or waiting. Explain unfinished work and the user topic switch in task_failure_reason. Fill task_summary with completed and remaining work. Leave next_step_hint empty. Judge from actual execution evidence; a final prose deliverable is not required for this switch review.{% endif %}
 {% if ctx.plain_text_yielded %}
 
-If that message asks the user for anything at all, the task is not over: judge `continue` — never `success`, never `fail`.{% endif %}{% if ctx.finish_park_yielded %}
+If that message asks the user for anything at all, the task is not over: judge `waiting` — never `success`, `continue`, or `fail`.{% endif %}{% if ctx.finish_park_yielded %}
 
-A closing message that still asks the user for something is not a completed task: judge `continue` — never `success`, never `fail`.{% endif %}
+A closing message that still asks the user for something is not a completed task: judge `waiting` — never `success`, `continue`, or `fail`.{% endif %}
 
-Judge whether the task is complete, against the task goal and actual execution evidence, applying any evaluation principles supplied above, and call `{{ report_observation }}` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.
+`continue` means the agent must keep executing without user input; `waiting` means stop until the user replies.
+
+{% if ctx.boundary_kind == "max_turns" %}This segment {% if ctx.act_turns %}has already used {{ ctx.act_turns }} actor turns and {% endif %}has reached the turn limit. Based on completed work, remaining goals and actual execution evidence, assess whether this task is still within your capabilities: return `fail` only if you clearly cannot complete it, explaining the specific capability limitation in `task_failure_reason`; otherwise return `continue` and keep executing. Reaching the turn limit alone is not a failure reason. Never return `waiting` or `success`. Recap this segment's work and call `{{ report_observation }}` exactly once — no other tools.{% else %}Judge whether the task is complete, against the task goal and actual execution evidence, applying any evaluation principles supplied above, and call `{{ report_observation }}` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.{% endif %}
 
 `task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each. When filling `task_summary`, retain the original goal, achieved result and essential exact values or artifact references: this summary will stand alone after the task capsule is reduced to its minimal form.{% if ctx.subtasks %}
 

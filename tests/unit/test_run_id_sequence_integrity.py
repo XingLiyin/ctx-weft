@@ -91,7 +91,7 @@ class _RouterLLM(MockLLMAdapter):
         # act 首轮：纯文本、无 tool_call → root 任务的纯文本冷 park。
         if "control__report_observation" in names:
             return self._stream(MockResponse(tool_calls=[ToolCall(id="review",
-                name="control__report_observation", arguments={"task_status": "continue",
+                name="control__report_observation", arguments={"task_status": "waiting",
                     "act_recap": "Asked the user a question."})]), request)
         return self._stream(MockResponse(text="Hi! Anything else?"), request)
 

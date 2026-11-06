@@ -140,7 +140,7 @@ class _ActRouterLLM(MockLLMAdapter):
         #: 要序列而不是单值：2026-09-27 起 root 的 `finish_task` 也 park + 后台判定（S-b），
         #: 于是「先纯文本 park 等人、人回话后 finish_task 收尾」这种用例一轮里会被判两次，
         #: 而它要的是先 retry（保住那次 park）后 success（真收尾）。
-        self._observer_verdicts = list(observer_verdicts or ["continue"])
+        self._observer_verdicts = list(observer_verdicts or ["waiting"])
         self._obs_idx = 0
 
     def complete(self, request, stream: bool = True):
@@ -476,7 +476,7 @@ async def test_plain_text_pause_injects_reply_once_and_ignores_duplicate() -> No
     # 判定序列 retry → success：这一轮会被判两次。纯文本让位那一段必须判 retry 才保得住
     # 那次 park（本用例正要测它）；人应答之后 finish_task 收尾那一段要判 success，否则
     # 2026-09-27 起（S-b）它同样 park，下面等 FINISHED 就永远等不到。
-    llm = _ActRouterLLM(observer_verdicts=["continue", "success"], act_responses=[
+    llm = _ActRouterLLM(observer_verdicts=["waiting", "success"], act_responses=[
         MockResponse(text="Hi! Anything else?"),  # 纯文本、无 tool_call → 冷 park
         _finish_call(),
     ])

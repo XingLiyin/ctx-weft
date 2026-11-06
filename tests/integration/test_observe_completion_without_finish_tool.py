@@ -100,7 +100,7 @@ async def test_normal_reply_is_reviewed_then_closed(role, unattended, fail):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verdict", ["continue", "fail"])
+@pytest.mark.parametrize("verdict", ["waiting", "fail"])
 async def test_valid_negative_review_is_not_replaced_by_fallback(verdict):
     llm = ObserverLLM(verdict=verdict)
     provider = InlineAgentTemplateProvider()
@@ -120,4 +120,4 @@ async def test_valid_negative_review_is_not_replaced_by_fallback(verdict):
             or tm._dispatch_tasks
         ):
             await asyncio.sleep(0.01)
-    assert tm.get_task(handle.task_id).status == "AWAITING_HUMAN"
+    assert tm.get_task(handle.task_id).status == ("AWAITING_HUMAN" if verdict == "waiting" else "FAILED")

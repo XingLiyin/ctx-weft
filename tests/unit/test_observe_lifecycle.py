@@ -190,9 +190,9 @@ async def test_recovered_failed_disposition_does_not_clear_final_answer(fake_sta
     from ctx_weft.core.models.task import Task
     state, ctx = fake_state_ctx
     state.task = Task(id="t1", session_id="s1", status="INTERRUPTED", outputs="final answer", retry_count=0, max_retries=3)
-    state.verdict = Verdict("continue", "")
+    state.verdict = Verdict("fail", "")
     decision = {"status": "FAILED", "event_type": "TaskFailed", "payload": {}}
-    state.extra.update(observe_decision={"disposition": decision, "verdict": {"task_outcome": "continue"}},
+    state.extra.update(observe_decision={"disposition": decision, "verdict": {"task_outcome": "fail"}},
                        observe_effects=["TaskFinalized:"])
     outcome = await FinalizeStep().execute(state, ctx)
     assert state.task.outputs == "final answer"
