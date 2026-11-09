@@ -7,7 +7,7 @@
 
 ---
 
-{% endif %}Now set this task's metadata: call `{{ update_task_metadata }}` exactly once. Both `title` and `description` are REQUIRED and must be non-empty. Summarize only the user's expressed request; do not add requirements or expand its scope. For a vague request, use generic wording and preserve the uncertainty. Add `session_goal` only if the direction is now clear (it is the only optional field). Then stop and call no other tools.
+{% endif %}Call `{{ update_task_metadata }}` exactly once, then stop without other tools or prose. {% if ctx.role %}Follow the naming principles above. {% endif %}Fill non-empty `title` (at most 20 characters) and `description` (at most 80 characters). `session_goal` is optional (at most 60 characters): fill it to update the goal; leave empty to keep the existing goal.
 {%- endmacro %}
 
 {% include "steps/_assemble.jinja" %}

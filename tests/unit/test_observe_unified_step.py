@@ -31,7 +31,7 @@ def state():
 @pytest.mark.parametrize("locale", ["en", "zh"])
 @pytest.mark.parametrize("boundary", ["max_turns", "context_limit", "plain_text"])
 @pytest.mark.parametrize("judge_task", [False, True])
-def test_turn_limit_prompt_reviews_capability_and_shows_rounds(monkeypatch, locale, boundary, judge_task):
+def test_turn_limit_prompt_limits_verdicts_and_shows_rounds(monkeypatch, locale, boundary, judge_task):
     from functools import partial
 
     from ctx_weft.core.assembler import ReviewIntent, prompts
@@ -50,14 +50,14 @@ def test_turn_limit_prompt_reviews_capability_and_shows_rounds(monkeypatch, loca
     context = type(context).from_payload(context.to_payload())
     prompt = PromptBuilder(len).compile(context, tools=[])
     text = prompt.system + "\n" + "\n".join(str(m.content) for m in prompt.messages)
-    instruction = ("return `fail` only if you clearly cannot complete it"
+    instruction = ("Allowed `task_status` values for this review are `continue` and `fail`"
                    if locale == "en" else
-                   "若明确无法完成，填 `fail`")
+                   "本次 `task_status` 只能填 `continue` 或 `fail`")
     assert (instruction in text) == (judge_task and boundary == "max_turns")
     if judge_task and boundary == "max_turns":
         assert ("37 actor turns" if locale == "en" else "37 轮") in text
         assert "task_failure_reason" in text
-        assert ("Never return `waiting` or `success`" if locale == "en" else
+        assert ("do not return `waiting` or `success`" if locale == "en" else
                 "不得填 `waiting` 或 `success`") in text
 
 

@@ -1,7 +1,7 @@
 {% import "steps/_shared.en.jinja" as shared with context %}
 
 {% macro resume_text(ref, full_context, completed_tasks) -%}
-{% if ref %}You are still working on the task: {{ ref }}, resuming from the state recorded above.{% else %}You are still working on the task above, resuming from the state recorded above.{% endif %}{% if full_context %} Review the conversation for what has already been done — do not redo it — and continue with only the remaining work.{% if completed_tasks %} Parts of it have ALREADY been delegated to sub-tasks that are now complete — they are listed with their results in the situational notes below. Do not execute that work a second time: build on those results and judge what, if anything, still remains. The exception is a result the review note flags as falling short — for that piece you decide whether to delegate it afresh or handle it yourself.{% endif %}{% else %} Review what has already been done and continue with only the remaining work.{% endif %}
+{% if ref %}Resume task: {{ ref }}.{% else %}Resume the task above.{% endif %} The recorded state and{% if completed_tasks %} completed sub-task results{% else %} conversation{% endif %} above are the inputs for this continuation.
 {%- endmacro %}
 
 {% macro resume(ctx) -%}
@@ -12,26 +12,48 @@
 ---
 {{ shared.task_anchor(state.task_ref) }}
 
-{% if state.plan_tasks %}{% if state.has_other_tasks %}## The overall plan (▶ = your current task; the rest are handled separately — do NOT do them yourself):
+{% if state.plan_tasks %}{% if state.has_other_tasks %}## The overall plan (▶ = your current task; the rest are handled separately):
 {% else %}## The overall plan (▶ = your current task):
 {% endif %}{% for item in state.plan_tasks %}{{ "  " * item.depth }}- [{{ item.status }}] {% if item.current %}▶ {% endif %}{{ item.ref }}
 {% endfor %}
 
-{% endif %}{% if state.completed_tasks %}## Your current task has ALREADY been delegated to the sub-tasks below, and they are ALREADY COMPLETED — the digest under each is what it produced (full results are in the conversation above). Treat that work as done: do NOT redo it yourself and do NOT delegate it again merely to have it repeated. Your next step is to judge whether any work still remains for the task goal beyond these results — if it does, do only that part, building on what they produced. The one exception is a result that the review note below says does not actually achieve its goal: for that piece it is YOUR call — delegate a fresh sub-task for it, or just do it yourself, whichever is the better use of this turn:
+{% endif %}{% if state.completed_tasks %}## Completed sub-task results (full results are in the conversation above):
 {% for item in state.completed_tasks %}- [FINISHED] {{ item.ref }}
 {% if item.result %}    → {{ item.result }}
 {% endif %}{% endfor %}
 
-{% endif %}{% if state.review_note %}## Note from the review of your previous attempt (it may name a sub-task whose result falls short):
+{% endif %}{% if state.review_note %}## Note from the review of your previous attempt:
 {{ state.review_note }}
 
-{% endif %}Complete the requested work and verify the result before ending this segment. Write the actual final answer as your normal message text; an announcement that you will summarize is not a deliverable. The observer judges whether the task is complete.{% if state.attended %} If only the user can provide missing information, ask them using the interaction tool below.{% endif %}{% if state.unattended %} Nobody is waiting to follow up: carry out the work and return the actual result in this response.{% endif %}{% if state.unattended_others %} Do not start the other tasks yourself.{% endif %}
-When a new instruction replaces a goal, call `{{ switch_task }}` alone. target_task_id identifies the OLD task: empty means current task, or use an ancestor ID to replace that entire branch (root ID for the whole root goal). Supply reason when targeting an ancestor. The new task takes the old parent position; old unfinished tasks receive terminal review. Never target siblings, unrelated tasks, or completed tasks. Follow-ups, temporary interruptions, and parallel additions are not replacements.
-Call `{{ ask_user }}` when a concrete missing input or decision blocks progress and cannot be resolved from context or a reasonable default. Do not collect optional preferences or hypothetical prerequisites before acting or delegating.
+{% endif %}{% if state.unattended %}This task is unattended; no user is available for a follow-up.{% endif %}{% if state.unattended_others %} Other tasks are handled separately.{% endif %}
+{%- endmacro %}
+
+{% macro tool_instructions(ctx) -%}
+{% set available = namespace(names=[]) %}
+{% for section in ctx.capability_sections if section.kind == 'tool' %}
+{% for item in section.ungrouped %}{% do available.names.append(item.name) %}{% endfor %}
+{% for group in section.groups %}{% for item in group.entries %}{% do available.names.append(item.name) %}{% endfor %}{% endfor %}
+{% endfor %}
+Submit the actual final answer as normal message text. The observer receives it for task judgement.
+{% if available.names %}Do not repeat a tool call with identical arguments.{% endif %}
+{% if ask_user in available.names %}
+- `{{ ask_user }}`: submit related questions together in one `questions` array. Each item has `question`; optional `options` contain `label`, `description` and `recommended`, and `multi_select` defaults to false. Omit `options` or use an empty array for free text; a free-text Other is always available. Execution pauses for the answers, then resumes with them as the tool result.
+{% endif %}{% if switch_task in available.names %}
+- `{{ switch_task }}`: call alone to replace a goal. Fill non-empty `title`, `description` and `task_prompt`. `target_task_id` identifies the OLD task: empty means current task; an ancestor ID replaces that whole branch, including the root for the whole goal. Supply `reason` for an ancestor. Siblings, unrelated tasks and terminal tasks cannot be targeted. The replacement occupies the same parent position; unfinished old tasks receive terminal review.
+{% endif %}{% if delegate_task in available.names or delegate_plan in available.names %}
+- Delegation suspends the current task until its sub-tasks finish. Fill `title` (at most 20 characters), `description` and `task_prompt` with the sub-task brief. Put orchestration choices only in `skill_name`, `use_subagent`, `subagent_template` and `inherit_memory`, not in that brief. To assign a skill, set `skill_name` to its exact listed name including the prefix; mentioning it in prose does not assign it. Skill logic runs in the assigned sub-task. `use_subagent` defaults to false; when true, `subagent_template` selects a listed sub-agent, or empty uses your own template. `inherit_memory` defaults to true. Attendance is inherited from the current task.
+{% if delegate_task in available.names %}- `{{ delegate_task }}`: creates one sub-task. Use separate calls for independent tasks.
+{% endif %}{% if delegate_plan in available.names %}- `{{ delegate_plan }}`: pass an ordered `tasks` array; each item uses the delegation fields above. A step starts only after its predecessor succeeds; failure cancels later steps.
+{% endif %}{% endif %}{% if list_files in available.names or read_file in available.names or exec_script in available.names %}
+- The assigned skill's resources belong to its provider, outside the workspace. Use the available skill-executor tools for those resources and filesystem tools for workspace files. Do not search the workspace for skill resources.
+{% if list_files in available.names %}- `{{ list_files }}`: `pattern` is a glob within the skill (default `**/*`), with `limit` defaulting to 200.
+{% endif %}{% if read_file in available.names %}- `{{ read_file }}`: `path` is relative to the assigned skill. Read by 1-based `offset` and line `limit` (defaults 1 and 2000), or by `char_offset` and `char_limit`; do not mix the two modes. Use the returned continuation hint to read the next page.
+{% endif %}{% if exec_script in available.names %}- `{{ exec_script }}`: put the complete command, program and arguments in `command`, following the resource-access instructions supplied with the skill.
+{% endif %}{% endif %}
 {%- endmacro %}
 
 {% macro continuation(ctx) -%}
-{% if ctx.guidance %}{{ guidance(ctx.guidance) }}{% endif %}{% if ctx.guidance and ctx.needs_pointer %}{{ "\n\n" }}{% endif %}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}
+{% if ctx.guidance %}{{ guidance(ctx.guidance) }}{{ "\n\n" }}{% endif %}{% if ctx.needs_pointer %}{{ "\n\n" }}{{ shared.capability_pointer() }}{% endif %}
 {%- endmacro %}
 
 {% include "steps/_assemble.jinja" %}

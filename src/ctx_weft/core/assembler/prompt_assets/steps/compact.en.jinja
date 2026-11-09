@@ -8,18 +8,15 @@
 
 ---
 
-{% if ctx.scope == "agent" %}Create a digest covering this agent's completed-task history. For every completed task, include what it was asked to do and its outcome, key results, and lessons, including any sub-tasks it delegated. Carry forward unresolved threads from any earlier digest. Do not include execution details from the current still-running task.
-{% else %}Create a progress digest covering the ENTIRE task execution so far — from the user's original request through everything done since — for a future turn to continue from.
-{% endif %}
-Submit the digest as plain text in this response: call no tools, add no preamble, and begin directly with `## Goal`. Do not mention where the covered range starts or ends, the compaction process, or input boundary markers such as `{{ progress_heading }}`. Write EXACTLY these five sections, each opened by its heading on its own line:
-## Goal — {% if ctx.scope == "agent" %}what this body of work is about, overall.{% else %}the task's objective, one or two sentences.{% endif %}
-## Constraints — {% if ctx.scope == "agent" %}constraints and hard limits that carried across tasks and must keep being honored{% else %}user-imposed constraints and hard limits that must keep being honored{% endif %} (write "none" only if truly none).
-## Done — {% if ctx.scope == "agent" %}each completed task with its outcome, key lessons and resulting state still relevant to later work.{% else %}completed results and current known state: confirmed findings, decisions and reasons, exact locations, changes made and verification results.{% endif %} Preserve explanations ruled out and why where relevant to future work, even if no artifact changed. Include concrete paths, symbols, identifiers, commands or parameters from the material where needed to act; state the useful conclusions directly instead of merely listing tools used.
-## Remaining — {% if ctx.scope == "agent" %}threads that earlier digests left open and are still unfinished, with their last known stopping points{% else %}the concrete stopping point, unfinished work, open problems and failure causes still to be addressed{% endif %}; specify what remains unknown or unverified. Retain any next action already established and its target or entry point; if none was established, state the open question without inventing a plan (write "none" only if nothing remains).
-## Evidence — references to crucial tool outputs a future turn can read back, one per line, like `- results__read_tool_output(invocation_id='<id>', tail=200): what it contains`; use these to supplement conclusions and essential values already stated above, not as a substitute for them. Omit this section if no large output matters.
-Every section except Evidence must be present{% if ctx.scope != "agent" %}; keep each section as short as the material allows{% endif %}.
-Keep user requirements distinct from the actor's suggestions and assumptions. In Remaining, include only unfinished work within the user's requested scope; optional improvements are not obligations.
-Distinguish observed facts from unverified inferences and unknowns. Carry forward still-valid state from earlier digests, reconcile it with newer evidence and remove superseded state. Preserve enough detail to resume without repeating completed investigation; cut step-by-step narrative first.
+{% if ctx.scope == "agent" %}Create a digest of this agent's completed-task history, including delegated sub-tasks and earlier digests. Exclude execution details of the current still-running task.
+{% else %}Create a digest of the ENTIRE task execution so far, from the original request through the current stopping point, including earlier digests.
+{% endif %}Apply the summary principles above. Submit plain text in this response: call no tools, add no preamble, and begin with `## Goal`. Do not output source boundary markers such as `{{ progress_heading }}` or describe the covered range or compaction process. Use the following five-section format, each heading on its own line:
+## Goal — {% if ctx.scope == "agent" %}the overall goal of this body of work.{% else %}the task's current goal.{% endif %}
+## Constraints — constraints and hard limits (write "none" if none).
+## Done — {% if ctx.scope == "agent" %}completed tasks and their outcomes and resulting known state.{% else %}completed results and current known state.{% endif %}
+## Remaining — {% if ctx.scope == "agent" %}unresolved threads carried forward and their stopping points.{% else %}the stopping point and unfinished or unverified work.{% endif %} Include an already-established next action if present (write "none" if nothing remains).
+## Evidence — references to large tool outputs, one per line, like `- results__read_tool_output(invocation_id='<id>', tail=200): what it contains`.
+Every section except Evidence is required. Omit Evidence if no large output needs a reference.
 {%- endmacro %}
 
 {% macro instruction(ctx) -%}

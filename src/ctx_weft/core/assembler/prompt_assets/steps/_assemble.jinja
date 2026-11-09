@@ -138,6 +138,7 @@ semantic facts; this file owns placement, order, priorities and required content
 
 {% if purpose == "act" %}
   {% do prompt.user(continuation(ctx), priority=1, merge=true, group="act-guidance") %}
+  {% do prompt.user(tool_instructions(ctx), priority=0, required=true, merge=true, group="tool-instructions") %}
 {% else %}
   {% do prompt.user(instruction(ctx), priority=0, required=true, merge=true, group="purpose-instruction") %}
 {% endif %}

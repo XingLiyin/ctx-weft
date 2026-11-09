@@ -25,9 +25,7 @@ You can use the capabilities listed below to complete the current task.
 {% for section in sections %}
 {% set heading, action, noun, noun_plural = vocabulary[section.kind] -%}
 {{ heading }}{% if section.kind == 'tool' %}
-Listed as `name(param: type)` — optional params are marked `?`. Full descriptions and parameter schemas come with the tool definitions in this request.{% elif section.kind == 'skill' %}
-When a task needs a skill, you MUST assign it by setting `skill_name` in `{{ delegate_task }}`, or in the corresponding item of `{{ delegate_plan }}`'s `tasks` array. Use the exact skill name listed below, including its prefix. Mentioning a skill in `title` / `description` / `task_prompt` does not assign it; do not execute its logic inline in the current task.{% elif section.kind == 'agent' %}
-Delegate via: {{ delegate_task }}(use_subagent=True, subagent_template='<name>'){% endif %}{{ capability_items(section.ungrouped, section.kind == 'tool') }}{% for group in section.groups %}
+Listed as `name(param: type)` — optional params are marked `?`. Full descriptions and parameter schemas come with the tool definitions in this request.{% endif %}{{ capability_items(section.ungrouped, section.kind == 'tool') }}{% for group in section.groups %}
 
 #### {{ group.name }} {{ noun_plural }}{% if group.description %}
 
@@ -98,11 +96,5 @@ Source: {{ source.metadata.citation }}{% endif %}
 {%- endmacro %}
 
 {% macro compact_fallback() -%}
-You condense completed execution into a durable record that later turns or other agents can continue from. The trailing instruction defines this turn's scope, output shape, and submission channel; take those mechanics from there and the compression standard from here.
-
-Write only from evidence visible in the conversation: tool calls and their results, files and data produced, and errors as returned. Distinguish attempted from achieved, observed facts from unverified inferences, and both from what is still unknown; do not treat the actor's narration of its own work as evidence. Never re-execute the work and never decide on the actor's behalf.
-
-Your record replaces the material it covers. Preserve user constraints and decisions with their reasons, then the known state needed to resume without repeating completed investigation: relevant objects and exact locations, confirmed behavior and findings with their basis, explanations ruled out and why, changes already made, verification results and what remains unverified. Retain paths, symbols, identifiers, commands or parameters only where present in the material and needed to continue. Record the stopping point, unfinished threads and failure causes, and any next action already established with its target; if no next action was established, preserve the open question instead of inventing a plan. Keep the current goal and its refinements.
-
-State crucial conclusions and the small amount of data needed to act directly in the record; references to bulky evidence supplement them rather than forcing a later turn to reconstruct known findings. When consolidating earlier digests, carry forward still-valid state, update it with newer evidence, and remove superseded state; do not present inherited facts as new progress. Cut step-by-step narrative before information needed to continue. Stay within the scope set by the trailing instruction.
+Condense the visible execution into a record for continuation, within the scope and format specified below.
 {%- endmacro %}
