@@ -13,6 +13,8 @@
 
 Coverage for `act_recap`: include only the actor's work after the most recent `<task_recap>` record belonging to the current task or the latest actual user message, whichever is later, through the end of this segment described above. Framework-generated task records and compressed summaries are not actual user messages. If no recap exists, start after the task-opening user message or a later actual user message. Do not repeat anything at or before that starting boundary. If the task continues, this recap will be presented as the next user-role `<task_recap>` record.
 
+Within this coverage, record what became known or changed, even if the segment only investigated: confirmed findings and their exact locations, explanations ruled out with reasons, modifications and their resulting state, verification results and what remains unverified. Preserve the concrete stopping point, unresolved questions and any next action already established with its target. Distinguish observed facts from unverified inferences; do not invent a next action. Put key conclusions and essential values directly in `act_recap`, with evidence references for detail, so the next turn can resume without repeating this segment's investigation. Keep it proportional to the work; do not turn it into a list of tool calls or repeat earlier recaps.
+
 These markers locate the source range only; they are not recap content. In `act_recap`, do not include `<task_recap>` tags or mention the user-message boundary, where the range starts or ends, or that you are summarizing. Write the recap itself directly.{% if ctx.final_output %}
 
 {{ final_output_heading }}
@@ -35,7 +37,7 @@ A closing message that still asks the user for something is not a completed task
 
 {% if ctx.boundary_kind == "max_turns" %}This segment {% if ctx.act_turns %}has already used {{ ctx.act_turns }} actor turns and {% endif %}has reached the turn limit. Based on completed work, remaining goals and actual execution evidence, assess whether this task is still within your capabilities: return `fail` only if you clearly cannot complete it, explaining the specific capability limitation in `task_failure_reason`; otherwise return `continue` and keep executing. Reaching the turn limit alone is not a failure reason. Never return `waiting` or `success`. Recap this segment's work and call `{{ report_observation }}` exactly once — no other tools.{% else %}Judge whether the task is complete, against the task goal and actual execution evidence, applying any evaluation principles supplied above, and call `{{ report_observation }}` exactly once — no other tools. Don't over-think it: call as soon as the picture is clear.{% endif %}
 
-`task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each. When filling `task_summary`, retain the original goal, achieved result and essential exact values or artifact references: this summary will stand alone after the task capsule is reduced to its minimal form.{% if ctx.subtasks %}
+`task_status` and `act_recap` are always required; fill the remaining fields on the conditions the tool states for each. When filling `task_summary`, retain the original goal, achieved result, essential exact values or artifact references, and the final known state: relevant locations, findings, verification limits and unresolved work. Consolidate still-valid findings from earlier recaps and update superseded state; this summary will stand alone after the task capsule is reduced to its minimal form.{% if ctx.subtasks %}
 
 {{ subtasks_heading }} (their results are in the conversation above; refer to one by its exact task_id if you need to flag it in `next_step_hint`):
 {{ shared.subtasks(ctx.subtasks) }}{% endif %}
@@ -44,7 +46,7 @@ A closing message that still asks the user for something is not a completed task
 {% macro recap(ctx) -%}
 Record what happened: call `{{ report_observation }}` exactly once — no other tools.
 
-Fill `act_recap`.{% if ctx.closed %} Also fill `task_summary` — retain the whole task's goal, achieved result and essential exact values or artifact references so the report can stand alone as the minimal task capsule.{% endif %} Do not fill task verdict, failure reason, or next-step hint fields.
+Fill `act_recap`.{% if ctx.closed %} Also fill `task_summary` — retain the whole task's goal, achieved result, essential exact values or artifact references, and the final known state: relevant locations, findings, verification limits and unresolved work. Consolidate still-valid findings from earlier recaps and update superseded state so the report can stand alone as the minimal task capsule.{% endif %} Do not fill task verdict, failure reason, or next-step hint fields.
 {%- endmacro %}
 
 {% macro body(ctx) -%}

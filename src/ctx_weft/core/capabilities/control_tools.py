@@ -60,8 +60,9 @@ UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
 #: 这里只描述字段是什么；「本次从哪里记到哪里」由 observe 入口引用 `review.context`
 #: 编进 judge / recap 共用 cue，避免字段 schema 承担操作路由。
 _ACT_RECAP_DESC = (
-    "An honest recap of what this segment's act did: what you changed or produced, which tools "
-    "you called, and whether anything failed. First person, faithful to what actually ran."
+    "An honest recap of this segment's work and resulting known state: what you found, ruled out, "
+    "changed or produced, with relevant locations, verification results and unresolved questions. "
+    "First person, faithful to what actually ran; distinguish observed facts from unverified inferences."
 )
 
 # Keep the annotation expression static so Cython preserves Annotated metadata.
@@ -418,7 +419,8 @@ def report_observation(
         "Fill when task_status is 'success' or 'fail', or the observation prompt identifies a closed task: "
         "a CONCISE process report of the WHOLE task — "
         "the original goal, achieved result and essential exact values, artifact paths or references; "
-        "include important steps, lessons and sub-task results where needed. "
+        "include the final known state, relevant locations and findings, verification limits, "
+        "unresolved work, lessons and sub-task results where needed. "
         "This report must remain useful when the task's conversation and final reply are compressed away. "
         "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
         "deliverable shown to the user is the actor's closing message text, "
