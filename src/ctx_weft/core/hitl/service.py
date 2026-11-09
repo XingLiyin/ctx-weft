@@ -104,6 +104,9 @@ class HitlService:
         self._now = clock
         # Original unconfirmed opening batches, never exposed as replyable requests.
         self._pending_opens = {}
+        self._confirming_opens = {}
+        self._opening_replacements = {}
+        self._replacing_user_turns = {}
         self._round_resolutions = {}
         # Original immediate-decision batches. Until confirmed, the request and
         # its real waiting slot remain pending in the registry.
@@ -123,6 +126,7 @@ class HitlService:
         tenant_id: str = "default",
         observe_request: dict | None = None,
         preceding_events: tuple = (),
+        replace_user_turn_id: str = "",
     ) -> PendingHitl:
         """登记一个请求并发 `HitlOpened`。同 `(session_id, tool_call_id, stage,
         invocation_key)` 复用既有请求且**不重发事实**。
@@ -140,6 +144,8 @@ class HitlService:
         应答」这件事一处堵死的地方；给它一个默认值，等于把守卫交给下一个调用点的记性。
         为真时抛 `UnattendedHitl`，由调用方转成贴合上下文的工具结果。
         """
+        # replace_user_turn_id retires an unanswered cold user-turn entrance in
+        # this same opening transaction. It never replaces a submitted reply.
         if unattended:
             # **排在幂等复用之前**：无人值守的 task 本就不该存在任何「等人回答」的记录，
             # 把同键的旧记录当答案返回，等于让一条它根本不该有的 pending 复活。
@@ -179,7 +185,25 @@ class HitlService:
             **({"observe_request": {**observe_request, "waiting_hitl_id": req.id}}
                if observe_request else {}),
         })
-        self._pending_opens[req.id] = (req, (*preceding_events, event))
+        replacement = self.registry.get(replace_user_turn_id) if replace_user_turn_id else None
+        retirement = ()
+        if replacement is not None:
+            if (replacement.session_id != session_id or replacement.task_id != task_id
+                    or not isinstance(replacement.delivery, UserTurnDelivery)
+                    or not isinstance(req.delivery, UserTurnDelivery)
+                    or replacement.slot is not None):
+                raise ValueError("Only a cold user-turn request of the same task can be replaced")
+            # No await between checking for a reply and reserving replacement.
+            # An earlier reply remains intact; a later reply confirms this exact
+            # opening batch and observes the old request as already canceled.
+            if replacement.effective_decision is None and replacement.id not in self._pending_resolutions:
+                decision = HitlDecision(outcome=HITL_OUTCOME_CANCELLED, message="")
+                retired = self._make_event(EventType.HITL_RESOLVED, replacement,
+                    self._resolved_payload(replacement, decision, None, claimed=False))
+                retirement = (retired,)
+                self._opening_replacements[req.id] = (replacement, decision, retired.timestamp)
+                self._replacing_user_turns[replacement.id] = req.id
+        self._pending_opens[req.id] = (req, (*retirement, *preceding_events, event))
         await self.confirm_opens(session_id, task_id=task_id)
         return req
 
@@ -188,8 +212,34 @@ class HitlService:
         for rid, (req, events) in list(self._pending_opens.items()):
             if req.session_id != session_id or task_id is not None and req.task_id != task_id:
                 continue
-            await self._bus.emit_batch(events, on_committed=lambda req=req: self.registry.publish(req))
-            self._pending_opens.pop(rid, None)
+            while rid in self._pending_opens and rid in self._confirming_opens:
+                await asyncio.shield(self._confirming_opens[rid])
+            if rid not in self._pending_opens:
+                continue
+            confirmed = asyncio.get_running_loop().create_future()
+            self._confirming_opens[rid] = confirmed
+
+            def publish(req=req, rid=rid):
+                replacement = self._opening_replacements.pop(rid, None)
+                if replacement is not None:
+                    old, decision, timestamp = replacement
+                    self.registry.resolve(old.id, decision, timestamp)
+                    self._replacing_user_turns.pop(old.id, None)
+                    self.registry.gc()
+                self.registry.publish(req)
+                self._pending_opens.pop(rid, None)
+                # The bus retains the first callback on receipt retry. Wake
+                # this attempt's waiters before notifying reply subscribers.
+                active = self._confirming_opens.get(rid)
+                if active is not None and not active.done():
+                    active.set_result(True)
+
+            try:
+                await self._bus.emit_batch(events, on_committed=publish)
+            finally:
+                self._confirming_opens.pop(rid, None)
+                if not confirmed.done():
+                    confirmed.set_result(False)
 
     async def confirm_resolutions(self, session_id):
         """Confirm original immediate decisions during same-process recovery."""
@@ -320,6 +370,9 @@ class HitlService:
         An unconfirmed immediate batch wins over later submissions: retry its
         original event, including when the storage receipt was lost.
         """
+        if req.id in self._replacing_user_turns:
+            await self.confirm_opens(req.session_id, task_id=req.task_id)
+            return None
         if not defer or req.id in self._pending_resolutions:
             return await self._commit_immediate(req, decision, message_event_payload)
         transferred = self.registry.claim(req.id, decision, message_event_payload)

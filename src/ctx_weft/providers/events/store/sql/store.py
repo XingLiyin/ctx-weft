@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import overload
 
 from sqlalchemy import and_, cast, exists, func, or_, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ctx_weft.protocols.events import (
@@ -32,6 +33,7 @@ from ctx_weft.protocols.events import (
     EventStore,
     ProjectedStoredEvent,
     StoredEvent,
+    TransientPersistenceError,
 )
 from ctx_weft.providers._sqlalchemy import make_session_factory
 from ctx_weft.providers.events.store.sql.models import (
@@ -74,6 +76,21 @@ class SqlEventStore(EventStore):
     # ── 写（有序提交扩展：原子批次）──────────────────────────────────────
 
     async def append_batch(
+        self, session_id: str, batch_id: str, events: list[Event],
+    ) -> CommitReceipt:
+        try:
+            return await self._append_batch(session_id, batch_id, events)
+        except PoolTimeoutError as exc:
+            raise TransientPersistenceError("Event store connection pool timed out") from exc
+        except DBAPIError as exc:
+            original = exc.orig
+            sqlite_code = getattr(original, "sqlite_errorcode", 0) or 0
+            pg_code = getattr(original, "sqlstate", None) or getattr(original, "pgcode", "") or ""
+            if exc.connection_invalidated or sqlite_code & 255 in (5, 6) or pg_code.startswith(("08", "40")):
+                raise TransientPersistenceError("Event store connection/write temporarily unavailable") from exc
+            raise
+
+    async def _append_batch(
         self, session_id: str, batch_id: str, events: list[Event],
     ) -> CommitReceipt:
         """整批原子提交。

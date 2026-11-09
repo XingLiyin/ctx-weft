@@ -114,12 +114,9 @@ async def test_handoff_hot_retries_complete_stopped_actor(tmp_path, unknown, ent
             await wait_until(lambda: rt.storage_health(SID) is not None and not tm._dispatch_tasks)
             assert not rt.hitl_registry.list_pending(session_id=SID)
             assert handle.task_id in tm.running_task_ids()
-            for _ in range(2):
-                rt.clear_storage_isolation(SID)
-                with pytest.raises(PersistenceUnavailableError):
-                    await rt.recover_agent(handle.agent_id, session_id=SID)
-                assert not rt.hitl_registry.list_pending(session_id=SID)
-            rt.clear_storage_isolation(SID)
+            assert not rt.clear_storage_isolation(SID)
+            # Resume now runs the bounded storage coordinator before taking the
+            # session guard, confirming the same envelopes across all attempts.
             await rt.recover_agent(handle.agent_id, session_id=SID)
             store.append_batch = original
             await drained(rt)
@@ -262,11 +259,7 @@ async def test_recovered_foreground_retries_original_run_envelopes(tmp_path, unk
                 await asyncio.wait_for(llm.review_started.wait(), 10)
                 await rt.pause_agent(aid)
             await wait_until(lambda: rt.storage_health(sid) is not None and not tm._dispatch_tasks)
-            for _ in range(2):
-                rt.clear_storage_isolation(sid)
-                with pytest.raises(PersistenceUnavailableError):
-                    await rt.recover_agent(aid, session_id=sid)
-            rt.clear_storage_isolation(sid)
+            assert not rt.clear_storage_isolation(sid)
             await rt.recover_agent(aid, session_id=sid)
             store.append_batch = original
             assert len(signatures) >= 4 and all(s == signatures[0] for s in signatures[:4])

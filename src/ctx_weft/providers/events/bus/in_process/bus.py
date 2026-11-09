@@ -27,10 +27,13 @@ from ctx_weft.protocols.events import (
     TRANSIENT_EVENT_TYPES,
     Event,
     EventBus,
+    EventConflictError,
     EventFilter,
     EventOrigin,
     EventType,
+    PersistenceUnavailableError,
     SubscriptionHandle,
+    TransientPersistenceError,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +83,18 @@ class _RoundWindow:
     owner: asyncio.Task | None = None
 
 
+@dataclass
+class _Delivery:
+    events: tuple[Event, ...]
+    callback: Callable | None = None
+    positions: dict[str, int] | None = None
+    callback_done: bool = False
+    notified: int = 0
+    done: bool = False
+    recovering: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
 class InProcessEventBus(EventBus):
     """单进程 asyncio.Queue 实现，独立 queue + 背压丢弃旧事件 + 提交门。"""
 
@@ -97,6 +112,13 @@ class InProcessEventBus(EventBus):
         self._actor_runs: dict[str, str] = {}
         #: 提交门（required 模式；None = 未接——best_effort 旧路径）
         self._gate = None
+        self._deliveries: dict[tuple[str, str], _Delivery] = {}
+        # Only fault-recovered batches need a late-caller notification tombstone.
+        self._recovered_deliveries: dict[tuple[str, str], _Delivery] = {}
+        self._wait_commit = None
+
+    def attach_storage_recovery(self, wait_commit):
+        self._wait_commit = wait_commit
 
     # ── 提交门 ────────────────────────────────────────────────────────────────
 
@@ -107,18 +129,69 @@ class InProcessEventBus(EventBus):
     async def emit_batch(self, events, *, on_committed=None) -> None:
         """Commit one immutable, non-retractable lifecycle batch before notification.
 
-        The caller retains the original envelopes until this returns. Retrying uses
-        the same first event ID and therefore confirms the same atomic transaction.
+        The bus retains copied envelopes and notification progress until confirmed.
+        Retrying uses the same first event ID and the same atomic transaction.
         """
         if not events:
             return
-        stored = await self._gate.commit(events, batch_id=events[0].id) if self._gate else []
-        positions = {row.event.id: row.position for row in stored}
-        if on_committed is not None:
-            on_committed()
-        for event in events:
-            await self._fanout(event, to_provisional=True, to_rest=True,
-                               position=positions.get(event.id))
+        await self._deliver_batch(events, on_committed=on_committed)
+
+    async def _deliver_batch(self, events, *, on_committed=None, recovering=False):
+        key = (events[0].session_id, events[0].id)
+        if key in self._recovered_deliveries:
+            if self._recovered_deliveries[key].events != tuple(events):
+                raise EventConflictError(f"Recovered batch {key[1]!r} cannot be changed")
+            return
+        delivery = self._deliveries.setdefault(key, _Delivery(tuple(deepcopy(events)), on_committed))
+        if delivery.events != tuple(events):
+            raise EventConflictError(f"Pending batch {key[1]!r} cannot be changed")
+        delivery.recovering |= recovering
+        try:
+            await self._deliver_registered(key, delivery)
+        except PersistenceUnavailableError as exc:
+            # Wait only for this receipt, never for full runtime reconciliation:
+            # the producer still owns its assistant/tool memory lock here.
+            if (recovering or self._wait_commit is None or not isinstance(
+                    exc.__cause__, (TransientPersistenceError, ConnectionError, TimeoutError))):
+                raise
+            await self._wait_commit(*key)
+            await self._deliver_registered(key, delivery)
+
+    async def _deliver_registered(self, key, delivery):
+        async with delivery.lock:
+            if delivery.done:
+                return
+            if delivery.positions is None:
+                stored = await self._gate.commit(list(delivery.events), batch_id=key[1]) if self._gate else []
+                delivery.positions = {row.event.id: row.position for row in stored}
+            if not delivery.callback_done:
+                delivery.callback_done = True
+                if delivery.callback is not None:
+                    delivery.callback()
+            while delivery.notified < len(delivery.events):
+                event = delivery.events[delivery.notified]
+                self._track_background_run(event)
+                await self._fanout(event, to_provisional=True, to_rest=True,
+                                   position=delivery.positions.get(event.id))
+                delivery.notified += 1
+            delivery.done = True
+            self._deliveries.pop(key, None)
+            if delivery.recovering:
+                self._recovered_deliveries[key] = delivery
+
+    def has_pending_storage(self, session_id):
+        return any(sid == session_id for sid, _ in self._deliveries) or any(
+            window.frozen and window.frozen[0].session_id == session_id
+            for window in self._provisional.values())
+
+    async def confirm_pending_storage(self, session_id):
+        for (sid, _), delivery in list(self._deliveries.items()):
+            if sid == session_id:
+                await self._deliver_batch(list(delivery.events),
+                    on_committed=delivery.callback, recovering=True)
+        for tid, window in list(self._provisional.items()):
+            if window.frozen and window.frozen[0].session_id == session_id:
+                await self.commit_provisional(tid)
 
     async def emit(self, event: Event) -> None:
         if event.type == EventType.RUN_STARTED and event.origin == EventOrigin.LOOP_BACKGROUND_OBSERVE:
@@ -150,8 +223,8 @@ class InProcessEventBus(EventBus):
         if event.type == EventType.RUN_STARTED and event.origin != EventOrigin.RUNTIME:
             self._track_background_run(event)
         if self._gate is not None and event.type not in TRANSIENT_EVENT_TYPES:
-            stored = await self._gate.commit([event])  # 失败 → PersistenceUnavailableError
-            position = stored[0].position if stored else None
+            await self._deliver_batch([event])
+            return
         if event.type in (EventType.RUN_STARTED, EventType.RUN_FINISHED):
             self._track_background_run(event)
         await self._fanout(event, to_provisional=True, to_rest=True, position=position)

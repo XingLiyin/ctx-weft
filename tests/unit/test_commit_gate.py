@@ -54,7 +54,7 @@ async def test_commit_confirms_before_notification():
     assert seen_in_store_at_notify == [1], "observer must see event only AFTER commit"
 
 
-async def test_storage_failure_raises_and_marks_session_first():
+async def test_storage_failure_raises_and_marks_session_first(caplog):
     """失败：先标记健康（回调）再抛 PersistenceUnavailableError；无 committed 通知。"""
     store = _FailingStore()
     marked: list[tuple[str, BaseException]] = []
@@ -70,6 +70,10 @@ async def test_storage_failure_raises_and_marks_session_first():
     assert marked and marked[0][0] == "s1"           # 先标记
     assert notified == []                            # 未通知（不伪装成功）
     assert await store.committed_head("s1") == 0
+    failure = next(record for record in caplog.records if record.name ==
+                   "ctx_weft.core.events.commit_gate")
+    assert failure.exc_info is not None
+    assert failure.exc_info[1] is marked[0][1]
 
 
 async def test_transient_events_skip_commit_but_notify():

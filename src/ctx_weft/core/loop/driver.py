@@ -31,7 +31,14 @@ from ctx_weft.protocols import (
     MemoryScope,
     ProviderContext,
 )
-from ctx_weft.protocols.events import Event, EventBus, EventOrigin, EventStore, EventType
+from ctx_weft.protocols.events import (
+    Event,
+    EventBus,
+    EventOrigin,
+    EventStore,
+    EventType,
+    PersistenceUnavailableError,
+)
 
 if TYPE_CHECKING:
     from ctx_weft.core.capabilities.cache import CapabilityCache
@@ -546,7 +553,9 @@ class StepDriver:
         except Exception as exc:
             if step.name == "finalize" or ctx.execution.options.get("execution_mode") == "foreground":
                 self.executions.notify_finish(state.task.id)
-            if foreground:
+            # The commit gate already isolated the session. Another submission
+            # can mask the original unknown commit or publish after isolation.
+            if foreground and not isinstance(exc, PersistenceUnavailableError):
                 await ctx.event_bus.emit(make_event(
                     state, EventType.STEP_FAILED,
                     {"step_name": step.name, "error_code": type(exc).__name__,

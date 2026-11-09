@@ -725,7 +725,29 @@ class RunHandle:
 >
 > **执行时长/轮数限制（2026-09 起）**：core **不提供**任务级 deadline 或轮数上限——这是宿主的策略，不是 SDK 的职责。需要超时就在宿主侧计时并调 `cancel_task` / `cancel_agent`；需要 provider 级超时就在 provider 自己的工具实现里做。三个从未被执行的旧字段（`max_turns_per_agent` / `timeout_per_step_sec` / `Task.timeout_ms`）**已删除**——它们声明了限制却无任何运行时消费者，留着只会让宿主以为有防线。`max_turns_per_act` / `max_turns_per_observe` 等**真正生效**的循环上限不受影响。
 
+Observe 的 LLM 请求另有无有效进展保护：`RuntimeConfig.observe_llm_idle_timeout_sec` 默认 300 秒，须为有限正数。文本、思考和工具调用分片会刷新计时，SSE 心跳及空 chunk 不刷新；正常持续生成可超过该时长。超时会关闭请求，并按观察失败的既有规则处理；仅生成报告的 observe 保留原始记忆并完成生命周期，释放任务锁。后台报告仍独立于 actor 的取消信号。
+
+前台 observe 的暂停、取消也覆盖判决后的记忆折叠，并在 finalize 入口再次检查停止信号。停止时等待在途事务清理；已提交的折叠保留。暂停会原子闭合旧 observe 并登记新的人工等待，取消则在任务和记忆收尾完成后发送 `ObserveApplied`，保证完成等待可返回。
+
+`TaskFinalized` 写入及提交通知期间不接收新的暂停、取消请求，沿用已确定的结局正常收尾。被跳过的 agent 接口请求返回空列表，会话接口返回 `False`；不产生取消标记或 agent 终止事实，也不把信号延迟到下一轮。会话级请求整次跳过，避免留下会话控制闩锁。写入完成或失败后立即解除保护，区间前已接受的停止仍按原逻辑处理。
+
+公开停止接口在等待初始化、会话命令锁之前检查写入保护；初始化完成后及取得会话锁后再次核对。保护期间的请求立即返回，不排队到后续运行，也不影响同会话内其他 agent 的定向暂停。
+
+带人工等待入口的新后台判决会先等原 run 提交停驻状态，避免判决过早到达而被拒绝；该交接等待同样受 `observe_llm_idle_timeout_sec` 约束。
+
 > **提交策略（2026-09 起，spec: event-commit）**：默认 `event_commit_policy="required"`——事件先经提交门确认存储写入、再对外通知（存储失败显式抛 `PersistenceUnavailableError` 并隔离会话）。**自定义 EventBus 必须实现 `attach_commit_gate` 扩展**，否则 required 模式构造期失败；不接受该约束的宿主可显式配置 `RuntimeConfig(event_commit_policy="best_effort")` 退回旧的吞错路径（启动告警、不可靠恢复）。
+
+临时存储故障按原 `batch_id`、原事件 ID 和不可变内容确认提交，恢复过程不重新执行工具。
+默认原地提交最多 3 次；每会话最多 3 轮后台恢复，初始退避 0.25 秒，总恢复期限 120 秒，
+分别由 `storage_commit_max_attempts`、`storage_recovery_max_attempts`、
+`storage_recovery_base_delay_sec`、`storage_recovery_max_duration_sec` 配置。
+所有未知批次、待通知事件和已完成工具/assistant 结果收口后才解除隔离。
+预算耗尽仍保留原始提交，可在存储恢复后调用 `await runtime.recover_storage(session_id)`；
+返回 `False` 时隔离继续，`clear_storage_isolation` 不会绕过未确认提交。
+SQL provider 将锁等待、连接池超时及可恢复连接错误标记为 `TransientPersistenceError`；
+其他 provider 可使用同一协议异常。自定义总线若要参与后台确认，还须实现
+`confirm_pending_storage` / `has_pending_storage`；`attach_storage_recovery` 可让原调用等待
+单批回执后原地继续。进程崩溃且结果从未落盘时，仍按副作用核对/授权策略处理，不承诺任意外部工具恰好一次。
 
 所有状态变更都通过事件总线发布，append-only。
 

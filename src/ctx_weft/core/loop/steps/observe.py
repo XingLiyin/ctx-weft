@@ -5,10 +5,11 @@ judgement and settlement in both modes.
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from collections.abc import Callable
-from contextlib import AsyncExitStack, aclosing
+from contextlib import AsyncExitStack, aclosing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -40,6 +41,7 @@ from ctx_weft.core.loop.task_memory_fold import (
     find_finish_target,
     replace_finish_report,
 )
+from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.core.orchestrator.task.disposition import RunOutcome, RunOutcomeKind, disposition_for
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.content import content_to_text, image_tokens
@@ -131,50 +133,21 @@ class ObserveStep(Step):
         if completion:
             result = restore_result(completion)
         else:
-            # Foreground judgement shares act's cooperative stop boundary, including
-            # assembler/tool awaits. Background recap keeps its independent lifetime.
-            import asyncio
-
-            from ctx_weft.core.loop.steps.act import (
-                _await_tool_or_stop,
-                _interrupt_pending,
-                _park_for_interrupt,
-            )
-            assessment = asyncio.create_task(self._observe(state, ctx, events, True, boundary))
-            try:
-                finished = await _await_tool_or_stop(assessment, ctx)
-            finally:
-                if not assessment.done():
-                    assessment.cancel()
-                    await asyncio.gather(assessment, return_exceptions=True)
-            tok = getattr(ctx, "cancel_token", None)
-            if not finished or _interrupt_pending(ctx) or tok is not None and tok.is_cancelled:
-                # The abandoned judgement cannot later overwrite the new request.
-                if tok is not None and tok.is_cancelled:
-                    await complete(state, ctx, ObservationResult(), accepted=False, action="keep_raw")
-                    await applied(state, ctx, reason="foreground_interrupted")
-                    tok.raise_if_cancelled()
-                # Old judgement closure and the new parked recap intent are one
-                # transaction: recovery sees both sides of the handoff or neither.
-                closure = (
-                    make_event(state, EventType.OBSERVE_COMPLETED, {
-                        "task_id": state.task.id, "observe_id": state.extra["observe_id"],
-                        "accepted": False, "action": "keep_raw",
-                        "result": dataclasses.asdict(ObservationResult()),
-                        "completed_at": now_utc().isoformat(), "short_segment": False}),
-                    make_event(state, EventType.OBSERVE_APPLIED, {
-                        "task_id": state.task.id, "observe_id": state.extra["observe_id"],
-                        "reason": "foreground_interrupted"}))
-                await _park_for_interrupt(state, ctx, edit=True, preceding_events=closure)
-            result = assessment.result()
+            result = await await_foreground(
+                self._observe(state, ctx, events, True, boundary), state, ctx)
+        await foreground_stop_checkpoint(state, ctx)
         if result.verdict and result.verdict.task_outcome == VERDICT_WAITING:
             await ensure_waiting(state, ctx)
         if not completion:
             await complete(state, ctx, result, disposition=planned_disposition(state, result)
                            if result.verdict else None, action="foreground")
+        # Persist the decision before any fold, but do not start applying it when
+        # a stop arrived during the commit. Never cancel an uncertain event commit.
+        await foreground_stop_checkpoint(state, ctx)
         apply_foreground_assessment(state, result, boundary)
         if result.verdict and result.verdict.task_outcome in (VERDICT_CONTINUE, VERDICT_WAITING):
-            await self._fold_retry_segment(state, ctx, result.verdict, events)
+            await await_foreground(
+                self._fold_retry_segment(state, ctx, result.verdict, events), state, ctx)
         return self._outcome(result, "finalize", events)
 
     @staticmethod
@@ -284,6 +257,9 @@ class ObserveStep(Step):
         last_text = ""
         # 动态 max_tokens 的增量基线：上一轮实际发送条数（本轮 usage 对应的真实 prompt 基线）。
         baseline_msg_count: int | None = None
+        idle_seconds = getattr(getattr(ctx, "config", None), "observe_llm_idle_timeout_sec",
+                               RuntimeConfig.observe_llm_idle_timeout_sec)
+        loop = asyncio.get_running_loop()
 
         for round_num in range(max_rounds):
             # req_id：与 llm_gateway.stream_llm_resilient 内部同一确定性公式独立算出（同
@@ -301,9 +277,23 @@ class ObserveStep(Step):
 
             stream = ensure_collected_stream(stream_llm_resilient(
                 ctx, state, llm_request, inputs=inputs, appended_messages=appended_messages))
-            async with aclosing(stream):
-                async for _ in stream:
-                    stream.accept_current()
+            try:
+                # The gateway's first-chunk deadline is disarmed once output
+                # starts. HTTP heartbeats can then keep its socket alive forever.
+                # Bound time without model progress, including hidden retries,
+                # while allowing healthy reasoning/tool streams to run longer.
+                async with asyncio.timeout(idle_seconds) as idle_timeout:
+                    async with aclosing(stream):
+                        async for chunk in stream:
+                            if ((chunk.kind in {"token", "reasoning"} and chunk.text)
+                                    or chunk.kind in {"tool_call", "tool_call_partial"}):
+                                idle_timeout.reschedule(loop.time() + idle_seconds)
+                            stream.accept_current()
+            except TimeoutError as exc:
+                if idle_timeout.expired():
+                    raise TimeoutError(
+                        f"Observe LLM made no progress for {idle_seconds:g} seconds") from exc
+                raise
             result = stream.get_final_result()
             accumulated_text, reasoning_text = result.text, result.reasoning
             tool_calls, usage = list(result.tool_calls), result.usage
@@ -595,18 +585,25 @@ class ObserveStep(Step):
 
     async def _execute_background(self, state, ctx, boundary, judging):
         async with AsyncExitStack() as stack:
+            options = _execution(ctx).options
+            wait_for_park = (judging and options.get("waiting_hitl_id")
+                             and not state.extra.get("observe_completion"))
             ready = None
-            if boundary in CLOSE_BOUNDARIES or _execution(ctx).options.get("verdict"):
+            if boundary in CLOSE_BOUNDARIES or options.get("verdict") or wait_for_park:
                 ready = await stack.enter_async_context(
                     StepDriver.for_context(ctx).executions.finish_notification(state.task.id))
-            if _execution(ctx).options.get("verdict"):
+            if options.get("verdict") or wait_for_park:
                 from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
                 async def wake(event):
-                    if event.task_id == state.task.id and event.type in TASK_STATUS_BY_EVENT:
+                    if event.task_id == state.task.id and (
+                            event.type in TASK_STATUS_BY_EVENT or event.type == EventType.HITL_RESOLVED):
                         ready.set()
                 subscription = ctx.event_bus.subscribe(None, wake)
                 stack.push_async_callback(subscription.unsubscribe)
-            result = await self._background_body(state, ctx, boundary, judging)
+            if wait_for_park and not await wait_producer_park(state, ctx, ready):
+                result = self._outcome(ObservationResult())
+            else:
+                result = await self._background_body(state, ctx, boundary, judging)
             if not state.extra.get("observe_completion"):
                 await complete(state, ctx, ObservationResult(), accepted=False, action="keep_raw")
             completion = state.extra["observe_completion"]
@@ -719,6 +716,80 @@ class ObserveStep(Step):
                     raise
                 logger.exception("background observe failed (ignored); segment kept raw")
                 return self._outcome(ObservationResult())
+
+
+async def wait_producer_park(state, ctx, ready):
+    """Do not arbitrate a fresh parked verdict before its producer has settled."""
+    seconds = getattr(getattr(ctx, "config", None), "observe_llm_idle_timeout_sec",
+                      RuntimeConfig.observe_llm_idle_timeout_sec)
+    try:
+        async with asyncio.timeout(seconds):
+            while True:
+                ready.clear()
+                req = ctx.hitl.registry.get(_execution(ctx).options["waiting_hitl_id"])
+                # Subscribed before reading: a past transition is already visible,
+                # and a later transition wakes us. A user reply makes the old
+                # verdict obsolete, so let the existing arbitration reject it.
+                if (state.task.status != "ACTIVE" or req is None
+                        or req.effective_decision is not None):
+                    return True
+                await ready.wait()
+    except TimeoutError:
+        logger.warning("observe producer did not park within %g seconds; keeping raw history", seconds)
+        return False
+
+
+async def await_foreground(work, state, ctx):
+    """Stop cancellable observation work, joining transaction cleanup before handoff."""
+    from ctx_weft.core.loop.steps.act import _await_tool_or_stop
+
+    pending = asyncio.create_task(work)
+    try:
+        await _await_tool_or_stop(pending, ctx)
+    finally:
+        if not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+    # A failed durable operation must propagate its original error before any
+    # stop handoff tries to write more events to a possibly isolated session.
+    result = pending.result() if not pending.cancelled() else None
+    # Check even if the operation completed concurrently with the stop signal.
+    await foreground_stop_checkpoint(state, ctx)
+    if pending.cancelled():
+        raise asyncio.CancelledError
+    return result
+
+
+async def foreground_stop_checkpoint(state, ctx):
+    """Retire the old decision before parking; cancellation settles it after task cleanup."""
+    identity = getattr(state, "extra", {}).get("observe_id")
+    if not identity:
+        return
+    tok = getattr(ctx, "cancel_token", None)
+    if tok is not None and tok.is_cancelled:
+        await complete(state, ctx, ObservationResult(), accepted=False, action="keep_raw")
+        # Runtime carries this identity through the canceled RunOutcome. Applied
+        # must follow TaskCanceled and its memory/HITL finalization, not precede it.
+        tok.raise_if_cancelled()
+    pause = getattr(ctx, "pause_token", None)
+    if pause is None or not pause.is_paused or getattr(ctx, "hitl", None) is None:
+        return
+    from ctx_weft.core.loop.steps.act import _park_for_interrupt
+
+    closure = []
+    if not state.extra.get("observe_completion"):
+        closure.append(make_event(state, EventType.OBSERVE_COMPLETED, {
+            "task_id": state.task.id, "observe_id": identity,
+            "accepted": False, "action": "keep_raw",
+            "result": dataclasses.asdict(ObservationResult()),
+            "completed_at": now_utc().isoformat(), "short_segment": False}))
+    # A persisted Completed remains immutable. Atomically retire it with the new
+    # parked request, so recovery cannot replay its old continue disposition.
+    closure.append(make_event(state, EventType.OBSERVE_APPLIED, {
+        "task_id": state.task.id, "observe_id": identity,
+        "reason": "foreground_interrupted"}))
+    await _park_for_interrupt(state, ctx, edit=True, preceding_events=tuple(closure),
+                              replace_user_turn_id=state.extra.get("waiting_hitl_id", ""))
 
 
 _PARK_CLOSED_BY_VERDICT = runtime_prompt('park_closed_by_verdict')
@@ -922,17 +993,27 @@ def effect_key(event):
 
 
 async def emit_effect(state, ctx, event):
-    if event.type in EFFECT_TYPES and state.extra.get("observe_id"):
+    observed_effect = event.type in EFFECT_TYPES and state.extra.get("observe_id")
+    if observed_effect:
         event.causation_id = state.extra["observe_id"]
         key = effect_key(event)
         if key in state.extra.get("observe_effects", []):
             return
+    protect = getattr(getattr(ctx, "task_manager", None), "finalized_write", None)
+    guard = nullcontext()
+    if event.type == EventType.TASK_FINALIZED:
+        if _execution(ctx).mode == ExecutionMode.FOREGROUND:
+            # Honor signals accepted before this write. No await separates this
+            # checkpoint from closing stop admission for the publication itself.
+            await foreground_stop_checkpoint(state, ctx)
+        if callable(protect):
+            guard = protect(state.task.id)
+    with guard:
         await ctx.event_bus.emit(event)
+    if observed_effect:
         state.extra.setdefault("observe_effects", []).append(key)
         if event.type == EventType.TASK_FINALIZED:
             StepDriver.for_context(ctx).executions.notify_finish(state.task.id)
-    else:
-        await ctx.event_bus.emit(event)
 
 
 def observation_task(state):

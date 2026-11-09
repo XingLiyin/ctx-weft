@@ -349,6 +349,7 @@ class TurnHandle:
     # 存储不可用健康查询（spec: event-commit）：runtime 构造时注入；None（测试替身）
     # 表示无健康面，wait_for_finish 按旧行为等超时。
     _storage_health: "Callable[[str], str | None] | None" = None
+    _storage_recovery: Any = None
     _pending_observe: "Callable[[str, str], str | None] | None" = None
     _is_finished: Any = None
 
@@ -386,9 +387,19 @@ class TurnHandle:
                     if self._storage_health is not None:
                         reason = self._storage_health(self.session_id)
                         if reason is not None:
-                            raise PersistenceUnavailableError(reason)
+                            if self._storage_recovery is not None:
+                                await self._storage_recovery(self.session_id)
+                            else:
+                                raise PersistenceUnavailableError(reason)
                     if self._is_finished is not None and await self._is_finished(
                             self.session_id, self.task_id):
+                        # A commit can fail during the awaited state query.
+                        # Durable terminal rows alone do not clear unknown receipts.
+                        if self._storage_health is not None and self._storage_health(self.session_id):
+                            if self._storage_recovery is not None:
+                                await self._storage_recovery(self.session_id)
+                                continue
+                            raise PersistenceUnavailableError(self._storage_health(self.session_id))
                         return self._state
                     if terminal_seen and self._is_finished is None:
                         recap = (self._pending_observe(self.session_id, self.task_id)
@@ -486,6 +497,7 @@ def _session_command(
     allow_missing_session: bool = False,
     missing_session_as_agent: bool = False,
     skip_no_resume_reply: bool = False,
+    skip_finalized_stop: bool = False,
 ):
     """Serialize addressing, optional materialization and command delivery.
 
@@ -493,6 +505,8 @@ def _session_command(
     skip operates only on loaded state. allow_missing_session delegates unresolved
     addresses to the command. missing_session_as_agent preserves agent-facing
     lookup errors. skip_no_resume_reply avoids loading for notification replies.
+    skip_finalized_stop rejects protected stops before initialization and locking;
+    stop commands still recheck admission after taking the session lock.
     """
     if load_session not in {"required", "optional", "skip"}:
         raise ValueError(f"unknown session loading policy: {load_session!r}")
@@ -523,6 +537,22 @@ def _session_command(
                     return await method(self, *args, **kwargs)
                 raise AgentNotLoaded(
                     "pass session_id for a cold command, or call rebuild_session(session_id) first")
+
+            def stop_is_protected():
+                return skip_finalized_stop and (
+                    self._is_agent_writing_task_finalized(aid) if aid else
+                    self._is_writing_task_finalized(sid))
+
+            # A stop received during TaskFinalized belongs to this write, not a
+            # future run. Do not let initialization or serialization queue it.
+            if stop_is_protected():
+                return [] if aid else False
+            if (method.__name__ == "recover_agent" and self.storage_health(sid) is not None
+                    and self._session_lock_owners.get(sid) is not asyncio.current_task()):
+                # Storage reconciliation may wait for emitters whose subscribers
+                # query this session. Complete it before owning the command guard.
+                if not await self.recover_storage(sid):
+                    raise PersistenceUnavailableError(self.storage_health(sid))
             # Nested commands already run under the outer command's calibration
             # check. In particular, an optional missing-session purge must not
             # spawn an initialization task that waits for its own caller's lock.
@@ -534,6 +564,8 @@ def _session_command(
                         if missing_session_as_agent:
                             raise AgentNotFound(f"unknown agent {aid!r} in session {sid!r}") from None
                         raise
+            if stop_is_protected():
+                return [] if aid else False
             async with self._session_guard(sid):
                 if load_session == "skip":
                     return await method(self, *args, **kwargs)
@@ -633,6 +665,12 @@ class CtxWeftRuntime:
         # 存储不可用健康表（spec: event-commit）：session_id → 原因。CommitGate 失败时
         # **先标记后抛**；公开查询走 storage_health()。内存态——崩溃后由持久日志重建。
         self._storage_unavailable: dict[str, str] = {}
+        self._storage_recovery_tasks: dict[str, asyncio.Task] = {}
+        self._storage_retryable: set[str] = set()
+        self._pending_tool_results: dict = {}
+        self._unstarted_tools: dict = {}
+        self._storage_interrupted_tools: set = set()
+        self._commit_gate = None
         self._snapshot_every_n = snapshot_every_n
         # Auto-register 内置 providers（与用户注册的 providers 无关）
         control_provider = ControlCapabilityProvider()
@@ -788,8 +826,14 @@ class CtxWeftRuntime:
                     "先经 gate 确认存储提交）。InProcessEventBus 已支持；自定义总线请实现"
                     "该扩展，或显式配置 event_commit_policy='best_effort' 并接受丢事件风险。")
             from ctx_weft.core.events.commit_gate import CommitGate
-            self._event_bus.attach_commit_gate(CommitGate(
-                self.event_store, on_unavailable=self._mark_storage_unavailable))
+            self._commit_gate = CommitGate(self.event_store,
+                on_unavailable=self._mark_storage_unavailable,
+                max_attempts=self._config.storage_commit_max_attempts,
+                base_delay=self._config.storage_recovery_base_delay_sec)
+            self._event_bus.attach_commit_gate(self._commit_gate)
+            attach_recovery = getattr(self._event_bus, "attach_storage_recovery", None)
+            if attach_recovery is not None:
+                attach_recovery(self._wait_for_commit)
             from ctx_weft.providers.events import PersistenceHandle
             writer = None
             if self._snapshot_every_n > 0:
@@ -982,20 +1026,137 @@ class CtxWeftRuntime:
             self._storage_unavailable[session_id] = f"{type(cause).__name__}: {cause}"
             logger.error(
                 "session %s enters storage_unavailable isolation: %r", session_id, cause)
+        from ctx_weft.core.events.commit_gate import retryable_storage_error
+        if self._config.storage_recovery_max_attempts and retryable_storage_error(cause):
+            self._storage_retryable.add(session_id)
+            self._start_storage_recovery(session_id)
+
+    def _start_storage_recovery(self, session_id):
+        task = self._storage_recovery_tasks.get(session_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._recover_storage_session(session_id),
+                                       name=f"storage-recovery:{session_id}")
+            self._storage_recovery_tasks[session_id] = task
+        return task
+
+    async def recover_storage(self, session_id: str) -> bool:
+        """Confirm original submissions and resume safely; concurrent callers share one worker.
+
+        False leaves isolation and all original envelopes intact for a later
+        explicit retry. Cancellation of a waiter does not cancel shared recovery.
+        """
+        task = self._storage_recovery_tasks.get(session_id)
+        if (self.storage_health(session_id) is None and not self._has_pending_storage(session_id)
+                and (task is None or task.done())):
+            return True
+        return await asyncio.shield(self._start_storage_recovery(session_id))
+
+    async def _wait_for_commit(self, session_id, batch_id):
+        task = self._storage_recovery_tasks.get(session_id)
+        if task is None:
+            if not self._config.storage_recovery_max_attempts or session_id not in self._storage_retryable:
+                raise PersistenceUnavailableError(self.storage_health(session_id))
+            task = self._start_storage_recovery(session_id)
+        receipt = asyncio.create_task(self._commit_gate.wait_confirmation(session_id, batch_id))
+        try:
+            await asyncio.wait({receipt, task}, return_when=asyncio.FIRST_COMPLETED)
+            if receipt.done():
+                receipt.result()
+                return
+            if task.done() and not task.cancelled() and task.result():
+                # Full recovery confirmed every receipt before this waiter ran.
+                return
+            raise PersistenceUnavailableError(self.storage_health(session_id) or "Storage recovery failed")
+        finally:
+            if not receipt.done():
+                receipt.cancel()
+            await asyncio.gather(receipt, return_exceptions=True)
+
+    async def _wait_for_storage(self, session_id):
+        reason = self.storage_health(session_id)
+        if reason is None:
+            return
+        task = self._storage_recovery_tasks.get(session_id)
+        if task is asyncio.current_task():
+            raise PersistenceUnavailableError(reason)
+        if task is None:
+            if not self._config.storage_recovery_max_attempts or session_id not in self._storage_retryable:
+                raise PersistenceUnavailableError(reason)
+            task = self._start_storage_recovery(session_id)
+        if not await asyncio.shield(task) or self.storage_health(session_id) is not None:
+            raise PersistenceUnavailableError(self.storage_health(session_id) or reason)
+
+    async def _confirm_storage_facts(self, session_id):
+        if self._commit_gate is not None:
+            await self._commit_gate.confirm_pending(session_id)
+        confirm = getattr(self._event_bus, "confirm_pending_storage", None)
+        if confirm is not None:
+            await confirm(session_id)
+        from ctx_weft.core.loop.capability_gateway import confirm_tool_results
+        await confirm_tool_results(self._pending_tool_results, session_id)
+
+    def _has_pending_storage(self, session_id):
+        pending = getattr(self._event_bus, "has_pending_storage", None)
+        return ((self._commit_gate is not None and self._commit_gate.has_pending(session_id))
+                or (pending is not None and pending(session_id))
+                or any(entry.session_id == session_id for entry in self._pending_tool_results.values())
+                or any(key[1] == session_id and any(not entry.provisional for entry in entries.values())
+                       for key, entries in self._assistant_pending.items()))
+
+    async def _recover_storage_session(self, session_id):
+        try:
+            async with asyncio.timeout(self._config.storage_recovery_max_duration_sec):
+                return await self._recover_storage_attempts(session_id)
+        except TimeoutError:
+            logger.error("Storage recovery timed out for %s; original submissions retained", session_id)
+            return False
+
+    async def _recover_storage_attempts(self, session_id):
+        for attempt in range(max(1, self._config.storage_recovery_max_attempts)):
+            await asyncio.sleep(min(self._config.storage_recovery_base_delay_sec * 2 ** attempt, 5.0))
+            try:
+                # Do not own the session guard while waiting for a live emitter:
+                # its subscribers may query runtime state under that same guard.
+                await self._confirm_storage_facts(session_id)
+                tm = self._task_managers.get(session_id)
+                if tm is not None:
+                    await self.hitl.confirm_opens(session_id)
+                    await self.hitl.confirm_resolutions(session_id)
+                    await self._confirm_assistant_events(tm.session)
+                    await self._restore_assistant_messages(tm.session)
+                    await self._settle_storage_assistant_memory(tm.session)
+                async with self._session_guard(session_id):
+                    if tm is not None:
+                        await self._recover_in_existing_tm(tm, user_reply=None,
+                            resumed_task_id=None, storage_ready=True)
+                    elif not self.clear_storage_isolation(session_id):
+                        continue
+                    return self.storage_health(session_id) is None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Storage recovery attempt %s failed for %s: %r",
+                               attempt + 1, session_id, exc, exc_info=True)
+        logger.error("Storage recovery exhausted for %s; session remains isolated", session_id)
+        return False
 
     def storage_health(self, session_id: str) -> str | None:
         """None = 健康；否则返回隔离原因（storage_unavailable）。"""
         return self._storage_unavailable.get(session_id)
 
-    def clear_storage_isolation(self, session_id: str) -> None:
+    def clear_storage_isolation(self, session_id: str) -> bool:
         """宿主确认存储恢复后解除隔离（恢复流程须先按 batch_id 收口未知提交）。"""
+        if self._has_pending_storage(session_id):
+            return False
         if self._storage_unavailable.pop(session_id, None) is not None:
+            self._storage_retryable.discard(session_id)
             for key in list(self._assistant_memory_ready):
                 if key[1] == session_id:
                     self._assistant_memory_ready.pop(key, None)
             logger.info("session %s storage isolation cleared", session_id)
+        return True
 
-    @_session_command(load_session="skip")
+    @_session_command(load_session="skip", skip_finalized_stop=True)
     async def pause_session(self, session_id: str) -> bool:
         """软打断（spec 2026-07-05）：放弃其余在途/排队任务，只留 root agent 当前那一轮。
         - 置 _pausing 闩锁：其间新派发的 root agent run 出生即 paused（被 _try_resume_parent
@@ -1015,6 +1176,8 @@ class CtxWeftRuntime:
         """
         per = self._run_tokens.get(session_id, {})
         tm = self._task_managers.get(session_id)
+        if self._is_writing_task_finalized(session_id):
+            return False
         if not per and (tm is None or tm.is_done()):
             return False
         self._pausing.add(session_id)
@@ -1039,10 +1202,11 @@ class CtxWeftRuntime:
                 )
         for task_id in list(per):
             if root_agent and tm is not None and tm.running_agent_of(task_id) == root_agent:
-                self._pause_task(session_id, task_id)
+                delivered = self._pause_task(session_id, task_id)
                 # 在途 root run 即唯一续跑点：认领名额，闩锁窗口内此后派发的 root scope
                 # 任务（如被 _try_resume_parent 重排的 SUSPENDED root 任务）born-cancel。
-                self._pause_claimed.add(session_id)
+                if delivered:
+                    self._pause_claimed.add(session_id)
             else:
                 # 非 root：取消它的**在途 run**，不是取消这个 agent——它经 TASK_CANCELED
                 # → AgentInput.SETTLED 落回 idle，仍然活着、仍可被 send_message 寻址。
@@ -1060,6 +1224,19 @@ class CtxWeftRuntime:
             tm.set_pause_abandon(False)
         return True
 
+    def _is_writing_task_finalized(self, session_id: str, task_id: str | None = None) -> bool:
+        tm = self._task_managers.get(session_id)
+        check = getattr(tm, "is_writing_finalized", None)
+        return bool(check(task_id)) if callable(check) else False
+
+    def _is_agent_writing_task_finalized(self, agent_id: str) -> bool:
+        rec = self._agent_lifecycle_manager.record_of(agent_id)
+        if rec is None:
+            return False
+        tm = self._task_managers.get(rec.session_id)
+        current = tm.current_task_for_agent(agent_id, rec.current_task_id) if tm is not None else rec.current_task_id
+        return bool(current and self._is_writing_task_finalized(rec.session_id, current))
+
     def _pause_task(self, session_id: str, task_id: str) -> bool:
         """内部原语：定向暂停指定在途 task 的 run（spec 2026-07-05 §2.3）。`pause_agent`
         与 `pause_session` 是它仅有的两个调用方（2026-09-04 spec §8）。
@@ -1067,13 +1244,15 @@ class CtxWeftRuntime:
         pause 指定在途 task 的 run → 它在检查点 park 自己的 wait 气泡，经多 pending
         面板回复续跑。不在跑（无本 run 令牌）→ False。只停该 task 本身的 run，不涉及
         其子任务。"""
+        if self._is_writing_task_finalized(session_id, task_id):
+            return False
         tokens = self._run_tokens.get(session_id, {}).get(task_id)
         if tokens is None:
             return False
         tokens.pause.pause()
         return True
 
-    @_session_command(load_session="skip")
+    @_session_command(load_session="skip", skip_finalized_stop=True)
     async def cancel_session(self, session_id: str) -> bool:
         """硬取消：清队列 + 该 session 下**每个 agent** 经 `cancel_agent` 显式转
         `terminated`（2026-09-04 spec §7.2）。
@@ -1093,9 +1272,25 @@ class CtxWeftRuntime:
         # 当未决恢复出来（总账 A10 要防的正是这个）。
         per = self._run_tokens.get(session_id, {})
         task_manager = self._task_managers.get(session_id)
+        if self._is_writing_task_finalized(session_id):
+            return False
+        if (self.storage_health(session_id) is not None and task_manager is not None
+                and not any(task_manager._dispatch_is_live(tid)
+                            for tid in task_manager.running_task_ids())):
+            # Stopped owners can hold an unconfirmed terminal disposition.
+            # Confirm it before cancellation; never replace it with CANCELED.
+            await self._confirm_storage_facts(session_id)
+            await task_manager.reconcile_stopped_tasks()
+            await self._repair_observe_handoffs(task_manager)
+            if self.clear_storage_isolation(session_id):
+                await self._activate_prepared_tasks_locked(task_manager)
         has_agents = bool(self._agent_lifecycle_manager.agent_ids_of_session(session_id))
         has_pending_hitl = bool(self.hitl_registry.list_pending(session_id=session_id))
         if not per and task_manager is None and not has_agents and not has_pending_hitl:
+            return False
+        # Storage repair above can await. Admit this request only while no
+        # publication is protected, immediately before closing dispatch below.
+        if self._is_writing_task_finalized(session_id):
             return False
         # 取消前判定会话是否已空闲挂起（无在跑任务）。RUNNING：在途 task 经 CancelToken→checkpoint
         # 协作取消→on_task_finished→is_done→_fire_session_done→_on_done 自行回收，故此处不抢着回收。
@@ -1145,9 +1340,9 @@ class CtxWeftRuntime:
         # task effects. Recovery can derive the full owned task set, not just the
         # routing hint for its most recently queued task.
         for aid in list(self._agent_lifecycle_manager.agent_ids_of_session(session_id)):
-            await self.cancel_agent(aid, reason="session_canceled")
+            await self.cancel_agent(aid, reason="session_canceled", _session_cancel_admitted=True)
         if task_manager is not None:
-            await task_manager.cancel_all(reason=CancelReason.USER_CANCEL)
+            await task_manager.cancel_all(reason=CancelReason.USER_CANCEL, _admitted=True)
         if idle:
             # 已暂停/中断（无在跑 task）的会话被取消：cancel_all 不经 _fire_session_done，
             # _on_done 不会触发，故在此显式清掉这一轮的控制信号残余。
@@ -1192,7 +1387,8 @@ class CtxWeftRuntime:
             for tid in tids:
                 registry.notify_finish(tid)
 
-    async def cancel_agent(self, agent_id: str, *, reason: str | None = None) -> list[str]:
+    async def cancel_agent(self, agent_id: str, *, reason: str | None = None,
+                           _session_cancel_admitted: bool = False) -> list[str]:
         """Terminate the agent and cancel its current task subtree through TaskManager.
 
         AgentTerminated is the durable state fact preceding task cancellation. Repeating
@@ -1201,6 +1397,8 @@ class CtxWeftRuntime:
         Unrelated tasks are not selected by agent ancestry or ownership. The
         session_canceled reason used by cancel_session covers all owned tasks;
         cold recovery derives that same scope from the existing terminal fact.
+        The private admission argument is only for cancel_session's existing
+        request; independent public calls retain normal write-window rejection.
         """
         from ctx_weft.core.orchestrator.lifecycle.agent_state import AGENT_CANCEL_REASON
         lm = self._agent_lifecycle_manager
@@ -1221,14 +1419,19 @@ class CtxWeftRuntime:
             await self._cancel_pending_hitl_of(agent_id, session_id=rec.session_id)
         killed = []
         async def terminate():
+            nonlocal current
+            if tm is not None and rec.status != "terminated":
+                current = tm.current_task_for_agent(agent_id, current)
             if await lm.apply_input(agent_id, AgentInput.CANCEL, task_id=current, reason=cause):
                 killed.append(agent_id)
         if tm is not None and cause == AGENT_CANCEL_REASON + "session_canceled":
-            await tm.cancel_session_agent_tasks(agent_id, cause, before_cancel=terminate)
+            await tm.cancel_session_agent_tasks(agent_id, cause, before_cancel=terminate,
+                                                _admitted=_session_cancel_admitted)
         elif tm is not None and current:
             # Serialize the agent state commit with observe verdict acceptance.
             # On persistence failure no task changes or run signals have occurred.
-            await tm.cancel_task_tree(current, cause, before_cancel=terminate)
+            await tm.cancel_task_tree(current, cause, before_cancel=terminate,
+                current_agent_id=agent_id if rec.status != "terminated" else None)
         else:
             await terminate()
         return killed
@@ -1397,7 +1600,7 @@ class CtxWeftRuntime:
 
     # ── Agent 级暂停 / 恢复（Task 20）────────────────────────────────────────
 
-    @_session_command(load_session="skip", allow_missing_session=True)
+    @_session_command(load_session="skip", allow_missing_session=True, skip_finalized_stop=True)
     async def pause_agent(self, agent_id: str, *, reason: str | None = None) -> list[str]:
         """暂停 agent 及其全部**当前 running** 的子孙（spec 7）。
 
@@ -1430,6 +1633,8 @@ class CtxWeftRuntime:
         rec = reg.record_of(agent_id)
         if rec is None:
             raise AgentNotFound(f"unknown agent: {agent_id}")
+        if self._is_agent_writing_task_finalized(agent_id):
+            return []
         if rec.status != "running":
             raise AgentNotRunningError(
                 f"agent {agent_id} is {rec.status}, not running; nothing to pause"
@@ -1852,6 +2057,7 @@ class CtxWeftRuntime:
             template_id=params.template_id,
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
+            _storage_recovery=self._wait_for_storage,
             _pending_observe=self._pending_observe_run_id,
             _is_finished=self._task_is_settled,
         )
@@ -2435,6 +2641,13 @@ class CtxWeftRuntime:
         tm.set_recovery_pending(False)
 
     async def _retire_switched_input(self, task: Task) -> None:
+        tm = self._task_managers.get(task.session_id)
+        if (task.session_id in self._pausing and task.switched_to_task_id
+                and tm is not None and tm.session is not None
+                and tm.running_agent_of(task.id) == tm.session.root_agent_id):
+            # The replaced root run cannot park after its switch. Transfer its
+            # pause claim before releasing its slot or dispatching the successor.
+            self._pause_claimed.discard(task.session_id)
         for req in list(self.hitl_registry.list_pending(session_id=task.session_id)):
             if req.task_id == task.id:
                 try:
@@ -2466,6 +2679,8 @@ class CtxWeftRuntime:
         finally 的 was_cancelled 守卫按 task.status 判定（熔断已先手标 FAILED 的不发）。
         找不到 token（该 task 此刻并不在跑）→ False。
         """
+        if self._is_writing_task_finalized(session_id, task_id):
+            return False
         executions = self._step_executions.get(session_id)
         if executions is not None:
             executions.stop_metadata(task_id)
@@ -2933,9 +3148,13 @@ class CtxWeftRuntime:
                 launched = await loop_ctx.steps.start_durable("observe", state, loop_ctx, options={
                     **info, "boundary": info["report_boundary"], "judge_task": False, "settled": True})
             elif mechanical or info.get("execution_mode") == "foreground":
-                needs_judgement = (not mechanical and not info.get("completion")
-                                   and task.status not in TERMINAL_TASK_STATUSES)
-                if needs_judgement:
+                # A saved verdict still owns foreground work until settlement:
+                # its fold/finalize must have the same slot and stop tokens as
+                # fresh judgement. Already settled replay must stay idempotent.
+                needs_foreground = (not mechanical and info.get("judge_task", True)
+                                    and not settled
+                                    and task.status not in TERMINAL_TASK_STATUSES)
+                if needs_foreground:
                     launched = task_manager.start_foreground_recovery(task.id, agent_id,
                         lambda: self._resume_observe_finalization(state, loop_ctx, info, foreground=True))
                 else:
@@ -2990,7 +3209,12 @@ class CtxWeftRuntime:
             await ctx.event_bus.emit(started)
             if commit is not None:
                 commit.start_confirmed = True
-            async with ctx.steps.executions.task_guard(state.task.id, "observe"):
+            # Recap-only execution acquires this guard inside ObserveStep. Keep
+            # recovery's outer guard only for judgement/finalization paths that
+            # do not acquire it themselves; asyncio.Lock is not reentrant.
+            guard = (ctx.steps.executions.task_guard(state.task.id, "observe")
+                     if mechanical or options.get("judge_task", True) else contextlib.nullcontext())
+            async with guard:
                 if mechanical:
                     result = ObservationResult(verdict=Verdict(**options["verdict"]))
                     state.extra["observe_decision"] = options
@@ -3029,7 +3253,8 @@ class CtxWeftRuntime:
             cancelled = True
             if not foreground:
                 raise
-            state.run_outcome = RunOutcome(kind=RunOutcomeKind.CANCELED)
+            state.run_outcome = RunOutcome(kind=RunOutcomeKind.CANCELED,
+                observe_id=state.extra.get("observe_id", ""))
         except Exception as exc:
             error = exc
             raise
@@ -3093,6 +3318,7 @@ class CtxWeftRuntime:
         user_reply: "PendingHitl | None",
         resumed_task_id: str | None,
         hitl_id: str = "",
+        storage_ready: bool = False,
     ) -> None:
         """活 owner 在世时的续跑——`_recover_session_locked` 在单例下唯一的一条复用路径。
 
@@ -3109,12 +3335,17 @@ class CtxWeftRuntime:
         """
         from ctx_weft.core.loop.steps.observe import blocks_actor_recovery
         tm.set_recovery_pending(True)
-        await self.hitl.confirm_opens(tm.session.id)
-        await self.hitl.confirm_resolutions(tm.session.id)
-        await self._confirm_assistant_events(tm.session)
-        await self._restore_assistant_messages(tm.session)
+        if not storage_ready:
+            await self._confirm_storage_facts(tm.session.id)
+            await self.hitl.confirm_opens(tm.session.id)
+            await self.hitl.confirm_resolutions(tm.session.id)
+            await self._confirm_assistant_events(tm.session)
+            await self._restore_assistant_messages(tm.session)
+            await self._settle_storage_assistant_memory(tm.session)
         await tm.reconcile_stopped_tasks()
         await self._repair_observe_handoffs(tm)
+        if self.storage_health(tm.session.id) is not None and not self.clear_storage_isolation(tm.session.id):
+            raise PersistenceUnavailableError("Unconfirmed submissions still block session recovery")
         if resumed_task_id is not None:
             if tm.get_task(resumed_task_id) is None:
                 sid = tm.session.id if tm.session is not None else "?"
@@ -3708,6 +3939,7 @@ class CtxWeftRuntime:
             template_id=rec.template_id,
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
+            _storage_recovery=self._wait_for_storage,
             _pending_observe=self._pending_observe_run_id,
             _is_finished=self._task_is_settled,
         )
@@ -4240,6 +4472,7 @@ class CtxWeftRuntime:
             template_id=template_id,
             event_bus=self._event_bus,
             _storage_health=self.storage_health,
+            _storage_recovery=self._wait_for_storage,
             _pending_observe=self._pending_observe_run_id,
             _is_finished=self._task_is_settled,
         )
@@ -4651,13 +4884,21 @@ class CtxWeftRuntime:
             if not provisional:
                 self._assistant_pending[key].pop(event.id, None)
 
-    async def _repair_assistant_pending(self, key) -> None:
+    async def _settle_storage_assistant_memory(self, session):
+        for key, entries in list(self._assistant_pending.items()):
+            if key[1] == session.id and any(not entry.provisional for entry in entries.values()):
+                async with self._assistant_agent_lock(key):
+                    await self._repair_assistant_pending(key, skip_provisional=True)
+
+    async def _repair_assistant_pending(self, key, *, skip_provisional=False) -> None:
         """Called with the agent lock held. Empty hot checks perform no storage I/O."""
         from ctx_weft.protocols.events import EventReadProjection
         from ctx_weft.core.control.reducers import REPLAY_BATCH
 
         pending = self._assistant_pending.get(key, {})
         for record_id, entry in list(pending.items()):
+            if skip_provisional and entry.provisional:
+                continue
             if not entry.committed:
                 # emit may have committed and lost its acknowledgement, or the
                 # event may still be provisional. Only durable facts authorize repair.
@@ -5246,6 +5487,10 @@ class CtxWeftRuntime:
             spill_preview_chars=self._config.spill_preview_chars,
             spill_tail_chars=self._config.spill_tail_chars,
             memory_blob_store=self.providers.get_memory_blob_store(),
+            pending_results=self._pending_tool_results,
+            wait_storage=self._wait_for_storage,
+            unstarted_tools=self._unstarted_tools,
+            interrupted_tools=self._storage_interrupted_tools,
         )
 
     async def _task_is_settled(self, session_id: str, task_id: str) -> bool:
@@ -5426,7 +5671,8 @@ class CtxWeftRuntime:
             # 非空才放键）。RunOutcome.reason 保持空串，与之前行为等价。
             by_token = loop_ctx.cancel_token is not None and loop_ctx.cancel_token.is_cancelled
             cancel_source = "token" if by_token else "external"
-            state = state.apply_patch({"run_outcome": RunOutcome(kind=RunOutcomeKind.CANCELED)})
+            state = state.apply_patch({"run_outcome": RunOutcome(kind=RunOutcomeKind.CANCELED,
+                observe_id=state.extra.get("observe_id", ""))})
             if loop_ctx.task_manager is not None:
                 try:
                     await loop_ctx.task_manager.retract_canceled_run(task.id, run_id)
@@ -5628,6 +5874,7 @@ class CtxWeftRuntime:
             event_bus=self._event_bus,
             _state=state,
             _storage_health=self.storage_health,
+            _storage_recovery=self._wait_for_storage,
             _pending_observe=self._pending_observe_run_id,
             _is_finished=self._task_is_settled,
         )

@@ -195,22 +195,16 @@ async def test_terminal_receipt_repair_releases_slot_and_wakes_report(tmp_path, 
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             rt, _ = make_lifecycle_runtime(store, memory, "mechanical")
             await initialize_all(rt)
-            original, read = store.append_batch, store.read_range
-            report_waiting = asyncio.Event()
+            original = store.append_batch
             event_type = "TaskFinished" if status == "FINISHED" else "TaskFailed"
             attempts = 0
             signatures = []
 
-            async def read_range(*args, **kwargs):
-                rows = await read(*args, **kwargs)
-                if "ObserveRequested" in (kwargs.get("include_types") or ()):
-                    report_waiting.set()
-                return rows
-
             async def append(sid, bid, events, *args, **kwargs):
                 nonlocal attempts
                 if any(e.type == event_type for e in events):
-                    await asyncio.wait_for(report_waiting.wait(), 10)
+                    # Inject at the durable disposition boundary. A report can
+                    # subscribe later; recovery must still wake/finish it.
                     attempts += 1
                     signatures.append((bid, [(e.id, e.payload) for e in events]))
                     if attempts <= 3:
@@ -219,7 +213,7 @@ async def test_terminal_receipt_repair_releases_slot_and_wakes_report(tmp_path, 
                         raise OSError("terminal receipt lost")
                 return await original(sid, bid, events, *args, **kwargs)
 
-            store.read_range, store.append_batch = read_range, append
+            store.append_batch = append
             handle = await rt.start_session(SessionStartParams.create(session_id=SID,
                 template_id="agent:tpl_echo", user_prompt="finish",  unattended=True))
             tm = rt._task_managers[SID]
@@ -235,7 +229,7 @@ async def test_terminal_receipt_repair_releases_slot_and_wakes_report(tmp_path, 
                 except PersistenceUnavailableError:
                     continue
                 break
-            store.append_batch, store.read_range = original, read
+            store.append_batch = original
             await drain(rt)
             assert all(item == signatures[0] for item in signatures)
             assert not tm.running_task_ids()

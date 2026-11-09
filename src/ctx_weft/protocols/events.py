@@ -581,11 +581,21 @@ class EventConflictError(Exception):
     """
 
 
+class TransientPersistenceError(Exception):
+    """A provider identified a temporary storage failure; commit may be unknown.
+
+    Only retry the original batch and envelopes. This never authorizes repeating
+    business operations. Providers keep the original driver error as __cause__.
+    """
+
+
 class PersistenceUnavailableError(Exception):
     """事件提交未获存储确认（required 模式下 emit 抛出；spec: event-commit）。
 
     语义：调用方不得把本错误当作普通可重试失败——会话已进入 ``storage_unavailable``
     隔离（停止调度新副作用），恢复前须以 batch_id 确认未知提交（幂等重试拿原 receipt）。
+    Runtime 可自动确认临时故障，或由 ``recover_storage(session_id)`` 显式重试；
+    所有未知提交及对应结果完成确认之前，不得手动清除隔离或重跑业务操作。
     """
 
 

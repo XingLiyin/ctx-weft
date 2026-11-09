@@ -6,6 +6,7 @@ core 不再自读 os.environ；LLM 凭证/模型的 env 自举（bootstrap_from_
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,12 @@ class RuntimeConfig:
     # 存储提交再对外通知，存储失败显式抛 PersistenceUnavailableError 并隔离会话；
     # best_effort = 旧观察者路径（吞存储错误），启动告警、不可靠恢复。
     event_commit_policy: str = "required"
+    # Includes the first submission. Only provider-classified temporary faults
+    # retry inline; background recovery has its own bounded attempt budget.
+    storage_commit_max_attempts: int = 3
+    storage_recovery_max_attempts: int = 3
+    storage_recovery_base_delay_sec: float = 0.25
+    storage_recovery_max_duration_sec: float = 120.0
     # 并发池的**基准**上限：在跑的自治作业和交互 task 一起算在里面。挡住的只有自治
     # 作业——交互 task 不看这个数，等于自带临时额度，而额度由「一个交互口至多一个
     # 往返」兜住（`TaskManager._held_ports`），所以一条口最多让池涨 1。有效上限因此是
@@ -63,3 +70,19 @@ class RuntimeConfig:
     llm_self_heal_max_interval_sec: float = 60.0
     # 从首次中途断流开始计时，不刷新；只限制后续首包等待/退避，不限制正常输出。
     llm_midstream_recovery_max_duration_sec: float = 300.0
+    # Observe model-progress idle limit, including first output and retries.
+    # Text, reasoning and tool fragments refresh it; heartbeats/empty chunks do
+    # not. Healthy generation has no total-duration cap.
+    observe_llm_idle_timeout_sec: float = 300.0
+
+    def __post_init__(self) -> None:
+        if (type(self.storage_commit_max_attempts) is not int or self.storage_commit_max_attempts < 1
+                or type(self.storage_recovery_max_attempts) is not int or self.storage_recovery_max_attempts < 0):
+            raise ValueError("storage attempt budgets must be integers (commit >= 1, recovery >= 0)")
+        if not isfinite(self.storage_recovery_base_delay_sec) or self.storage_recovery_base_delay_sec < 0:
+            raise ValueError("storage_recovery_base_delay_sec must be finite and non-negative")
+        if not isfinite(self.storage_recovery_max_duration_sec) or self.storage_recovery_max_duration_sec <= 0:
+            raise ValueError("storage_recovery_max_duration_sec must be finite and positive")
+        if (not isfinite(self.observe_llm_idle_timeout_sec)
+                or self.observe_llm_idle_timeout_sec <= 0):
+            raise ValueError("observe_llm_idle_timeout_sec must be finite and positive")
