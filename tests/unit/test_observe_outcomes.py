@@ -301,34 +301,19 @@ def test_report_observation_writes_act_recap_and_task_summary() -> None:
 # ── persona prompt 守护 ───────────────────────────────────────────────────────
 
 
-def test_the_only_block_fallback_is_the_compaction_discipline() -> None:
-    """块缺省只剩一条：COMPACT（压缩纪律）。ROLE 没有缺省——没有 ROLE 就等于不判。
-
-    这条测试**取代**了原先那两个（judge 版与 recap 版兜底身份的守护）。judge 版 2026-10-08
-    删除：它不可达（判定路径被 `has_observe_role` 把门，那个判据要求 facet 正文非空），而且
-    方向是错的——用一份框架自带的审查准则去顶替「这个 agent 怎么审查任务」，比不判更难发现。
-
-    recap 版没有被删，是**归位**：它一直就是压缩纪律，只是被挂在 ROLE 位上当「只摘要档的
-    ROLE」，所以当年得从判定版手抄一份再删掉判决词汇。现在它是 COMPACT 块的缺省，由
-    background_recap / compact 两条路径共用。
-
-    守的还是同两件事：证据纪律在；判决词汇**不在**（这一档的工具面里没有判决工具，schema
-    里也没有任何字段收 `continue`/`success`/`fail`——ROLE 位上要求它判，就是 prompt 命令
-    模型做工具面不允许的事）。
-    """
+def test_missing_compact_facet_uses_only_a_minimal_generic_fallback() -> None:
+    """A missing MD facet must not activate a second full quality policy in Jinja."""
     from tests.assembler_testkit import compile_prompt, prompt_request
 
     prompt = compile_prompt([], prompt_request(purpose="compact"))
-    fb = "\n".join(str(message.content) for message in prompt.messages)
-    lower = fb.lower()
+    text = "\n".join(str(message.content) for message in prompt.messages)
+    assert "record for continuation" in text
+    for section in ("Goal", "Constraints", "Done", "Remaining", "Evidence"):
+        assert f"## {section}" in text
+    for leaked in ("actor's narration", "explanations ruled out", "task_status", "First person"):
+        assert leaked not in text
 
-    assert "never re-execute" in lower and "never decide on the actor's behalf" in lower
-    assert "do not treat the actor's narration of its own work as evidence" in fb, "证据纪律丢了"
-    for leaked in ("judge", "`continue`", "`success`", "`fail`", "task_status"):
-        assert leaked not in fb, f"压缩纪律里谈了判决：{leaked!r}"
-    # 压缩模板可以引用历史边界标记，但不能复活旧的范围/人称契约。
-    for leaked in ("whichever comes later", "First person"):
-        assert leaked not in fb, f"块缺省复述了字段语义：{leaked!r}"
+
 def _mech_state_ctx(*, exit_reason="normal", transcript=None, has_role=False,
                     parent_task_id="t0", cancelled=False):
     """ObserveStep.execute() 的最小搭台：默认「无 observe ROLE 的子任务」= 机械路径。"""

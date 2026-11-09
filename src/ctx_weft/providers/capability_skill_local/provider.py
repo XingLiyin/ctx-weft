@@ -45,6 +45,7 @@ PROVIDER_NAME = "local_skill"
 # providers 层对 core 只依赖 core.utils 这一个叶子模块，不给它加上行依赖；名字由 qualify
 # 现拼，与那边同一口径（provider:tool → provider__tool）。
 _DELEGATE_TASK_NAME = qualify("control:delegate_task")
+_DELEGATE_PLAN_NAME = qualify("control:delegate_plan")
 _SKILL_READ_FILE_NAME = qualify("skill_executor:read_file")
 _SKILL_LIST_FILES_NAME = qualify("skill_executor:list_files")
 _SKILL_EXEC_SCRIPT_NAME = qualify("skill_executor:exec_script")
@@ -53,7 +54,9 @@ _SKILL_EXEC_SCRIPT_NAME = qualify("skill_executor:exec_script")
 # selected skill's definition, so they remain visible even with a single skill.
 SKILL_PROVIDER_DESCRIPTION = (
     "Skills provide task instructions and bundled resources. "
-    f"Assign one with {_DELEGATE_TASK_NAME}(..., skill_name='{PROVIDER_NAME}__<name>'). "
+    f"Assign one with {_DELEGATE_TASK_NAME}(..., skill_name='{PROVIDER_NAME}__<name>'), "
+    f"or set that skill_name in the corresponding item of {_DELEGATE_PLAN_NAME}'s tasks array. "
+    "Skills are not directly callable tools; naming a skill in prose does not assign it. "
     "Its instructions load into the delegated task. "
     f"Within that task, use {_SKILL_LIST_FILES_NAME} and {_SKILL_READ_FILE_NAME} for skill "
     f"resources, and {_SKILL_EXEC_SCRIPT_NAME}(command=...) to run commands. "

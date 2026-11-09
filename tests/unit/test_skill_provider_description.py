@@ -18,6 +18,7 @@ def test_description_names_delegate_and_skill_executor_tools(tmp_path: Path) -> 
     desc = _provider(tmp_path).description
     for frag in (
         "control__delegate_task",
+        "control__delegate_plan",
         "skill_name",
         "skill_executor__read_file",
         "skill_executor__list_files",

@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Annotated, Any
 from ctx_weft.core.capabilities.schema import extract_schema
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.core.utils.clock import now_utc
-from ctx_weft.core.utils.headings import SUBTASKS_HEADING
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.core.utils.task_ref import task_ref
 from ctx_weft.protocols.capability import (
@@ -56,24 +55,10 @@ ASK_USER_NAME = qualify(f"{PROVIDER_NAME}:ask_user")
 REPORT_OBSERVATION_NAME = qualify(f"{PROVIDER_NAME}:report_observation")
 UPDATE_TASK_METADATA_NAME = qualify(f"{PROVIDER_NAME}:update_task_metadata")
 
-#: `act_recap` 的字段契约，两个 observe terminal tool **逐字共用**一份。
-#: 这里只描述字段是什么；「本次从哪里记到哪里」由 observe 入口引用 `review.context`
-#: 编进 judge / recap 共用 cue，避免字段 schema 承担操作路由。
-_ACT_RECAP_DESC = (
-    "An honest recap of this segment's work and resulting known state: what you found, ruled out, "
-    "changed or produced, with relevant locations, verification results and unresolved questions. "
-    "First person, faithful to what actually ran; distinguish observed facts from unverified inferences."
-)
-
-# Keep the annotation expression static so Cython preserves Annotated metadata.
-_NEXT_STEP_HINT_DESC = (
-    "Optional. Describe only concrete, evidence-backed gaps or blockers directly relevant to the "
-    "user's requested goal. Do not introduce new requirements or turn optional improvements into "
-    "obligations. Leave empty if none. "
-    "This is also where you flag a sub-task whose result does not actually achieve its goal: "
-    f"name it (title + id, as listed under '{SUBTASKS_HEADING}') and say what is wrong and "
-    "what must be different."
-)
+# Schemas describe data only. Jinja owns invocation and filling instructions;
+# the selected Markdown facets own judgement and quality standards.
+_ACT_RECAP_DESC = "Account of the observed execution segment."
+_NEXT_STEP_HINT_DESC = "Review notes for a subsequent execution turn."
 
 # delegate_plan 的 actor-visible ack 及 gateway 配对 tool result 内容。
 _PLAN_DISPATCH_ACK = ("Plan created. Its sub-tasks will now be started one by one "
@@ -182,28 +167,17 @@ def control_tool(*, purposes: list[Purpose], input_schema: dict[str, Any] | None
 
 @control_tool(purposes=["act"])
 def delegate_task(
-    title: Annotated[str, "Short imperative title for the sub-task (≤20 chars)"],
-    description: Annotated[
-        str,
-        "WHAT the sub-task must achieve — its goal/content only. No HOW, no tool names, and do NOT "
-        "restate dispatch/orchestration choices such as 'use subagent' / 'inherit memory' / which "
-        "skill (those go in the use_subagent / inherit_memory / skill_name params). This text becomes "
-        "the sub-task's own `## Current Task`, so anything off-goal will mislead it when it runs.",
-    ] = "",
-    task_prompt: Annotated[str, "Detailed prompt extracted from the user request for this task"] = "",
-    skill_name: Annotated[str, "Skill to assign to the task, or empty if none"] = "",
-    use_subagent: Annotated[bool, "True if the task should run in a dedicated sub-agent"] = False,
-    subagent_template: Annotated[
-        str,
-        "Template id for the sub-agent, from '### Available Sub-Agents'. Leave EMPTY to get a "
-        "sub-agent built from your own template — same persona, same tools, same limits — which "
-        "is what you want when you just need another pair of hands rather than a specialist.",
-    ] = "",
-    inherit_memory: Annotated[bool, "True if the sub-agent should inherit session memory"] = True,
+    title: Annotated[str, "Sub-task title"],
+    description: Annotated[str, "Sub-task goal and scope"] = "",
+    task_prompt: Annotated[str, "Detailed sub-task brief"] = "",
+    skill_name: Annotated[str, "Assigned skill name"] = "",
+    use_subagent: Annotated[bool, "Dedicated sub-agent flag"] = False,
+    subagent_template: Annotated[str, "Sub-agent template identifier"] = "",
+    inherit_memory: Annotated[bool, "Session memory inheritance flag"] = True,
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Delegate ONE new sub-task to run separately; the current task suspends until its sub-tasks finish. When your own work is complete, provide the actual final answer as normal message text. To replace the user goal, use control__switch_task."""
+    """Create one delegated sub-task."""
     from ctx_weft.core.models.task import Task as TaskModel
 
     if ctx is None or ctx.task_manager is None or ctx.task is None:
@@ -249,15 +223,15 @@ def delegate_task(
 
 @control_tool(purposes=["act"])
 def switch_task(
-    title: Annotated[str, "Short title for the new task"],
-    description: Annotated[str, "Goal and scope of the new task; describe WHAT, not orchestration"],
-    task_prompt: Annotated[str, "The replacement instruction and necessary context"],
-    target_task_id: Annotated[str, "OLD task to replace. Empty means current task. Only current task or its ancestors; never a sibling, unrelated, or terminal task."] = "",
-    reason: Annotated[str, "Why the goal is being replaced. Required when targeting an ancestor; not a verdict on completion."] = "",
+    title: Annotated[str, "Replacement task title"],
+    description: Annotated[str, "Replacement task goal and scope"],
+    task_prompt: Annotated[str, "Replacement task brief"],
+    target_task_id: Annotated[str, "Identifier of the task being replaced"] = "",
+    reason: Annotated[str, "Goal replacement reason"] = "",
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Replace the current task or an ancestor and its unfinished descendants with a new task in the same parent position. Old tasks receive terminal background review. Do not use for follow-ups, temporary interruptions, or parallel additions. Call alone."""
+    """Replace a task branch with a new task."""
     import asyncio
     from copy import deepcopy
 
@@ -314,29 +288,11 @@ def switch_task(
 
 @control_tool(purposes=["act"])
 def delegate_plan(
-    tasks: Annotated[
-        list,
-        (
-            "Ordered list of task specs. Each item: "
-            "title (str, the sub-task's goal only — no dispatch flags), "
-            "description (str, WHAT the sub-task must achieve — its goal/content only; no HOW, and do NOT "
-            "restate use_subagent/inherit_memory/skill in the text: it becomes the sub-task's own "
-            "`## Current Task` and off-goal words mislead it), "
-            "task_prompt (str, detailed prompt — goal/content only, same rule as description), "
-            "skill_name (str, skill to assign or empty), "
-            "use_subagent (bool), "
-            "subagent_template (str, from '### Available Sub-Agents'; empty = built from your "
-            "own template, i.e. another pair of hands rather than a specialist), "
-            "inherit_memory (bool, default true), "
-            "Tasks run strictly in order and each one starts ONLY if its predecessor succeeded — "
-            "if a step fails, the rest are canceled. Put independent work in separate "
-            "control__delegate_task calls instead, so one failure does not cancel the others."
-        ),
-    ],
+    tasks: Annotated[list, "Ordered sub-task specifications"],
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Delegate SEVERAL ordered sub-tasks in one call (each runs after the previous); the current task suspends until they all finish. For a single sub-task use control__delegate_task; when your own work is complete, return the final answer as normal message text."""
+    """Create an ordered plan of delegated sub-tasks."""
     from ctx_weft.core.models.task import Task as TaskModel
 
     if not isinstance(tasks, list):
@@ -400,54 +356,14 @@ def delegate_plan(
 @control_tool(purposes=["observe"])
 def report_observation(
     act_recap: Annotated[str, _ACT_RECAP_DESC],
-    task_status: Annotated[
-        str | None,
-        "Only fill when the observation prompt requests a task verdict. Outcome of the current task — one of 'success' | 'waiting' | 'continue' | 'fail'. "
-        "'success': the task's goal is achieved and the task ends here. "
-        "'continue': the task is NOT over and the agent must keep executing without user input. "
-        "'waiting': stop execution until the user provides information, a choice, confirmation, or an action. "
-        "IF THE ACTOR'S MESSAGE ASKS THE USER FOR ANYTHING — a question, missing information, a choice "
-        "between options, a confirmation, or an action only the user can take — THE ANSWER IS ALWAYS "
-        "'waiting', never 'success', 'continue' or 'fail'. That holds even when the message is polished and "
-        "everything the actor could do alone is done: a turn that ends by handing the floor back is not a "
-        "delivered task. 'waiting' carries no criticism of the actor; it only says the task has not ended. "
-        # 调用时机由 review/judge 模板说明；这里仅描述字段语义。
-        "'fail': the goal cannot be achieved as stated and should NOT be attempted again.",
-    ] = None,
-    task_summary: Annotated[
-        str,
-        "Fill when task_status is 'success' or 'fail', or the observation prompt identifies a closed task: "
-        "a CONCISE process report of the WHOLE task — "
-        "the original goal, achieved result and essential exact values, artifact paths or references; "
-        "include the final known state, relevant locations and findings, verification limits, "
-        "unresolved work, lessons and sub-task results where needed. "
-        "This report must remain useful when the task's conversation and final reply are compressed away. "
-        "Keep it high-signal, NOT a verbose blow-by-blow. This is NOT the final output: the final "
-        "deliverable shown to the user is the actor's closing message text, "
-        "not any tool argument. Leave empty for 'continue' and 'waiting'.",
-    ] = "",
-    task_failure_reason: Annotated[
-        str,
-        "Required when task_status is 'fail'. For 'continue', fill it ONLY when something actually blocked "
-        "or fell short this round — LEAVE IT EMPTY for 'waiting', or when the work "
-        "is merely unfinished. Do not invent a failure in order to fill this field. "
-        "For 'fail': explain specifically what went wrong — which step failed, what error or unexpected "
-        "result was encountered, and the root cause. "
-        "For a genuinely blocked 'continue': state what concretely blocked this attempt; if the attempt limit "
-        "is later hit, this text is what the user sees as the failure reason. Empty for 'success'.",
-    ] = "",
-    next_step_hint: Annotated[
-        str,
-        # 这里只说「这个字段也承载这件事」。**「你不决定下一步」那条职权规则不写在这里**
-        # （2026-09-28 删）：它是 ROLE 的地盘，而 ROLE 已有一份近乎逐字的同款文本——连
-        # `## Your sub-tasks` 这个标题名都两边各存一份。字段描述越界写职权规则，与「ROLE 越界
-        # 写字段契约」是同一个病的两个方向。
-        _NEXT_STEP_HINT_DESC,
-    ] = "",
+    task_status: Annotated[str | None, "Task outcome: success, waiting, continue or fail"] = None,
+    task_summary: Annotated[str, "Whole-task account"] = "",
+    task_failure_reason: Annotated[str, "Failure or blocker details"] = "",
+    next_step_hint: Annotated[str, _NEXT_STEP_HINT_DESC] = "",
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Submit observation data. ObserveStep validates the mode and owns the verdict."""
+    """Submit observation data."""
     metadata = {
         ControlMetaKey.OBSERVER_ACT_RECAP: act_recap,
         ControlMetaKey.OBSERVER_TASK_SUMMARY: task_summary,
@@ -463,22 +379,13 @@ def report_observation(
 
 @control_tool(purposes=["recognize_intent"])
 def update_task_metadata(
-    title: Annotated[str, "Task title (REQUIRED, must be non-empty): ≤20 chars, start with a verb, "
-                          "summarize the user's expressed goal. For a vague request, use generic wording "
-                          "rather than infer a more specific goal."],
-    description: Annotated[str, "Task description (REQUIRED, must be non-empty): ≤80 chars, state the "
-                               "user's requested outcome without adding requirements or expanding scope. "
-                               "Preserve uncertainty when the request is vague."],
-    session_goal: Annotated[
-        str,
-        "Overall session goal: ≤60 chars. Optional. Set it only when the user expresses a clear aim "
-        "and no goal is recorded yet, or clearly changes direction. Leave empty to keep the existing "
-        "goal, including when the aim is unclear.",
-    ] = "",
+    title: Annotated[str, "Task title"],
+    description: Annotated[str, "Task description"],
+    session_goal: Annotated[str, "Overall session goal"] = "",
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Set the current task's title and description (and optionally the session goal). Call exactly once, then stop."""
+    """Set task metadata and the session goal."""
     if ctx is not None and ctx.task is not None:
         # recognize_intent 现直跑在 root task 上：直接写当前 task 的 title/description。
         # 不置 actor_done（会让 root 主 act 循环误判完成；单发步骤本就不读它）。
@@ -498,8 +405,7 @@ _ASK_USER_SCHEMA: dict[str, Any] = {
         "questions": {
             "type": "array",
             "description": (
-                "One or more questions to ask the human. Each is answered independently; "
-                "batch related questions in one call instead of asking one at a time."
+                "Questions presented to the user."
             ),
             "items": {
                 "type": "object",
@@ -511,22 +417,21 @@ _ASK_USER_SCHEMA: dict[str, Any] = {
                     "options": {
                         "type": "array",
                         "description": (
-                            "Predefined choices the human can pick. Omit or leave empty for a "
-                            "free-text-only question; a free-text 'Other' is always offered regardless."
+                            "Predefined answer choices."
                         ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "label": {"type": "string", "description": "Short choice text shown on the button."},
                                 "description": {"type": "string", "description": "What this choice means or its trade-off."},
-                                "recommended": {"type": "boolean", "description": "Set on the option you recommend."},
+                                "recommended": {"type": "boolean", "description": "Recommended choice flag."},
                             },
                             "required": ["label"],
                         },
                     },
                     "multi_select": {
                         "type": "boolean",
-                        "description": "Allow the human to select multiple options.",
+                        "description": "Multiple-choice selection flag.",
                         "default": False,
                     },
                 },
@@ -544,7 +449,7 @@ def ask_user(
     *,
     ctx: ControlContext = None,
 ) -> ControlResult:
-    """Ask the user one or more questions and wait for their reply — call this whenever you need information, a decision, a clarification, or a choice that only the user can provide; prefer asking over guessing or assuming. Execution pauses until they answer, then resumes from their reply."""
+    """Present questions to the user and receive their answers."""
     # 会话展示状态由宿主根据 pending HITL 与 agent/task 状态推导（spec §7.1）。
     # needs_human 的产出与 park 均在 ControlCapabilityProvider._handle() 完成。
     n = len(questions) if questions else 0

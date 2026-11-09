@@ -88,8 +88,8 @@ class SkillResult:
 
 @skill_executor_tool(spillable=False)
 async def list_files(
-    pattern: Annotated[str, "Glob pattern to match files within the skill directory (default '**/*')"] = "**/*",
-    limit: Annotated[int, "Maximum number of results to return (default 200)"] = 200,
+    pattern: Annotated[str, "Skill resource glob pattern"] = "**/*",
+    limit: Annotated[int, "Maximum result count"] = 200,
     *,
     skill_provider: SkillCapabilityProvider,
     skill_name: str,
@@ -103,10 +103,10 @@ async def list_files(
 @skill_executor_tool(spillable=False)
 async def read_file(
     path: Annotated[str, "Relative path to a file within the skill directory"],
-    offset: Annotated[int | None, "1-based line number to start from (default 1)"] = None,
-    limit: Annotated[int | None, "Maximum number of lines to return (default 2000)"] = None,
-    char_offset: Annotated[int | None, "Character offset, for reading the remainder of an over-long line; mutually exclusive with offset/limit"] = None,
-    char_limit: Annotated[int | None, "Maximum number of characters to return in char mode"] = None,
+    offset: Annotated[int | None, "Starting line number"] = None,
+    limit: Annotated[int | None, "Maximum line count"] = None,
+    char_offset: Annotated[int | None, "Starting character offset"] = None,
+    char_limit: Annotated[int | None, "Maximum character count"] = None,
     *,
     skill_provider: SkillCapabilityProvider,
     skill_name: str,
@@ -131,7 +131,7 @@ async def read_file(
 
 @skill_executor_tool
 async def exec_script(
-    command: Annotated[str, "Complete command, including the program and arguments; use the resource-access instructions supplied with the skill"],
+    command: Annotated[str, "Command text"],
     *,
     skill_provider: SkillCapabilityProvider,
     skill_name: str,

@@ -25,9 +25,7 @@
 {% for section in sections %}
 {% set heading, action, noun, noun_plural = vocabulary[section.kind] -%}
 {{ heading }}{% if section.kind == 'tool' %}
-下面按 `name(param: type)` 的形式列出——可选参数标 `?`。完整的描述与参数 schema 随本次请求的工具定义一起下发。{% elif section.kind == 'skill' %}
-任务需要 skill 时，**必须**将下方列出的完整 skill 名称（含前缀）填入 `{{ delegate_task }}` 的 `skill_name` 参数，或 `{{ delegate_plan }}` 的 `tasks` 数组中对应任务项的 `skill_name` 字段。只在 `title` / `description` / `task_prompt` 中提到 skill 不会完成分配；不要在当前任务里内联执行它的逻辑。{% elif section.kind == 'agent' %}
-派发方式：{{ delegate_task }}(use_subagent=True, subagent_template='<name>'){% endif %}{{ capability_items(section.ungrouped, section.kind == 'tool') }}{% for group in section.groups %}
+下面按 `name(param: type)` 的形式列出——可选参数标 `?`。完整的描述与参数 schema 随本次请求的工具定义一起下发。{% endif %}{{ capability_items(section.ungrouped, section.kind == 'tool') }}{% for group in section.groups %}
 
 #### {{ group.name }} {{ noun_plural }}{% if group.description %}
 
@@ -98,11 +96,5 @@ Source: {{ source.metadata.citation }}{% endif %}
 {%- endmacro %}
 
 {% macro compact_fallback() -%}
-你负责把已经发生的执行过程压缩成一份可供后续回合或其他 agent 继续工作的持久记录。尾部指令会规定本次的覆盖范围、输出形状和提交方式；这些操作要求以尾部指令为准，压缩标准则以这里为准。
-
-只根据对话中可见的证据来写：工具调用及其结果、产出的文件与数据、原样返回的错误。区分「尝试过」与「已经达成」、已观察到的事实与未经验证的推断，以及仍然未知的信息；不要把执行者对自身工作的叙述当作证据。不重新执行已发生的工作，也不替执行者作决定。
-
-这份记录会替代它覆盖的原始内容。优先保留用户约束和已经作出的决定及理由，其次是无需重复已完成调查就能继续工作的已知现状：相关对象及其精确位置、已确认的行为和发现及其依据、已排除的解释及原因、已经发生的修改、验证结果和未验证部分。只保留材料中实际出现且继续工作需要的路径、符号名、标识符、命令或参数。记录具体停点、未完成线头与失败原因，以及此前已经明确的下一步及其操作对象；若尚未明确下一步，保留待解决的问题，不自行制定方案。保留当前目标及其细化。
-
-关键结论和动手必需的少量数据应直接写入记录；大块证据的引用用于补充，不能迫使后续回合重新推导已知发现。合并旧摘要时延续仍然有效的现状，用新证据更新变化，移除已被取代的状态；不要把继承的事实当成新进展。先删逐步叙事，再考虑删继续工作所需的信息。遵守尾部指令规定的覆盖范围。
+将可见执行过程整理成可供续作的记录，遵守下方规定的范围和格式。
 {%- endmacro %}

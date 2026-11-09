@@ -3,7 +3,7 @@
 {% macro continuation(ctx) -%}{% if ctx.needs_pointer %}{{ shared.capability_pointer() }}{% endif %}{%- endmacro %}
 
 {% macro boundary(kind) -%}
-{% if kind == "task_switch" %}用户已将旧目标切换为新任务。旧任务不会继续执行，新任务独立运行。{% elif kind in ("actor_done", "finish", "finish_park") %}执行者已给出收尾回复。{% elif kind == "context_limit" %}本段已达到上下文长度上限。{% elif kind == "dispatch" %}执行者派发了子任务；本任务挂起，等待子任务返回。{% elif kind == "interrupt" %}用户在本段执行途中打断了它。{% elif kind == "max_turns" %}本段已达到单段回合上限。{% elif kind == "mechanical" %}此前观察失败，任务已按兜底规则结束。只根据真实执行证据复述。{% elif kind == "plain_text" %}执行者用正文回复后把话语权交回给用户——用户正在等着。{% else %}执行者以收尾消息结束了本段。{% endif %}
+{% if kind == "task_switch" %}用户已将旧目标切换为新任务。旧任务不会继续执行，新任务独立运行。{% elif kind in ("actor_done", "finish", "finish_park") %}执行者已给出收尾回复。{% elif kind == "context_limit" %}本段已达到上下文长度上限。{% elif kind == "dispatch" %}执行者派发了子任务；本任务挂起，等待子任务返回。{% elif kind == "interrupt" %}用户在本段执行途中打断了它。{% elif kind == "max_turns" %}本段已达到单段回合上限。{% elif kind == "mechanical" %}此前观察失败，任务已按兜底规则结束。{% elif kind == "plain_text" %}执行者用正文回复后把话语权交回给用户——用户正在等着。{% else %}执行者以收尾消息结束了本段。{% endif %}
 {%- endmacro %}
 
 {% macro review_context(ctx) -%}
@@ -13,40 +13,36 @@
 
 `act_recap` 的本次覆盖范围：起点取对话中最近一条属于当前任务的 `<task_recap>` 记录与最近一条用户实际输入中较晚的那个，只记录该点之后、直到上面所述本段结束位置之间 actor 新做的工作。框架生成的任务记录和压缩摘要不算用户实际输入。若还没有复述记录，则从开启任务的用户消息或此后最新的用户实际输入之后开始。不要重复起点及其之前的内容；任务继续时，这份复述会作为下一条 user role 的 `<task_recap>` 记录展示。
 
-在此范围内，记录本段新增的认知和状态变化，即使本段只做了调查：已确认的发现及其精确位置、已排除的解释及原因、修改及修改后的状态、验证结果和未验证部分。保留具体停点、未解决的问题，以及此前已经明确的下一步及其操作对象。区分已观察到的事实与未经验证的推断，不自行编造下一步。关键结论和必要数值直接写入 `act_recap`，用证据引用补充细节，使下一轮无需重复本段调查就能接着做。篇幅与工作量相称，不要写成工具调用清单，也不要重复更早的复述。
-
 这些标记只用于定位原文范围，不属于复述内容。`act_recap` 里不要输出 `<task_recap>` 标签，不要提及用户消息边界、范围从哪里开始或到哪里结束，也不要解释自己正在做总结；直接写复述结果。{% if ctx.final_output %}
 
 {{ final_output_heading }}
 
 {{ ctx.final_output }}
 
-（以上是执行者提交的最终结果——它是本段产出了什么的唯一权威证据，而且它**不属于**上文对话的一部分。请据它如实概括本段；不要虚构没有真正发生过的工具调用、步骤或产物。）{% endif %}
+（以上是执行者提交的最终结果——它与上文召回的对话分开提供。请将其纳入本次复核，按上方原则处理。）{% endif %}
 {%- endmacro %}
 
 {% macro judge(ctx) -%}
-{% if ctx.terminal_only %}{% if ctx.switch_reason %}Reason for goal replacement: {{ ctx.switch_reason }}
-{% endif %}只评估旧任务原有目标：已达成返回 success，未达成返回 fail，绝不能返回 continue 或 waiting。失败时在 task_failure_reason 中说明未完成内容及用户切换目标的背景；task_summary 记录已完成和剩余工作，next_step_hint 留空。根据真实执行证据判定；本次切换判定不要求旧任务另有最终答复。{% endif %}
-{% if ctx.plain_text_yielded %}
+{% if ctx.terminal_only %}{% if ctx.switch_reason %}目标替换原因：{{ ctx.switch_reason }}
+{% endif %}本次为终态复核：只评估旧目标；`task_status` 只能填 `success` 或 `fail`。旧任务不会继续执行。本次切换复核不要求另有最终答复。失败时在 `task_failure_reason` 中说明目标切换背景。`next_step_hint` 留空。
+{% elif ctx.boundary_kind == "max_turns" %}本段{% if ctx.act_turns %}已执行 {{ ctx.act_turns }} 轮并{% endif %}达到回合上限。本次 `task_status` 只能填 `continue` 或 `fail`，不得填 `waiting` 或 `success`。
+{% else %}`task_status` 可填 `success`、`waiting`、`continue` 或 `fail`。
+{% endif %}
+{% if ctx.evaluation_role %}按上方评价原则选择本次允许的裁决。{% else %}根据任务目标和可见执行结果选择本次允许的状态。{% endif %}`success` 表示目标达成并关闭任务；`fail` 表示目标不可达并关闭任务；`continue` 表示无需用户输入即可继续执行；`waiting` 表示暂停等待用户答复。
 
-只要那段消息在向用户要任何东西，任务就没有结束：判 `waiting`——决不判 `success`、`continue` 或 `fail`。{% endif %}{% if ctx.finish_park_yielded %}
+调用 `{{ report_observation }}` 恰好一次，不调用其他工具：
+- `task_status` 与 `act_recap` 必填。`act_recap` 按上文的本段覆盖范围，以第一人称、依照总结原则填写。
+- `task_summary`：`success` 或 `fail` 时按总结原则填写整个任务的记述；`continue` 或 `waiting` 时留空。
+- `task_failure_reason`：`fail` 时必填；`continue` 时仅在本次尝试被阻塞或未达标时填写。包含失败步骤、返回的错误或意外结果及原因。`success`、`waiting` 或仅仅尚未完成工作时留空。
+- `next_step_hint`：填写复核发现的缺口或阻塞；没有则留空{% if ctx.terminal_only %}，本次终态复核始终留空{% endif %}。
+交付给用户的最终结果是执行者的正文回复，不是这些工具参数。{% if ctx.subtasks %}
 
-一段仍在向用户要东西的收尾消息，不是一个已完成的任务：判 `waiting`——决不判 `success`、`continue` 或 `fail`。{% endif %}
-
-`continue` 表示 agent 无需用户输入即可继续执行；`waiting` 表示必须停下来等用户。
-
-{% if ctx.boundary_kind == "max_turns" %}本段{% if ctx.act_turns %}已经执行了 {{ ctx.act_turns }} 轮，{% endif %}已达到单段回合上限。根据已完成的工作、剩余目标及真实执行证据，判断这个任务是否仍在你的能力范围内：若明确无法完成，填 `fail` 并在 `task_failure_reason` 中说明具体能力限制；否则填 `continue`，继续执行。达到回合上限本身不是失败原因。不得填 `waiting` 或 `success`。如实复述本段工作，然后调用 `{{ report_observation }}` 恰好一次——不要调别的工具。{% else %}根据任务目标和真实执行证据，结合上方提供的评价原则，判断这个任务是否完成，然后调用 `{{ report_observation }}` 恰好一次——不要调别的工具。不必反复权衡：画面清楚了就调。{% endif %}
-
-`task_status` 与 `act_recap` 恒为必填；其余字段按工具上各自写明的条件填。填写 `task_summary` 时保留原始目标、实际结果、关键精确数值或产物引用，以及最终已知现状：相关位置、发现、验证局限和未完成工作。合并此前复述中仍然有效的发现，更新已被取代的状态；胶囊降为最小形态后，这份总结需要独立承载整个任务。{% if ctx.subtasks %}
-
-{{ subtasks_heading }}（它们的结果在上文对话里；若需要在 `next_step_hint` 里点出某一个，请用它完整的 task_id）：
+{{ subtasks_heading }}（结果在上文对话里；在 `next_step_hint` 中指明不合格结果时，使用此处完整的标题和 task_id）：
 {{ shared.subtasks(ctx.subtasks) }}{% endif %}
 {%- endmacro %}
 
 {% macro recap(ctx) -%}
-记录发生了什么：调用 `{{ report_observation }}` 恰好一次——不要调别的工具。
-
-填写 `act_recap`。{% if ctx.closed %} 同时填写 `task_summary`，保留整个任务的目标、实际结果、关键精确数值或产物引用，以及最终已知现状：相关位置、发现、验证局限和未完成工作。合并此前复述中仍然有效的发现，更新已被取代的状态，使这份报告能够独立作为最小任务胶囊。{% endif %} 不要填写任务判决、失败原因或下一轮提示字段。
+调用 `{{ report_observation }}` 恰好一次，不调用其他工具。`act_recap` 按上文的本段覆盖范围，以第一人称、依照总结原则填写。{% if ctx.closed %} 同时按这些原则用 `task_summary` 记录整个任务。{% endif %} 不填写 `task_status`、`task_failure_reason` 或 `next_step_hint`。
 {%- endmacro %}
 
 {% macro body(ctx) -%}

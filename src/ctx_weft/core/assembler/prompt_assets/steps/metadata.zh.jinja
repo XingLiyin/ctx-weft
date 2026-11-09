@@ -7,7 +7,7 @@
 
 ---
 
-{% endif %}现在为这个任务设定元数据：调用 `{{ update_task_metadata }}` 恰好一次。`title` 与 `description` 两项**必填且不得为空**。只概括用户已表达的诉求，不增加要求或扩大范围。诉求含糊时使用概括性措辞，保留不确定性。只有在方向已经明确时才补 `session_goal`（它是唯一可留空的字段）。然后就停下，不要再调别的工具。
+{% endif %}调用 `{{ update_task_metadata }}` 恰好一次，然后停下，不调用其他工具，也不输出正文。{% if ctx.role %}按上方命名原则填写；{% endif %}填写非空的 `title`（至多 20 字符）和 `description`（至多 80 字符）。`session_goal` 可选（至多 60 字符）：填写则更新目标；留空则保留现有目标。
 {%- endmacro %}
 
 {% include "steps/_assemble.jinja" %}

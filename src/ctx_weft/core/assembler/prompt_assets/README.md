@@ -12,6 +12,28 @@ This directory has two surfaces only:
 Python collectors and `PromptBuilder` pass structured facts. They must not render
 headings, sections, or prompt fragments before invoking a purpose template.
 
+## Responsibility boundary / 职责边界
+
+- Jinja owns tool invocation, parameter-filling rules, per-call scope and output
+  structure. Actor tool instructions are required prompt content and are emitted
+  only for tools in the collected capability snapshot, including on the first turn.
+- Markdown identity facets own business judgement and quality: SOUL covers work
+  and delegation choices; ROLE covers evaluation; COMPACT covers information
+  retention and continuation quality; METADATA covers naming and goal judgement.
+- Tool schemas retain names, types, defaults, structural requirements and short
+  data meanings. They do not repeat invocation tutorials or quality policies.
+- Skill provider catalog descriptions intentionally retain assignment and resource
+  usage guidance to prevent inaccurate skill calls. Keep that guidance consistent
+  with supported tools; do not restore it in the generic capability-list wrapper.
+
+Jinja 负责工具调用、参数填写、本次范围和输出结构；MD 负责业务判断和质量原则。
+schema 只保留结构与简短字段语义。skill provider 的组描述是明确保留的用法说明例外。
+
+Custom Markdown policies replace the corresponding policy, rather than being
+followed by a hard-coded copy. With no COMPACT facet, Jinja supplies only a minimal
+generic record/continuation instruction. The five digest headings and optional
+Evidence section remain an output protocol owned by `compact.*.jinja`.
+
 `sources/_history.py::history_facts()` retains every candidate record and describes
 task ownership, closure completeness, reply-source validity, ancestry and logical
 ordering. It does not select a visible view or construct replacement messages.
