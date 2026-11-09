@@ -21,6 +21,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -33,7 +34,7 @@ from ctx_weft.core.utils.content import (
     redact_content_for_event,
     split_for_tool_result,
 )
-from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.protocols.events import EventOrigin, EventType, PersistenceUnavailableError
 from ctx_weft.protocols.events import EventBus
 from ctx_weft.core.hitl.registry import (
     HITL_STAGE_AUTHZ, HITL_STAGE_RERUN, HITL_STAGE_TOOL)
@@ -344,6 +345,37 @@ async def ingest_tool_result(
     return record_id
 
 
+@dataclass
+class _PendingToolResult:
+    session_id: str
+    finished: Any
+    result: InvocationResult
+    bus: Any
+    write: Any
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    committed: bool = False
+    done: bool = False
+
+
+async def _finish_tool_result(pending, entries, key):
+    async with pending.lock:
+        if not pending.done:
+            if not pending.committed:
+                await pending.bus.emit(pending.finished)
+                pending.committed = True
+            pending.result.memory_id = await pending.write()
+            pending.done = True
+            if entries.get(key) is pending:
+                entries.pop(key)
+        return pending.result.memory_id
+
+
+async def confirm_tool_results(entries, session_id):
+    for key, pending in list(entries.items()):
+        if pending.session_id == session_id:
+            await _finish_tool_result(pending, entries, key)
+
+
 class CapabilityGateway:
     """统一 capability 调用入口：授权 → 脱敏 → 执行 → 审计 → memory。"""
 
@@ -360,8 +392,16 @@ class CapabilityGateway:
         spill_preview_chars: int = 1000,
         spill_tail_chars: int = 1000,
         memory_blob_store: "MemoryBlobStore | None" = None,
+        pending_results: dict | None = None,
+        wait_storage: Any = None,
+        unstarted_tools: dict | None = None,
+        interrupted_tools: set | None = None,
     ) -> None:
         self._cache = capability_cache
+        self._pending_results = pending_results if pending_results is not None else {}
+        self._wait_storage = wait_storage
+        self._unstarted_tools = unstarted_tools if unstarted_tools is not None else {}
+        self._interrupted_tools = interrupted_tools if interrupted_tools is not None else set()
         self._providers = capability_providers
         self._provider_index: dict[str, ToolCapabilityProvider] = {
             p.name: p for p in capability_providers
@@ -410,7 +450,17 @@ class CapabilityGateway:
         tool_call_id：发起本次调用的 LLM tool_call id（spec/06 §5），透传给派发工具用于委派回填。
         编排：解析 → 授权 → 脱敏 → 执行(流式) → 记录；各步细节见私有 helper。
         """
-        invocation_id = generate_id("inv")
+        pending_key = (state.session.id, tool_call_id)
+        pending = self._pending_results.get(pending_key) if tool_call_id else None
+        if pending is not None:
+            await _finish_tool_result(pending, self._pending_results, pending_key)
+            return pending.result
+        if self._wait_storage is not None:
+            await self._wait_storage(state.session.id)
+            if ctx.cancel_token is not None:
+                ctx.cancel_token.raise_if_cancelled()
+        unstarted = self._unstarted_tools.get(pending_key) if tool_call_id else None
+        invocation_id = unstarted or generate_id("inv")
         is_dispatch = tool_name in DISPATCH_TOOLS
         is_silent = tool_name in SILENT_TOOLS  # 不入 task 对话的编排/裁决工具
         # spec: tool-operations——账本键即本次调用的**内部 tool_call 标识**：摄入点铸造
@@ -477,6 +527,17 @@ class CapabilityGateway:
         # `side_effects=False`），正确动作是**重跑而非重放**，所以这里放它落下去。
         # 例外：结果就是人的答复（`HitlRegistry.result_is_human_reply`，即 `ask_user`）——恒按
         # HITL 决定重新生成，不重放事件里那份（可能是人重答之前的旧答复，且是脱敏截断版）。
+        if facts is not None and facts.finished and not (
+                ctx.hitl is not None and ctx.hitl.registry.result_is_human_reply(
+                    ctx.provider_ctx.session_id, tool_call_id)):
+            record_id = tool_result_record_id(tool_call_id)
+            records = await self._memory.read_records([record_id], ctx.provider_ctx) if record_id else []
+            if records:
+                record = records[0]
+                return InvocationResult(invocation_id=invocation_id, tool_name=tool_name,
+                    content=record.content, is_error=bool(record.metadata.get("is_error")),
+                    memory_id=record_id)
+
         if facts is not None and facts.finished and facts.result is not None \
                 and not facts.truncated and not (
                     ctx.hitl is not None and ctx.hitl.registry.result_is_human_reply(
@@ -488,9 +549,10 @@ class CapabilityGateway:
                 invocation_id=invocation_id, tool_name=tool_name,
                 content=facts.result, is_error=(facts.outcome == "error"))
 
-        if facts is not None and facts.invoked and not facts.finished:
+        if facts is not None and facts.invoked and not facts.finished and not unstarted:
             if normalize_recovery_policy(
-                    getattr(cap, "recovery_policy", None)) is RecoveryPolicy.IDEMPOTENT:
+                    getattr(cap, "recovery_policy", None)) is RecoveryPolicy.IDEMPOTENT \
+                    and pending_key not in self._interrupted_tools:
                 logger.info(
                     "CapabilityGateway: %s is idempotent — rerunning %s without review",
                     tool_name, ledger_key)
@@ -643,7 +705,10 @@ class CapabilityGateway:
             await commit_round(state, ctx)
 
         # 6. 记录 invocation（事件 + TOOL_INVOCATION / delegate conversation turn 入 memory）——审计通道
-        await self._record_invocation(state, ctx, tool_name, cap, invocation_id, audit_args, is_dispatch, is_silent, tool_call_id)
+        if tool_call_id:
+            self._unstarted_tools[pending_key] = invocation_id
+        await self._record_invocation(state, ctx, tool_name, cap, invocation_id, audit_args,
+            is_dispatch, is_silent, tool_call_id, already_recorded=bool(unstarted and facts and facts.invoked))
 
         # 6. 执行（流式）——执行通道：effective_args（未脱敏）。透传 invocation_id（provider 据此
         # 登记在途句柄，供 cancel 对应）与 tool_call_id（控制工具据此把 origin_tool_call_id 写到 child）。
@@ -656,9 +721,20 @@ class CapabilityGateway:
         # 执行期异常不在这里补任何「结束」事件：`CapabilityInvoked` 已发而
         # `CapabilityFinished` 未发，**正是**「副作用可能已发生、结果不可判定」这个
         # 事实本身。补一条就等于替恢复策略下结论。
-        streamed = await self._stream_tool(
-            provider, cap.id, effective_args, provider_ctx, state, invocation_id,
-        )
+        if self._wait_storage is not None:
+            await self._wait_storage(state.session.id)
+            if ctx.cancel_token is not None:
+                ctx.cancel_token.raise_if_cancelled()
+        self._unstarted_tools.pop(pending_key, None)
+        try:
+            streamed = await self._stream_tool(
+                provider, cap.id, effective_args, provider_ctx, state, invocation_id,
+            )
+        except PersistenceUnavailableError:
+            # Even an idempotent provider must not be repeated merely because
+            # its progress event could not persist. Reentry requires verification.
+            self._interrupted_tools.add(pending_key)
+            raise
 
         # 6b. provider 让出了 needs_human：流已停在此处（其后 yield 的事件从未被消费，见
         # `_stream_events`）。等待权归 gateway——provider 只**声明**需要人。
@@ -793,17 +869,19 @@ class CapabilityGateway:
 
     async def _record_invocation(
         self, state, ctx, tool_name, cap, invocation_id, sanitized, is_dispatch, is_silent, tool_call_id,
+        *, already_recorded=False,
     ) -> None:
         """发 CapabilityInvoked + ingest（派发→agent 层 delegate conversation turn；
         普通→task 层 TOOL_INVOCATION；SILENT 普通工具不入对话）。"""
         from ctx_weft.core.loop.driver import make_event
-        await self._event_bus.emit(make_event(state, EventType.CAPABILITY_INVOKED, payload={
-            "invocation_id": invocation_id,
-            "capability_name": tool_name,
-            "capability_id": cap.id,
-            "arguments": sanitized,
-            "tool_call_id": tool_call_id,
-        }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY))
+        if not already_recorded:
+            await self._event_bus.emit(make_event(state, EventType.CAPABILITY_INVOKED, payload={
+                "invocation_id": invocation_id,
+                "capability_name": tool_name,
+                "capability_id": cap.id,
+                "arguments": sanitized,
+                "tool_call_id": tool_call_id,
+            }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY))
         # 授权类决定到此花掉：审批的作用是放行**这一次**调用，`CapabilityInvoked` 落库就是
         # 「门已经过了」。留着它等结果，等于让一份用过的批准在冷重入时还能开门（`:507` 的重跑
         # 分支之后紧接着就是 `:524` 的授权步，而决定缓存第四维 `invocation_key` 跨重启逐字节
@@ -892,6 +970,8 @@ class CapabilityGateway:
             with contextlib.suppress(Exception):
                 await provider.cancel(invocation_id, provider_ctx)
             raise
+        except PersistenceUnavailableError:
+            raise  # Storage isolation is not an ordinary provider/tool error.
         except Exception as exc:
             logger.exception("CapabilityGateway: invoke failed for invocation %s", invocation_id)
             return _ToolStream(texts=[f"[Exception: {exc}]"], is_error=True)
@@ -969,7 +1049,7 @@ class CapabilityGateway:
         # base64 会随 repr 泄漏进事件库。`redact_content_for_event` 对 str 输入返回同一对象，
         # 纯文本路径逐字节不变。
         redacted = redact_content_for_event(content)
-        await self._event_bus.emit(make_event(state, EventType.CAPABILITY_FINISHED, payload={
+        finished = make_event(state, EventType.CAPABILITY_FINISHED, payload={
             "invocation_id": invocation_id,
             "capability_name": tool_name,
             "arguments": sanitized,
@@ -977,7 +1057,20 @@ class CapabilityGateway:
             "result": redacted[:8000],
             "result_length": len(redacted),
             "tool_call_id": tool_call_id,
-        }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY))
+        }, origin=EventOrigin.LOOP_CAPABILITY_GATEWAY)
+        key = (state.session.id, tool_call_id or invocation_id)
+        frozen_content = deepcopy(content)
+        async def write():
+            return await self._write_result_memory(state, ctx, tool_name, invocation_id,
+                deepcopy(frozen_content), is_error, is_dispatch, is_silent, tool_call_id)
+        pending = self._pending_results.setdefault(key, _PendingToolResult(
+            state.session.id, finished, InvocationResult(invocation_id=invocation_id,
+                tool_name=tool_name, content=deepcopy(content), is_error=is_error),
+            self._event_bus, write))
+        return await _finish_tool_result(pending, self._pending_results, key)
+
+    async def _write_result_memory(self, state, ctx, tool_name, invocation_id,
+                                   content, is_error, is_dispatch, is_silent, tool_call_id):
         memory_id = None
         if is_dispatch and tool_name in _PLAN_DISPATCH_TOOLS:
             # envelope: 给 `_record_invocation` eager 写的 plan 框补配对 ack，避免该框
@@ -989,6 +1082,7 @@ class CapabilityGateway:
             # 也好过一句假的「Plan created」。
             memory_id = await self._memory.ingest(
                 MemoryEvent(
+                    id=tool_result_record_id(tool_call_id) or f"result_{invocation_id}",
                     kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.AGENT,
                     address=_tool_scope(state),
                     content=content,

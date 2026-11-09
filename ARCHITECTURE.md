@@ -472,9 +472,21 @@ v2 里「子任务结果怎么到父」有三条，全部落在 memory、由 `Ag
 
 ### 取消 / 暂停
 
+`TaskFinalized` 发布使用 TaskManager 的临时写入保护，不跨提交等待持有任务锁。保护期间拒收新的暂停、取消请求；任务树取消须在 agent 终止回调及祖先取消标记写入前仲裁，会话级请求整次跳过且不设置闩锁。写入完成或抛错均立即解除保护，不保留待处理信号，也不影响下一轮令牌。
+
+`cancel_session` 在关闭派发时完成取消入场。后续等待元数据期间即使开始写 `TaskFinalized`，该请求的内部收尾也会在任务锁外等写入结束，再完成 agent 终止和任务取消；取锁后再次核对写入保护。入场状态只作为该次调用的内部参数传递，新来的公开暂停、取消请求仍立即忽略。会话取消后到达的新后台判决不再被接受；已经接受的判决写入结束后仍须完成原取消收尾。
+
+`pause_agent`、`pause_session`、`cancel_session` 的命令装饰器在初始化前、会话锁等待前检查保护；命令体保留锁后的二次检查。定向暂停按目标 agent 当前任务判断，不能因同会话其他任务收尾而跳过。
+
 `cancel_session`（`:906`：先取消 HITL → `cancel_all` 清队 → 逐 agent `cancel_agent` 转 terminated）；`cancel_agent`（`:965`）；`pause_session`（`:828`）/ `pause_agent`（`:1111`）/ `resume_agent`（`:1157`）。取消经 RunTokens 广播到该 session 全部在途 run（§7）；统一取消胶囊闭合 `synthesize_cancel_closure`（`core/loop/steps/finalize.py:569`）。
 
 `cancel_agent(agent_id)` 通过 AgentManager 仅持久化指定 agent 的 `AgentTerminated` 状态，再由 TaskManager 选择当前实际任务并取消任务子树，包括由其他 agent 执行的后代 task；不沿 agent 血缘终止子 agent，也不扫描 agent 归属来取消无关任务。运行任务保持 `RunFinished → TaskCanceled → TaskFinalized`。恢复复用 agent 终态和任务生命周期事实，采用相同的 task 子树取消范围，不新增终止意图或独立取消账。
+
+`switch_task` 与取消共享 TaskManager 仲裁锁：取消先接受则旧任务落 CANCELED，丢弃暂存的新目标；切换先确认提交则一次发布整个替换分支，排队的 `cancel_agent` 在锁内重选同 agent 的新任务。切换在发出提交通知前释放锁，允许订阅者直接取消；确认或通知失败时复用原事件与状态发布回调。旧任务取消的 `TaskFinalized` 和记忆收尾完成后、会话等待后台作业前，唤醒切换 observe，使其闭合生命周期。
+
+`cancel_session` 先关闭派发，切换仲裁在提交新事务前同时检查会话取消状态和任务树取消标记；后续普通清队保留已接受的 agent 取消标记。切换尚未提交时不创建替代任务；切换已进入原事务提交时先确认该事务，再按会话取消范围终结旧任务与替代任务，热恢复和冷恢复均沿用这些终态。
+
+切换期间的 `pause_session` 保留已提交替代任务的入队交接，不按普通暂存子任务丢弃。旧 root run 的暂停续跑名额在释放槽位前交还，替代 root run 按既有出生信号停出唯一暂停气泡；非 root 替代任务按既有规则取消。清理排队任务时，已被替换的旧 run 不再占用 root 续跑名额，保证替代任务已经入队时也能正常暂停和恢复。
 
 TaskManager 用实际调度协程句柄判断执行是否仍存活，调度占位不等于活跃 run。装配前后和注册 run 令牌后均检查已有的任务树取消标记；装配结束时已取消的任务不调用 actor。`TaskCanceled` 确认提交后才更新内存终态；重试通过现有控制投影（有效快照加事件增量）核对提交事实，复用已提交的取消时间，并按 `TaskFinalized` 跳过已完成的副作用。取消记忆与 HITL 收尾完成后唤醒 observe，让其重读持久化事实，因此确认丢失时无需重复发取消事件。
 
@@ -498,4 +510,6 @@ TaskManager 用实际调度协程句柄判断执行是否仍存活，调度占�
 - **提交门与通知分离（spec: event-commit，change reliability-wp3）**：`event_commit_policy="required"`（默认，RuntimeConfig）下，`CtxWeftRuntime` 构造期把 `CommitGate`（`core/events/commit_gate.py`）经 `EventBus.attach_commit_gate` 接进 emit 路径——**先确认提交（WP2 的 append_batch）、再 fanout**；窗口外单事件走单事件批（batch_id=event.id），未提交窗口在 `commit_provisional` 时**整批一次**提交（round batch_id，失败缓冲保留、同 id 重试恰好一次）。`subscribe(..., required=True)` 的必要消费者（ALM/SessionRegistry）异常穿出 emit、推测态照看；观察者（stream 订阅者）队列溢出的丢弃以 `EventsDropped` 元事件通报（transient、payload 带 position，可按 `read_range` 补读）。派生事件经 contextvar 继承窗口归属，不逃逸。存储失败：会话标记 `storage_unavailable`（`runtime.storage_health()` 可查）+ `PersistenceUnavailableError` 显式抛出（`wait_for_finish` 轮询健康、TM 三处前置分支停推进不发终态事件）；`best_effort` 显式退回旧 `attach_persistence` 路径（吞错 + 启动告警）。微基准：required 单事件提交路径较旧 persister 路径 -20%（in-memory）。
 - **「事件流即单一事实源」的两个限定**：① 未提交窗口——夭折轮（RoundDiscarded）的事件被 discard，不进日志；② TRANSIENT 集合跳过持久化。除这两点外没有旁路状态。
 - **执行时长/轮数限制**：core **不做**。任务级 deadline、actor 轮数上限、provider 超时都是宿主策略——宿主自己计时并调 `cancel_task` / `cancel_agent`，provider 级超时由 provider 的工具实现自理。三个从未被执行的旧字段（`max_turns_per_agent` / `timeout_per_step_sec` / `Task.timeout_ms`）已删除（声明了限制却无运行时消费者）。`max_turns_per_act` / `max_turns_per_observe` / `context_limit` / LLM 自愈预算等既有的**真正生效**的上限不受影响。
+- **Observe 无进展保护**：`RuntimeConfig.observe_llm_idle_timeout_sec` 默认 300 秒，必须是有限正数。ObserveStep 在单次 LLM 流外设闲置计时，文本、思考或工具参数分片刷新，SSE 心跳和空 chunk 不刷新；覆盖隐藏重试，但不限制持续有效输出的总时长。超时关闭流后沿用观察失败的降级规则，仅报告模式保留 raw、补齐 Completed/Applied 并释放 observe 锁。前台纯报告恢复由 ObserveStep 自己持锁，runtime 不重复获取，也不为它占用 actor 派发槽。
+- **前台 observe 停止交接**：判决与 retry 段折共享可取消执行入口，停止后等待事务清理；Completed 提交后以及 finalize 入口再次检查。暂停复用已经持久化的 Completed，将旧 Applied 与新 HitlOpened 原子提交，不重排旧 continue；取消结局携带 observe_id，由 TaskManager 在 TaskCanceled 与记忆/HITL 收尾后发 Applied。持久化失败优先传播，避免停止交接掩盖原始提交故障。
 - **有序提交（spec: event-log，change reliability-wp2）**：`EventStore`（`protocols/events.py`）的**必需**方法——并入协议本体，不另立 `OrderedEventStore` 平行协议、也不是可选扩展。两层强制：三者均为 `@abstractmethod`（显式继承的实现由 ABC 在实例化时拦下），Runtime 构造期再以 `supports_ordered_commit(store)` 校验一道（拦鸭子类型 store；`hasattr` 会把只继承抽象桩的 store 误判为已实现，故不可代替）。恢复路径**没有**按 ID 排序的回落分支——按 ID 排序的 store 不是「功能少一点」，而是恢复语义错误。两个 store 实现（in_memory / sql）提供 `append_batch`（原子批次 + batch_id 幂等，`EventConflictError` 拒绝异内容重放）、`read_range(after, through)` 与 `committed_head`——`position` 是存储层在提交时分配的位置（同会话唯一递增，与 ULID 铸造序无关）。SQL 侧经会话 head 行同事务原子 UPDATE 串行化分配（`event_session_head` / `event_batches` 两张新表，禁无锁 MAX+1）；`append` 改道单事件批次（batch_id=event.id），既有调用方零改动；`read_by_session` / `read_session_events_of_types` 按 position 序（存量 NULL 行排前按 id 序），按事件 ID 取增量的 `read_after` 已删除。提交门（WP3）与快照 position 截断（WP4）建在这套地基上、**均已启用**；存量库回填走 `scripts/migrate_event_positions.py`（默认 dry-run；分配的是 (session_id, event.id) 确定性顺序，非历史提交顺序）。

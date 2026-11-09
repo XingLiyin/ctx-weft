@@ -928,6 +928,7 @@ async def _cold_park(
     state: LoopState, ctx: LoopContext, preface: str, *, unattended: bool,
     observe_boundary: str | None = None, await_user_turn: int | None = None,
     preceding_events: tuple = (),
+    replace_user_turn_id: str = "",
 ) -> None:
     """起 wait_for_user 冷 park：登记 HITL 请求 + 抛 HitlPark（task 落 AWAITING_HUMAN
     由 TaskManager 据 RunOutcome 定）。
@@ -969,6 +970,7 @@ async def _cold_park(
         tenant_id=state.session.tenant_id,
         observe_request=observe_request,
         **({"preceding_events": preceding_events} if preceding_events else {}),
+        **({"replace_user_turn_id": replace_user_turn_id} if replace_user_turn_id else {}),
     )
     if await_user_turn is not None:
         await ctx.event_bus.emit(make_event(state, EventType.ACT_TURN_COMPLETED, payload={
@@ -983,6 +985,7 @@ async def _cold_park(
 
 async def _park_for_interrupt(
     state: LoopState, ctx: LoopContext, *, edit: bool = False, preceding_events: tuple = (),
+    replace_user_turn_id: str = "",
 ) -> None:
     """人按了暂停键 → park 等他续接。**对无人值守守卫豁免**（`unattended=False`）。
 
@@ -997,7 +1000,7 @@ async def _park_for_interrupt(
     preface = PREFACE_AFTER_INTERRUPT_EDIT if edit else PREFACE_AFTER_INTERRUPT
     await _cold_park(state, ctx, preface, unattended=False,
                      observe_boundary="interrupt",
-                     preceding_events=preceding_events)
+                     preceding_events=preceding_events, replace_user_turn_id=replace_user_turn_id)
 
 
 async def _park_await_user(

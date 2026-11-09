@@ -641,6 +641,10 @@ class FinalizeStep(Step):
     name = "finalize"
 
     async def execute(self, state: LoopState, ctx: LoopContext) -> StepOutcome:
+        # Stop signals can arrive while the driver publishes observe's outcome
+        # events, after the fold has returned but before this step starts.
+        from ctx_weft.core.loop.steps.observe import foreground_stop_checkpoint
+        await foreground_stop_checkpoint(state, ctx)
         task = state.task
         verdict = state.verdict
         outcome = verdict.task_outcome if verdict else VERDICT_CONTINUE

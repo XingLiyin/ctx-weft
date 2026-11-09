@@ -307,6 +307,63 @@ async def test_foreground_failure_keeps_existing_step_events(fake_state_ctx):
     assert ctx.event_bus.emitted[-1].payload["error_code"] == "RuntimeError"
 
 
+@pytest.mark.parametrize("receipt_lost", [False, True])
+@pytest.mark.parametrize("storage_still_down", [False, True])
+async def test_storage_failure_does_not_submit_step_failed(
+    fake_state_ctx, receipt_lost, storage_still_down,
+):
+    from ctx_weft.core.events.commit_gate import CommitGate
+    from ctx_weft.protocols.events import PersistenceUnavailableError
+    from ctx_weft.providers.events import InMemoryEventStore, InProcessEventBus
+
+    state, ctx = fake_state_ctx
+    store = InMemoryEventStore()
+    bus = InProcessEventBus()
+    isolated = []
+    bus.attach_commit_gate(CommitGate(
+        store, on_unavailable=lambda sid, exc: isolated.append((sid, exc))))
+    ctx.event_bus = bus
+    original = store.append_batch
+    cause = OSError("original commit confirmation unavailable")
+    attempts = []
+    failed = False
+
+    async def append(sid, bid, events):
+        nonlocal failed
+        attempts.extend(e.type for e in events)
+        if any(e.type == EventType.LLM_PROMPT_SENT for e in events):
+            failed = True
+            if receipt_lost:
+                await original(sid, bid, events)
+            raise cause
+        if failed and storage_still_down:
+            raise OSError("secondary commit failure must not mask original")
+        return await original(sid, bid, events)
+
+    store.append_batch = append
+    notified = []
+
+    async def collect(event):
+        notified.append(event)
+
+    bus.subscribe(None, collect)
+
+    async def execute(current, local_ctx):
+        await local_ctx.event_bus.emit(make_event(current, EventType.LLM_PROMPT_SENT, {}))
+        return StepOutcome(None)
+
+    driver = StepDriver({"act": NS(name="act", execute=execute)})
+    with pytest.raises(PersistenceUnavailableError) as raised:
+        await driver.execute("act", state, ctx)
+    assert raised.value.__cause__ is cause
+    assert isolated == [(state.session.id, cause)]
+    assert attempts == [EventType.STEP_STARTED, EventType.LLM_PROMPT_SENT]
+    assert [event.type for event in notified] == [EventType.STEP_STARTED]
+    stored = await store.read_range(state.session.id)
+    assert [row.event.type for row in stored] == [EventType.STEP_STARTED] + (
+        [EventType.LLM_PROMPT_SENT] if receipt_lost else [])
+
+
 async def test_guard_survives_cancelled_waiter_and_cleans_up():
     registry = ExecutionRegistry()
     entered = []
