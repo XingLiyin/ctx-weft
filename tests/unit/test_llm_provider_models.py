@@ -128,7 +128,7 @@ async def test_verify_model_returns_latency_and_uses_configured_model(monkeypatc
     assert len(fake.calls) == 1
     req = fake.calls[0]
     assert req.model == "claude-opus-4-8"
-    assert req.max_tokens > 1  # 显式不用 1：避开个别推理模型对极小 max_tokens 的拒绝
+    assert req.config.max_tokens > 1  # 显式不用 1：避开个别推理模型对极小 max_tokens 的拒绝
 
 
 async def test_verify_model_bad_model_raises(monkeypatch):

@@ -7,6 +7,7 @@ RunStateView.sessions / .tasks 包含完整的 Session/Task 投影。
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -404,6 +405,7 @@ def serialize_view(view: RunStateView) -> dict[str, Any]:
                 "template_id": a.template_id,
                 "llm_account": a.llm_account,
                 "llm_model": a.llm_model,
+                "llm_config": deepcopy(a.llm_config),
                 "status": a.status,
                 "status_reason": a.status_reason,
                 "current_task_id": a.current_task_id,
@@ -482,6 +484,7 @@ def deserialize_view(data: dict[str, Any]) -> RunStateView:
             # 同上：旧快照无模型选择 → 空 ModelChoice，回落账号默认。
             llm_account=a.get("llm_account", ""),
             llm_model=a.get("llm_model", ""),
+            llm_config=deepcopy(a.get("llm_config")),
             # 旧快照无该键 → 回落默认值 "idle"/None，与其余字段同口径（零数据迁移）。
             status=a.get("status", "idle"),
             status_reason=a.get("status_reason", ""),
@@ -1149,6 +1152,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
         tmpl = p.get("template_id", "")
         if tmpl:
             _agent_slot(view, ev.agent_id).template_id = tmpl
+        _agent_slot(view, ev.agent_id).llm_config = deepcopy(p.get("llm_config"))
         # 同一事件里的初始模型选择——空值不覆盖，与 template_id 同口径。
         account = p.get("llm_account", "")
         if account:
@@ -1163,6 +1167,7 @@ def _apply(view: RunStateView, ev: Event) -> None:
         slot = _agent_slot(view, ev.agent_id)
         slot.llm_account = p.get("llm_account", "")
         slot.llm_model = p.get("llm_model", "")
+        slot.llm_config = deepcopy(p.get("llm_config"))
 
     elif t in _AGENT_STATUS_BY_EVENT and ev.agent_id:
         # terminated 粘滞：一旦进入终态就不再被迟到事件改回——与 SessionRegistry

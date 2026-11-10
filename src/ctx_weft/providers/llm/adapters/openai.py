@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -55,8 +55,7 @@ class OpenAIAdapter:
 
     The SDK owns HTTP and SSE decoding. This adapter only translates the runtime
     contract. It does not inherit from the OpenAI-compatible implementation.
-    ``reasoning_effort_provider`` is evaluated per request, so host context-local
-    reasoning controls remain safe when the adapter is shared between sessions.
+    Call settings are carried by each request, never shared adapter state.
     """
 
     def __init__(
@@ -71,7 +70,6 @@ class OpenAIAdapter:
         *,
         image_input: bool = False,
         http_client: httpx.AsyncClient | None = None,
-        reasoning_effort_provider: Callable[[], str | None] | None = None,
     ) -> None:
         api_base = _sdk_base_url(base_url)
         self._model = model
@@ -79,7 +77,6 @@ class OpenAIAdapter:
         self._output_reserve = output_reserve
         self._tool_choice = tool_choice
         self._image_input = image_input
-        self._reasoning_effort_provider = reasoning_effort_provider
         self._tokenizers: dict[str, HeuristicTokenizer] = {}
         self._sdk = AsyncOpenAI(
             api_key=api_key,
@@ -127,7 +124,12 @@ class OpenAIAdapter:
         messages = _serialize_messages(request.system, runtime_messages)
         for message in messages:
             message.pop("reasoning_content", None)
-        effort = self._reasoning_effort_provider() if self._reasoning_effort_provider else None
+        config = request.config
+        try:
+            config.validate()
+        except (TypeError, ValueError) as exc:
+            raise LLMCallError(str(exc), retriable=False) from exc
+        effort = config.reasoning_effort
         writer = current_stream_writer()
         buffers = writer.begin_attempt() if writer is not None else LLMStreamBuffers()
         if writer is not None:
@@ -138,11 +140,13 @@ class OpenAIAdapter:
             response = await self._sdk.chat.completions.create(
                 model=request.model if request.model and request.model != "mock" else self._model,
                 messages=messages,
-                max_completion_tokens=request.max_tokens if request.max_tokens is not None else omit,
-                temperature=request.temperature if request.temperature != 1.0 else omit,
+                max_completion_tokens=config.max_tokens if config.max_tokens is not None else omit,
+                temperature=config.temperature if config.temperature is not None else omit,
                 tools=_map_tools(request.tools) if request.tools else omit,
                 tool_choice=self._tool_choice if request.tools and self._tool_choice is not None else omit,
                 reasoning_effort=effort if effort is not None else omit,
+                top_p=config.top_p if config.top_p is not None else omit,
+                stop=list(config.stop) if config.stop is not None else omit,
                 stream=stream,
                 stream_options={"include_usage": True} if stream else omit,
                 timeout=timeout,

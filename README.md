@@ -664,6 +664,59 @@ initial_task = {
 `CompactTaskSettings` / `MetadataFillerTaskSettings` 仍保留为类型（反序列化兼容），但已不再作为独立 task 调度：
 compact 由 ReasonStep 命中阈值后内联直调 CompactStep；metadata_filler 由后台协程直跑在 root task 上。
 
+### 调用配置：agent 选择与每次请求
+
+`ModelCallConfig` 是可由 adapter 继承的协议 dataclass。`ModelChoice.config` 保存 agent
+选择；派发时复制到 `ResolvedModel.config`，每次请求再复制到 `LLMRequest.config`。
+`max_tokens`、`temperature` 已从 `LLMRequest` 顶层迁入 config；`LLMClient.complete`
+签名保持 `complete(request, stream=True)`，adapter 从 `request.config` 读取配置。
+
+```python
+from ctx_weft import SessionStartParams
+from ctx_weft.protocols import ModelCallConfig
+
+handle = await runtime.start_session(SessionStartParams.create(
+    template_id="agent:planner_agent", user_prompt="审查方案",
+    llm_config=ModelCallConfig(reasoning_effort="high", max_tokens=32768),
+))
+await runtime.set_agent_llm(
+    handle.agent_id, llm_account="account-a", llm_model="model-b",
+    llm_config=ModelCallConfig(reasoning_effort="low"),
+)
+```
+
+设置命令替换完整选择；省略 `llm_config` 表示空配置，不是保留旧配置。字段为 `None`
+表示不指定该参数；`max_tokens=None` 仍由网关计算安全输出上限。网关只修改本次请求的
+`config.max_tokens`，不回写 agent/run。adapter 也只处理请求副本，重试重新复制原始请求。
+
+`create_session`、`run_single_task`、`dispatch_task` 也接受 `llm_config`。`dispatch_task`
+只在创建新 agent 时使用它；已有 agent 的配置通过设置命令修改。恢复已有会话不接收
+新配置，应先设置 agent 选择再恢复。`set_session_llm` 只批量修改已有 agent，仍发 N 条
+`AgentLlmChanged`，不保存会话默认值。新子 agent 复制父选择；新独立树未传配置时使用空配置。
+
+只有 `AgentInstantiated` / `AgentLlmChanged` 和 agent 快照持久化选择，`SessionCreated`
+不增加配置字段。`LLMPromptSent.llm_config` 记录预算计算后交给 adapter 的配置。
+配置载荷为 `{type, version, values}`，旧事件/快照缺失时恢复空配置。自定义配置子类须在
+创建或恢复 agent 前调用 `register_model_call_config` 注册稳定 ID；未知类型/版本不会
+静默丢字段。注册可提供 `decode` 函数处理嵌套类型；默认编码使用 dataclass 的 JSON 字段。
+
+```python
+from dataclasses import dataclass
+from ctx_weft.protocols import ModelCallConfig, register_model_call_config
+
+@dataclass
+class GatewayConfig(ModelCallConfig):
+    thinking_budget: int | None = None
+
+register_model_call_config("my-gateway", GatewayConfig, version=1)
+```
+
+内置 OpenAI 两条协议直接发送 `reasoning_effort`；Anthropic 将 `none`/`off` 转为关闭，
+将 `low`/`medium`/`high` 映射为 1024/4096/16384 的 thinking 预算。
+`from ctx_weft.providers.llm import AnthropicCallConfig` 可显式设置 `thinking_budget_tokens`。
+预算不满足输出上限、未知档位或缺少必要签名历史时明确报不可重试错误，不静默降档。
+宿主迁移接口清单见 [调用配置迁移说明](docs/model-call-config-migration.md)。
+
 ### 崩溃恢复
 
 **恢复是用户驱动的：用到哪条会话，就装填哪条。** 启动时不做任何预热——从前那个扫「全部 active session」的

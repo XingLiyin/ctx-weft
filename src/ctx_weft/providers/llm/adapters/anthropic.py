@@ -34,6 +34,7 @@ from ctx_weft.providers.llm.adapters._schema import sanitize_boolean_schemas
 from ctx_weft.providers.llm.adapters._stream_parsing import begin_parsed_attempt
 from ctx_weft.providers.llm.adapters.text_calls import unwrap_raw_arguments
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
+from ctx_weft.providers.llm.adapters.config import AnthropicCallConfig
 
 _ANTHROPIC_API_URL = "https://api.anthropic.com"
 _ANTHROPIC_VERSION = "2023-06-01"
@@ -279,19 +280,47 @@ class AnthropicAdapter(LLMClient):
             request, adapter_hint="AnthropicMultimodalAdapter")
 
     def _build_payload(self, request: LLMRequest) -> dict[str, Any]:
+        config = request.config
+        try:
+            config.validate()
+        except (TypeError, ValueError) as exc:
+            raise LLMCallError(str(exc), retriable=False) from exc
         model = request.model if request.model and request.model != "mock" else self._model
         messages = _serialize_messages(self._prepare_messages(request))
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": True,
-            # 必填字段：网关一般已算好 request.max_tokens；缺时兜底用 output_reserve（预期输出量）。
-            "max_tokens": request.max_tokens or self._output_reserve,
+            # 必填字段：网关一般已算好 request.config.max_tokens；缺时兜底用 output_reserve（预期输出量）。
+            "max_tokens": request.config.max_tokens or self._output_reserve,
         }
         if request.system:
             payload["system"] = request.system
-        if request.temperature != 1.0:
-            payload["temperature"] = request.temperature
+        if request.config.temperature is not None:
+            payload["temperature"] = request.config.temperature
+        if config.top_p is not None:
+            payload["top_p"] = config.top_p
+        if config.stop is not None:
+            payload["stop_sequences"] = list(config.stop)
+        effort = config.reasoning_effort
+        budget = config.thinking_budget_tokens if isinstance(config, AnthropicCallConfig) else None
+        if effort in ("none", "off"):
+            payload["thinking"] = {"type": "disabled"}
+        elif effort is not None or budget is not None:
+            budgets = {"low": 1024, "medium": 4096, "high": 16384}
+            if effort is not None and effort not in budgets:
+                raise LLMCallError(f"Unsupported Anthropic reasoning effort: {effort}", retriable=False)
+            budget = budget if budget is not None else budgets[effort]
+            if budget >= payload["max_tokens"]:
+                raise LLMCallError("Thinking budget must be smaller than max_tokens", retriable=False)
+            if request.messages and request.messages[-1].role == "tool":
+                previous = next((m for m in reversed(payload["messages"]) if m["role"] == "assistant"), None)
+                blocks = previous.get("content") if previous else None
+                if not isinstance(blocks, list) or not any(
+                    b.get("type") == "thinking" and b.get("signature") for b in blocks
+                ):
+                    raise LLMCallError("Thinking continuation requires signed thinking history", retriable=False)
+            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
         if request.tools:
             payload["tools"] = _map_tools(request.tools)
         return payload

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ctx_weft.protocols import ModelCallConfig
+
 import json
 
 import httpx
@@ -67,7 +69,7 @@ async def test_sdk_request_and_trailing_usage(base):
     assert isinstance(client, LLMClient)
     assert not isinstance(client, OpenAICompatibleAdapter)
     assert client._sdk.max_retries == 0
-    chunks = await collect(client, request(max_tokens=777))
+    chunks = await collect(client, request(config=ModelCallConfig(max_tokens=777)))
     wire = json.loads(seen[0].content)
     assert str(seen[0].url) == "https://g.test/v1/chat/completions"
     assert seen[0].headers["authorization"] == "Bearer test-key"

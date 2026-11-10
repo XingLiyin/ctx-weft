@@ -1,3 +1,5 @@
+
+from ctx_weft.protocols import ModelCallConfig
 from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 
@@ -80,10 +82,10 @@ def test_output_floor_never_exceeds_hard_ceiling_or_remaining_window():
     resolved = model_snapshot(1000, 100, 50)
     request = LLMRequest(model="m", system="", messages=[], prompt_token_estimate=990)
     apply_dynamic_max_tokens(None, request, resolved)
-    assert request.max_tokens == 10
-    request = replace(request, max_tokens=999)
+    assert request.config.max_tokens == 10
+    request = replace(request, config=ModelCallConfig(max_tokens=999))
     apply_dynamic_max_tokens(None, request, resolved)
-    assert request.max_tokens == 10
+    assert request.config.max_tokens == 10
     with pytest.raises(ContextOverflowError):
         apply_dynamic_max_tokens(None, replace(request, prompt_token_estimate=1000), resolved)
 
@@ -93,7 +95,7 @@ def test_output_policy_comes_from_budget_even_if_runtime_config_disagrees():
     resolved = model_snapshot(100_000, 1000, output_policy=OutputPolicy(output_ratio=0.1))
     ctx = SimpleNamespace(config=SimpleNamespace(dynamic_max_tokens_output_ratio=0.9))
     apply_dynamic_max_tokens(ctx, request, resolved)
-    assert request.max_tokens == 10_000
+    assert request.config.max_tokens == 10_000
 
 
 def test_zero_policy_minima_still_allocate_positive_bounded_output():
@@ -102,4 +104,4 @@ def test_zero_policy_minima_still_allocate_positive_bounded_output():
         100, 0, output_policy=OutputPolicy(floor=0, output_ratio=0, output_min=0)
     )
     apply_dynamic_max_tokens(None, request, resolved)
-    assert request.max_tokens == 1
+    assert request.config.max_tokens == 1

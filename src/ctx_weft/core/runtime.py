@@ -68,6 +68,7 @@ from ctx_weft.core.capabilities.cache import CapabilityCache
 from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
 from ctx_weft.core.orchestrator.model import ModelChoice, ResolvedModel
+from ctx_weft.protocols.llm import ModelCallConfig
 from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput
 from ctx_weft.core.orchestrator.lifecycle.session_registry import SessionRegistry
 from ctx_weft.core.orchestrator.task.hooks import TaskManagerHooks
@@ -280,6 +281,7 @@ class SessionStartParams:
     tenant_id: str = "default"
     llm_account: str | None = None
     llm_model: str | None = None
+    llm_config: ModelCallConfig | None = None
     resume: bool = False
     # 这一轮没有人看顾（后台自治作业）：透传到 root task 的 `Task.unattended`，并强制
     # 它不 park。见 `Task.unattended` / `HitlService.open`。
@@ -299,6 +301,7 @@ class SessionStartParams:
         tenant_id: str = "default",
         llm_account: str | None = None,
         llm_model: str | None = None,
+        llm_config: ModelCallConfig | None = None,
         resume: bool = False,
         unattended: bool = False,
         port_key: str | None = None,
@@ -312,6 +315,7 @@ class SessionStartParams:
             tenant_id=tenant_id,
             llm_account=llm_account,
             llm_model=llm_model,
+            llm_config=llm_config,
             resume=resume,
             unattended=unattended,
             port_key=port_key,
@@ -1721,15 +1725,18 @@ class CtxWeftRuntime:
 
     async def set_agent_llm(
         self, agent_id: str, *, llm_account: str = "", llm_model: str = "",
+        llm_config: ModelCallConfig | None = None,
         reason: str = "user_selected",
     ) -> bool:
         """host 入口：把 `(llm_account, llm_model)` 包成 `ModelChoice`，转发给 registry。"""
         return await self._agent_lifecycle_manager.set_agent_llm(
-            agent_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
+            agent_id, ModelChoice(account=llm_account, model=llm_model,
+                                  config=llm_config if llm_config is not None else ModelCallConfig()), reason=reason,
         )
 
     async def set_session_llm(
         self, session_id: str, *, llm_account: str = "", llm_model: str = "",
+        llm_config: ModelCallConfig | None = None,
         reason: str = "user_selected",
     ) -> int:
         """host 入口：作用于该 session 下 registry 持有的全部 agent record。
@@ -1737,7 +1744,8 @@ class CtxWeftRuntime:
         返回值 = 真正改动了 record 的 agent 数（幂等 no-op 不计数）。
         """
         return await self._agent_lifecycle_manager.set_session_llm(
-            session_id, ModelChoice(account=llm_account, model=llm_model), reason=reason,
+            session_id, ModelChoice(account=llm_account, model=llm_model,
+                                  config=llm_config if llm_config is not None else ModelCallConfig()), reason=reason,
         )
 
     # ── Phase 1 compat ───────────────────────────────────────────────────────
@@ -1751,6 +1759,7 @@ class CtxWeftRuntime:
         tenant_id: str = "default",
         llm_account: str | None = None,
         llm_model: str | None = None,
+        llm_config: ModelCallConfig | None = None,
     ) -> tuple[TurnHandle, LoopState]:
         """单任务测试便利入口：起一个 task 端到端跑完并等它结束（2026-09-04 spec §2）。
 
@@ -1789,7 +1798,8 @@ class CtxWeftRuntime:
             # 选择须住进 agent record，事件层才有真值可报（批次 B）。
             agent, template = await lm.instantiate(
                 template_id=template_id, session_id=sid, tenant_id=tenant_id, ctx=ctx,
-                llm=ModelChoice(account=llm_account or "", model=llm_model or ""),
+                llm=ModelChoice(account=llm_account or "", model=llm_model or "",
+                                config=llm_config if llm_config is not None else ModelCallConfig()),
             )
             # Bind the model and immutable token budget for this run.
             resolved_model = lm.resolve_model(agent.id)
@@ -1890,6 +1900,7 @@ class CtxWeftRuntime:
         tenant_id: str = "default",
         llm_account: str | None = None,
         llm_model: str | None = None,
+        llm_config: ModelCallConfig | None = None,
     ) -> SessionHandle:
         """建一条**容器会话**：实例化 root agent、发 `SESSION_CREATED`，但**不推 root
         task**（spec/09 §11）。会话里的活全部由后续 `dispatch_task` 派进来。
@@ -1940,6 +1951,7 @@ class CtxWeftRuntime:
                 llm_model=llm_model,
                 llm_account=llm_account,
                 session_id=session_id,
+                llm_config=llm_config,
                 with_root_task=False,
             )
             # 模板在 create_session 内部已解析并校验过一次（入口即拒、不落库），这里
@@ -2018,6 +2030,7 @@ class CtxWeftRuntime:
                 tenant_id=params.tenant_id,
                 llm_model=params.llm_model,
                 llm_account=params.llm_account,
+                llm_config=params.llm_config,
                 initial_task_settings=params.initial_task_settings,
                 session_id=params.session_id,
                 user_prompt_event_jsonable=user_prompt_event_jsonable,
@@ -2025,6 +2038,8 @@ class CtxWeftRuntime:
                 port_key=params.port_key,
             )
         else:
+            if params.llm_config is not None:
+                raise ValueError("Set agent config with set_agent_llm before resuming")
             # 有活 owner 就把新 root task 推进它（单例）；没有才由 resume_session 新建。
             if not params.session_id:
                 raise ValueError("session_id is required when resume=True")
@@ -4257,6 +4272,7 @@ class CtxWeftRuntime:
         port_key: str | None = None,
         llm_account: str | None = None,
         llm_model: str | None = None,
+        llm_config: ModelCallConfig | None = None,
         tenant_id: str | None = None,
     ) -> TurnHandle:
         """在已有 session 上派发一条**全新的顶层 task**（spec/09）——`delegate_task` 的
@@ -4423,8 +4439,9 @@ class CtxWeftRuntime:
                 task_id=task_id, ctx=ctx,
                 # 显式给了才传；省略则沿用 instantiate 既有语义（派生继承父的选择，
                 # 无父落 ModelChoice() 跟随账号默认）。
-                llm=(ModelChoice(account=llm_account or "", model=llm_model or "")
-                     if (llm_account or llm_model) else None),
+                llm=(ModelChoice(account=llm_account or "", model=llm_model or "",
+                                config=llm_config if llm_config is not None else ModelCallConfig())
+                     if (llm_account or llm_model or llm_config is not None) else None),
             )
             exec_agent_id, template_id = new_agent.id, new_agent.template_id
         else:

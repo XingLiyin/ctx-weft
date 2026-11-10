@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ctx_weft.protocols.llm import OutputPolicy
+from ctx_weft.protocols.llm import ModelCallConfig, OutputPolicy
+from ctx_weft.providers.llm.adapters.config import AnthropicCallConfig
 from ctx_weft.providers.llm.adapters.mock import MockLLMAdapter, MockResponse
 from ctx_weft.providers.llm.config import (
     SUPPORTED_PROTOCOLS,
@@ -36,6 +37,7 @@ if TYPE_CHECKING:  # 让类型检查器/IDE 看得到，但运行时不触发 ht
     )
 
 __all__ = [
+    "ModelCallConfig", "AnthropicCallConfig",
     "OutputPolicy",
     "SUPPORTED_PROTOCOLS",
     "AnthropicAdapter",

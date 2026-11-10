@@ -23,13 +23,14 @@ Knowledge / Template 并列）。包含两个**相互独立**的扩展点：
 
 from __future__ import annotations
 
+import json
 import math
-
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from ctx_weft.protocols.context import ContentPart, normalize_content_parts
@@ -216,6 +217,118 @@ class LLMUsage:
 
 
 @dataclass
+class ModelCallConfig:
+    """Mutable call settings. Owners, runs, requests and retries own separate copies.
+
+    Adapters may extend this dataclass and register a stable persistence codec.
+    None means no explicit override; max_tokens is still bounded by the gateway.
+    """
+
+    reasoning_effort: str | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    stop: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if self.reasoning_effort is not None and (
+            not isinstance(self.reasoning_effort, str) or not self.reasoning_effort.strip()
+        ):
+            raise ValueError("reasoning_effort must be a non-empty string or None")
+        for name, upper in (("temperature", 2), ("top_p", 1)):
+            value = getattr(self, name)
+            if value is not None and (
+                type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= upper
+            ):
+                raise ValueError(f"{name} must be between 0 and {upper} or None")
+        if self.max_tokens is not None and (type(self.max_tokens) is not int or self.max_tokens <= 0):
+            raise ValueError("max_tokens must be a positive integer or None")
+        if self.stop is not None:
+            if not isinstance(self.stop, (list, tuple)) or not self.stop or any(
+                not isinstance(s, str) or not s for s in self.stop
+            ):
+                raise ValueError("stop must contain non-empty strings or be None")
+            self.stop = tuple(self.stop)
+
+
+class ModelCallConfigError(ValueError):
+    """An invalid or unavailable persisted call-config codec. Never retry silently."""
+
+    retriable = False
+
+
+_CALL_CONFIG_CODECS: dict[tuple[str, int], tuple[type[ModelCallConfig], Callable]] = {}
+_CALL_CONFIG_ENCODERS: dict[type[ModelCallConfig], tuple[str, int]] = {}
+
+
+def register_model_call_config(
+    type_id: str, config_type: type[ModelCallConfig], *, version: int = 1,
+    decode: Callable[[dict[str, Any]], ModelCallConfig] | None = None,
+) -> None:
+    """Register an adapter's dataclass before creating or recovering its agents.
+
+    No dynamic imports are performed from event data. Custom nested fields may
+    supply a decoder; asdict-compatible JSON values are the encoding contract.
+    """
+    if not isinstance(type_id, str) or not type_id.strip() or type(version) is not int or version < 1:
+        raise ValueError("call-config type and positive version are required")
+    if not issubclass(config_type, ModelCallConfig):
+        raise TypeError("config_type must extend ModelCallConfig")
+    key = (type_id, version)
+    old = _CALL_CONFIG_CODECS.get(key)
+    if old is not None and old[0] is not config_type:
+        raise ValueError(f"Call-config codec already registered: {key}")
+    previous = _CALL_CONFIG_ENCODERS.get(config_type)
+    if previous is not None and previous != key:
+        raise ValueError("Use a distinct config class for each codec version")
+    _CALL_CONFIG_CODECS[key] = (config_type, decode or (lambda values: config_type(**values)))
+    _CALL_CONFIG_ENCODERS[config_type] = key
+
+
+def serialize_call_config(config: ModelCallConfig) -> dict[str, Any]:
+    """Return detached, JSON-safe settings including the exact subclass identity."""
+    if not isinstance(config, ModelCallConfig):
+        raise TypeError("config must be a ModelCallConfig")
+    try:
+        type_id, version = _CALL_CONFIG_ENCODERS[type(config)]
+        # Validate a copy: validation/normalization must not mutate an owner's settings.
+        copied = deepcopy(config)
+        copied.validate()
+        values = json.loads(json.dumps(asdict(copied), allow_nan=False))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ModelCallConfigError(f"Cannot serialize call config {type(config).__name__}: {exc}") from exc
+    return {"type": type_id, "version": version, "values": values}
+
+
+def deserialize_call_config(payload: dict[str, Any] | None) -> ModelCallConfig:
+    """Decode only registered types. Absent historical settings mean no overrides."""
+    if payload is None:
+        return ModelCallConfig()
+    if not isinstance(payload, dict):
+        raise ModelCallConfigError("Call-config payload must be an object")
+    type_id, version, values = payload.get("type"), payload.get("version"), payload.get("values")
+    if not isinstance(type_id, str) or type(version) is not int or not isinstance(values, dict):
+        raise ModelCallConfigError("Call-config type, version and values are required")
+    codec = _CALL_CONFIG_CODECS.get((type_id, version))
+    if codec is None:
+        raise ModelCallConfigError(f"Unknown call-config codec: {type_id}@{version}")
+    try:
+        config = codec[1](deepcopy(values))
+        if type(config) is not codec[0]:
+            raise TypeError("Codec returned a different config type")
+        config.validate()
+        return config
+    except (TypeError, ValueError) as exc:
+        raise ModelCallConfigError(f"Invalid call config {type_id}@{version}: {exc}") from exc
+
+
+register_model_call_config("base", ModelCallConfig)
+
+
+@dataclass
 class LLMRequest:
     """统一 LLM 请求。"""
 
@@ -223,12 +336,11 @@ class LLMRequest:
     system: str
     messages: list[LLMMessage]
     tools: list[LLMTool] = field(default_factory=list)
-    max_tokens: int | None = None
+    config: ModelCallConfig = field(default_factory=ModelCallConfig)
     # caller 估算的本请求真实 prompt token（used）：真实基线 + 本轮增量，由
     # gateway.request_prompt_estimate 算好、网关据此实时算 max_tokens。瞬态字段，
     # 各 adapter 显式挑字段拼 payload，不入线上请求体。
     prompt_token_estimate: int | None = None
-    temperature: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)  # trace_id / run_id / 计费标签
     # Pre-serialized inputs for direct/custom callers. Core steps pass the live
     # PromptContext separately to the gateway, which serializes it at event emission.

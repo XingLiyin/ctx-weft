@@ -277,10 +277,17 @@ class OpenAICompatibleAdapter(LLMClient):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        if request.max_tokens:
-            payload["max_tokens"] = request.max_tokens
-        if request.temperature != 1.0:
-            payload["temperature"] = request.temperature
+        config = request.config
+        try:
+            config.validate()
+        except (TypeError, ValueError) as exc:
+            raise LLMCallError(str(exc), retriable=False) from exc
+        for key in ("max_tokens", "temperature", "top_p", "reasoning_effort"):
+            value = getattr(config, key)
+            if value is not None:
+                payload[key] = value
+        if config.stop is not None:
+            payload["stop"] = list(config.stop)
         if request.tools:
             payload["tools"] = _map_tools(request.tools)
             if self._tool_choice is not None:
