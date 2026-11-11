@@ -6,8 +6,8 @@
     传入 token_estimate，未达 compact_target_ratio（回退 compact_token_ratio）× context_limit
     时空跑；否则按序试 L1 demote_kept_capsules（已完成历史 rich→lean，复用收尾摘要）→
     L2 fold_root_experience（lean 历史归并成 AGENT_COMPACT_SUMMARY）→ L3 collapse_task_layer
-    （当前 task 层坍缩成一条 USER_PROMPT，原始消息 + 执行摘要两节）；级间用 _active_memory_tokens
-    的增量从估算里累减，降到 target 以下即停。
+    （当前 task 层坍缩成一条 USER_PROMPT，原始消息 + 执行摘要两节）；级间按渲染后消息的
+    token 净变化更新预算，降到 target 以下即停。一轮内复用不可变记录与任务树计数。
   - L1 从旧到新逐颗降级，缺收尾摘要时先补摘要；L2 的最近历史保留数是软偏好，预算仍
     超标时继续归并。旧历史新增或执行细节尚未收敛时不进入 L3；L3 保护最近回合及待执行工具。
   - ObserveStep 的前台重试与后台观察通过 segment_fold 写 TASK_COMPACT_SUMMARY，
@@ -15,8 +15,6 @@
 """
 
 from __future__ import annotations
-
-from ctx_weft.core.loop.task_memory_fold import capsule_origin, task_record_kind, task_record_group
 
 import dataclasses
 import inspect
@@ -30,7 +28,16 @@ from typing import Any
 
 from ctx_weft.core.assembler import CompactIntent, ContextRequest
 from ctx_weft.core.assembler.prompts import runtime_prompt
-from ctx_weft.core.loop.driver import COMPACT_NOOP_KEY, LoopContext, LoopState, Step, StepDriver, StepOutcome, assistant_memory_checkpoint, make_event
+from ctx_weft.core.loop.driver import (
+    COMPACT_NOOP_KEY,
+    LoopContext,
+    LoopState,
+    Step,
+    StepDriver,
+    StepOutcome,
+    assistant_memory_checkpoint,
+    make_event,
+)
 from ctx_weft.core.loop.llm_gateway import (
     build_llm_request,
     llm_request_id,
@@ -38,13 +45,21 @@ from ctx_weft.core.loop.llm_gateway import (
     stream_llm_resilient,
 )
 from ctx_weft.core.loop.llm_stream import ensure_collected_stream
+from ctx_weft.core.loop.steps._compact_snapshot import (
+    CapsulePlan,
+    compact_snapshot,
+    current_snapshot,
+)
+from ctx_weft.core.loop.task_memory_fold import capsule_origin, task_record_group, task_record_kind
 
 # 模块级 import（**实测不成环**）：`core.media` 的模块级依赖只到 `core.utils.content` /
 # `protocols`，不回指 `core.loop`。若日后 media 模块级引入了 `core.loop` 的东西，
 # 这里要退回函数级 import。
 from ctx_weft.core.media import demote_all, demote_for_budget, placeholder_refs
-from ctx_weft.core.utils.content import content_to_text, image_tokens
+from ctx_weft.core.utils.content import content_to_text
+from ctx_weft.core.utils.estimate import estimate_message_tokens
 from ctx_weft.protocols import (
+    LLMCallError,
     MemoryAddress,
     MemoryEvent,
     MemoryKind,
@@ -63,6 +78,7 @@ _TASK_VIEW_KINDS = [MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind
 # task-local: an observer running during the model await retains its own inputs.
 _history_summary_ids: ContextVar[tuple[str, ...] | None] = ContextVar("history_summary_ids", default=None)
 _DEFERRED_HISTORY_KEY = "_compact_deferred_history"
+_SUMMARY_MAX_ATTEMPTS = 3
 
 # ── 结构化 digest（spec: compact-fidelity）───────────────────────────────────
 # 五小节契约（cue 见 composer 的两域 instruction）；Evidence 允许缺，其余必需。
@@ -107,9 +123,11 @@ async def _resolve_digest(value) -> ParsedDigest:
     兼容裸 str 是刻意的：既有测试大量 monkeypatch summarize_for_compact 返回 str，
     落库点不应对替身形态敏感（str → 无小节 → degraded，语义自洽）。"""
     if dataclasses.is_dataclass(value) and isinstance(value, ParsedDigest):
+        if not value.text.strip():
+            raise LLMCallError("Compaction summary is empty; original records retained", retriable=False)
         return value
     if isinstance(value, str):
-        return parse_structured_digest(value)
+        return await _resolve_digest(parse_structured_digest(value))
     if inspect.isawaitable(value):
         return await _resolve_digest(await value)
     if callable(value):
@@ -143,12 +161,12 @@ def _agent_half(scope) -> MemoryAddress:
 async def summarize_for_compact(
     state: LoopState, ctx: LoopContext, *, scope: str = "task"
 ) -> ParsedDigest:
-    """装配 purpose="compact" 上下文 + 一次 LLM 摘要，返回解析后的 digest。
+    """装配 purpose="compact" 上下文并生成非空文本摘要，返回解析后的 digest。
 
     scope 选 cue（composer 据 extra["compact_scope"] 分流）："task"=整段执行摘要（默认，
     observe 兜底与坍缩共用）；"agent"=派发经验摘要。两域 cue 均要求五小节结构（spec:
     compact-fidelity）；产出经 parse_structured_digest 宽松解析——缺必需节整文降级
-    （degraded=True），不重试、不中断。
+    （degraded=True）。空白或带工具调用的摘要最多尝试三次，耗尽后保留原记录并报错。
 
     LLM 摘要是 compact 的硬依赖（compact + observe 回退档共用本函数）：瞬时故障由
     stream_llm_resilient 自愈，自愈耗尽抛 LLMOutageError → 走 INTERRUPTED。**不再**在
@@ -224,26 +242,33 @@ async def summarize_for_compact(
     bus = getattr(ctx, "event_bus", None)
     # 同 gateway 那 4 个流式事件一个门禁：bus 存在 且 origin==LOOP_COMPACT（见上方 docstring）。
     should_emit_finished = bus is not None and getattr(state, "origin", None) == EventOrigin.LOOP_COMPACT
-    req_id = llm_request_id(state) if should_emit_finished else None
-
-    stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request, inputs=inputs))
-    async with aclosing(stream):
-        async for _ in stream:
-            stream.accept_current()
-    result = stream.get_final_result()
-    summary_text, reasoning_text, usage = result.text, result.reasoning, result.usage
-
-    if should_emit_finished:
-        await bus.emit(make_event(
-            state, EventType.LLM_RESPONSE_FINISHED,
-            payload={
-                "request_id": req_id, "content": summary_text, "reasoning": reasoning_text,
-                "tool_calls": [],
-                "usage": dataclasses.asdict(usage),
-                "llm_model": model, "llm_account": llm_account,
-                "finish_reason": "stop", "turn": 0}))
-    # spec: compact-fidelity——落库前宽松解析（缺必需节整文降级，不中断）。
-    return parse_structured_digest(summary_text)
+    for attempt in range(1, _SUMMARY_MAX_ATTEMPTS + 1):
+        req_id = llm_request_id(state) if should_emit_finished else None
+        stream = ensure_collected_stream(stream_llm_resilient(ctx, state, llm_request, inputs=inputs))
+        async with aclosing(stream):
+            async for _ in stream:
+                stream.accept_current()
+        result = stream.get_final_result()
+        if should_emit_finished:
+            await bus.emit(make_event(
+                state, EventType.LLM_RESPONSE_FINISHED,
+                payload={
+                    "request_id": req_id, "content": result.text, "reasoning": result.reasoning,
+                    "tool_calls": [dataclasses.asdict(tc) for tc in result.tool_calls],
+                    "usage": dataclasses.asdict(result.usage),
+                    "llm_model": model, "llm_account": llm_account,
+                    "finish_reason": result.finish_reason or "stop", "turn": 0}))
+        # Validate before creating any replacement MemoryEvent. Prose remains a
+        # supported degraded digest; an empty or tool-only response cannot be one.
+        if result.text.strip() and not result.tool_calls:
+            return parse_structured_digest(result.text)
+        if attempt < _SUMMARY_MAX_ATTEMPTS:
+            logger.warning("Invalid compaction summary; retrying (%d/%d)", attempt, _SUMMARY_MAX_ATTEMPTS)
+            if should_emit_finished:
+                await bus.emit(make_event(state, EventType.LLM_RETRY_TRIGGERED, payload={
+                    "request_id": req_id, "attempt": attempt, "max_attempts": _SUMMARY_MAX_ATTEMPTS,
+                    "next_delay_sec": 0, "error_code": 0, "error": "Empty or non-text compaction summary"}))
+    raise LLMCallError("Invalid compaction summary after 3 attempts; original records retained", retriable=False)
 
 
 # 坍缩 USER_PROMPT 的两节分隔标记；再坍缩时据此切出「原始消息」节，保持有界。
@@ -374,6 +399,7 @@ async def collapse_task_layer(
         memory, [r.id for r in fold], ctx.provider_ctx,
         address=state.scope, scope=MemoryScope.TASK, kinds=_TASK_VIEW_KINDS,
     ):
+        await _refresh_media(state, ctx)
         # 🔴 必须重新 load_records：降级是 fold(旧 id, 新事件)，**record id 全换了**。
         # 拿降级前采集的 id 去下面那次 fold，被降过的一条都 supersede 不掉 → 同一段
         # 对话在视图里出现两次；且手里这份 recs 已过期，用它取 `original` 节拿到的仍是
@@ -399,9 +425,9 @@ async def collapse_task_layer(
 
     ids = [r.id for r in fold]
     digest = await _resolve_digest(summary_text)
-    collapsed = f"{original}{COLLAPSE_DELIM}{digest.text or runtime_prompt('context_compacted')}"
+    collapsed = f"{original}{COLLAPSE_DELIM}{digest.text}"
     # v2 P3d：遗忘+坍缩物一次原子 fold（旧徒手 supersede+ingest 有崩溃丢摘要窗口）
-    await memory.fold(ids, [
+    await _fold_memory(state, ctx, ids, [
         MemoryEvent(
             kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
             address=state.scope,
@@ -421,7 +447,7 @@ async def collapse_task_layer(
             # 本就再也定位不到，一并声明只会让字节永远回收不掉。
             blob_refs=placeholder_refs(collapsed),
         ),
-    ], ctx.provider_ctx)
+    ])
     return len(ids)
 
 
@@ -452,21 +478,22 @@ def _dispatch_finish_sets(recs) -> tuple[set, set]:
 
 
 async def _active_memory_tokens(state: LoopState, ctx: LoopContext) -> int:
-    """当前 scope 活跃记忆的 token 代理：task 层 body（跨 task 半址聚合）+ agent 层对话/摘要，
-    逐条 content 求 ctx.llm.tokenizer.count 之和。用于升级 compact 级间的 before/after 增量粗估（非精确装配）。"""
-    total = 0
+    """Count rendered history messages with prepare/gateway's full billing items.
+
+    Within a compaction run, reuse immutable rows and unaffected task trees.
+    System instructions and tool definitions stay in the caller's input estimate.
+    """
+    snapshot = current_snapshot(ctx)
+    if snapshot is not None:
+        await _history_view(state, ctx)
+        return snapshot.tokens()
     body = await load_records(ctx.memory,
         _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
     agent_recs = await load_records(ctx.memory,
         _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
     from ctx_weft.core.assembler.builder import compile_history
-    messages = compile_history([*body, *agent_recs]).messages
-    for r in messages:
-        text = r.content if isinstance(r.content, str) else content_to_text(r.content)
-        # 图片另计：不计入则降级图片的 freed_tokens 恒为 0，escalating_compact 的
-        # est 不减、误判该级白跑而继续升级（见 spec 2026-08-20-multimodal-design §6.5）。
-        total += ctx.llm.tokenizer.count(text) + image_tokens(r.content)
-    return total
+    messages = compile_history([*body, *agent_recs], task_id=state.scope.task_id).messages
+    return sum(estimate_message_tokens(m, ctx.llm.tokenizer.count) for m in messages)
 
 
 @dataclasses.dataclass
@@ -554,11 +581,32 @@ def _history_units(recs, current, body=()) -> _HistoryUnits:
 
 
 async def _history_view(state, ctx):
+    snapshot = current_snapshot(ctx)
+    if snapshot is not None:
+        if await snapshot.refresh():
+            state.extra[_DEFERRED_HISTORY_KEY] = True
+        return snapshot.view()
     address = _agent_half(state.scope)
     turns = await load_records(ctx.memory, address, MemoryScope.AGENT, ctx.provider_ctx)
     body = await load_records(ctx.memory, address, MemoryScope.TASK, ctx.provider_ctx,
                               kinds=_TASK_VIEW_KINDS)
     return turns, body
+
+
+async def _refresh_media(state, ctx):
+    snapshot = current_snapshot(ctx)
+    if snapshot is not None:
+        await snapshot.refresh(known_mutation=True)
+
+
+async def _fold_memory(state, ctx, ids, replacements, *, preserve_plans=False):
+    snapshot = current_snapshot(ctx)
+    if snapshot is not None:
+        result = await snapshot.fold(ids, replacements)
+        if not preserve_plans:
+            snapshot.plans = None
+        return result
+    return await ctx.memory.fold(ids, replacements, ctx.provider_ctx)
 
 
 @asynccontextmanager
@@ -622,6 +670,7 @@ async def fold_root_experience(
                          scope=MemoryScope.TASK, kinds=_TASK_VIEW_KINDS)
         await demote_all(ctx.memory, ids, ctx.provider_ctx, address=_agent_half(state.scope),
                          scope=MemoryScope.AGENT)
+        await _refresh_media(state, ctx)
         recs, body = await _history_view(state, ctx)
         _, roots, origins, ids = _history_selection(state, recs, body, keep_last, lean_only=lean_only)
         if not ids:
@@ -644,30 +693,35 @@ async def fold_root_experience(
         late = any(r.id not in selected_ids and capsule_origin(r) in origins for r in live_recs)
         if (late or residuals) and hasattr(state, "extra"):
             state.extra[_DEFERRED_HISTORY_KEY] = True
-        text = digest.text or runtime_prompt("experience_compacted")
+        text = digest.text
         metadata = {"keep_last": keep_last, "folded_count": len(roots),
                     "digest_degraded": digest.degraded}
         if residuals:
             metadata["residual_task_ids"] = sorted(residuals)
-        await ctx.memory.fold(ids, [MemoryEvent(
+        await _fold_memory(state, ctx, ids, [MemoryEvent(
             kind=MemoryKind.SUMMARY, scope=MemoryScope.AGENT, address=state.scope,
             content=text, timestamp=anchor - timedelta(microseconds=1), role="user",
             metadata=metadata,
             blob_refs=placeholder_refs(text),
-        )], ctx.provider_ctx)
+        )])
     return len(ids)
 
 
 async def demote_kept_capsules(
     state: LoopState, ctx: LoopContext, origin_ids: set, *, repair_summary=None,
 ) -> int:
-    recs = await load_records(ctx.memory, _agent_half(state.scope), MemoryScope.AGENT,
-                              ctx.provider_ctx, kinds=[MemoryKind.CONVERSATION_TURN])
-    units = _history_units(recs, getattr(state.scope, "task_id", None))
-    async with _history_commit(state, ctx, units.expand(origin_ids)):
-        n = await _demote_kept_capsules(state, ctx, origin_ids)
+    plans = await _demotion_plans(state, ctx)
+    origins = set().union(*(plans[oid].origins for oid in origin_ids if oid in plans))
+    async with _history_commit(state, ctx, origins):
+        # Re-read view IDs under the guards; rebuild plans if an observer wrote.
+        plans = await _demotion_plans(state, ctx)
+        selected = {oid: plans[oid] for oid in origin_ids if oid in plans}
+        if any(not p.origins <= origins for p in selected.values()):
+            state.extra[_DEFERRED_HISTORY_KEY] = True
+            return 0
+        n = await _demote_kept_capsules(state, ctx, set(selected), plans=selected)
     if repair_summary is not None:
-        for oid in sorted(origin_ids):
+        for oid in sorted(oid for oid, plan in selected.items() if plan.needs_repair and not plan.demotable):
             n += await _repair_history_capsule(state, ctx, oid, repair_summary)
     return n
 
@@ -701,6 +755,7 @@ async def _repair_history_capsule(state, ctx, origin, summary_text) -> int:
         for layer in (MemoryScope.TASK, MemoryScope.AGENT):
             await demote_all(ctx.memory, [r.id for r in rows], ctx.provider_ctx,
                              address=_agent_half(state.scope), scope=layer)
+        await _refresh_media(state, ctx)
         units, origins, rows, closing = await snapshot()
         if not rows:
             return 0
@@ -735,32 +790,33 @@ async def _repair_history_capsule(state, ctx, origin, summary_text) -> int:
         if late:
             state.extra[_DEFERRED_HISTORY_KEY] = True
             metadata["residual_task_ids"] = sorted(origins)
-        await ctx.memory.fold(ids, [MemoryEvent(
+        await _fold_memory(state, ctx, ids, [MemoryEvent(
             id=record_id("repair_capsule", *ids), kind=MemoryKind.CONVERSATION_TURN,
             scope=MemoryScope.AGENT, address=_agent_half(state.scope), role="user", content=content,
             timestamp=closing.timestamp if closing else max(r.timestamp for r in rows),
             metadata=metadata, blob_refs=placeholder_refs(content),
-        )], ctx.provider_ctx)
+        )])
     return len(ids)
 
 
-async def _demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: set) -> int:
-    """Atomically replace a closed task subtree with its single finish capsule.
+async def _demotion_plans(state, ctx):
+    recs, body = await _history_view(state, ctx)
+    snapshot = current_snapshot(ctx)
+    if snapshot is not None and snapshot.plans is not None:
+        return snapshot.plans
+    plans = _plan_capsules(recs, body, getattr(state.scope, "task_id", None))
+    if snapshot is not None:
+        snapshot.plans = plans
+    return plans
 
-    Classification uses task-memory facts, including legacy projections, rather
-    than user/assistant/tool roles. A late recap can update the lean record but
-    must never resurrect its deleted details.
-    """
+
+def _plan_capsules(turns, body, current):
+    """Index disjoint completed subtrees once, preserving the selection policy."""
+    from collections import defaultdict
+
     from ctx_weft.core.assembler.legacy_task_memory import normalize_legacy_tasks
-    from ctx_weft.core.loop.steps.observe import record_id
-    from ctx_weft.protocols import MemoryEvent
 
-    memory = ctx.memory
-    body = await load_records(memory,
-        _agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx, kinds=_TASK_VIEW_KINDS)
-    turns = await load_records(memory,
-        _agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx,
-        kinds=[MemoryKind.CONVERSATION_TURN])
+    turns = [r for r in turns if r.kind == MemoryKind.CONVERSATION_TURN]
     projected = normalize_legacy_tasks(turns)
     finishes = {capsule_origin(r): r for r in projected
                 if task_record_kind(r) == "finish"}
@@ -770,43 +826,51 @@ async def _demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: 
         if (r.role == "assistant" and task_record_kind(r) is None
                 and not r.metadata.get("tool_calls") and capsule_origin(r) is not None):
             finishes.setdefault(capsule_origin(r), r)
-    units = _history_units(turns, getattr(state.scope, "task_id", None), body)
-    parents = units.parents
-    origin_ids = origin_ids & set(units.roots)
+    units = _history_units(turns, current, body)
     closed_children = {r.metadata.get("child_task_id") for r in projected
                        if task_record_kind(r) == "result"
                        and r.metadata.get("dispatch_state") != "running"}
+    children, records = defaultdict(list), defaultdict(list)
+    for oid, parent in units.parents.items():
+        children[parent].append(oid)
+    for row in body:
+        records[row.address.task_id].append(row)
+    for row in turns:
+        records[capsule_origin(row)].append(row)
+    open_owners = {capsule_origin(r) for r in projected
+                   if task_record_kind(r) == "start" and r.metadata.get("child_task_id")
+                   and r.metadata["child_task_id"] not in finishes.keys() | closed_children}
+    plans = {}
+    for origin in units.roots:
+        descendants, todo = set(), [origin]
+        while todo:
+            oid = todo.pop()
+            if oid not in descendants:
+                descendants.add(oid)
+                todo.extend(children[oid])
+        rows = tuple(r for oid in sorted(descendants) for r in records[oid])
+        closing = finishes.get(origin)
+        policy = closing.metadata.get("finish_policy", {}) if closing else {}
+        demotable = bool(closing is not None and policy.get("has_summary") is not False
+                         and policy.get("capsule_state") != "lean" and not descendants & open_owners)
+        needs_repair = bool(rows) and not (len(rows) == 1 and closing is not None
+                            and policy.get("capsule_state") == "lean" and policy.get("has_summary") is not False)
+        plans[origin] = CapsulePlan(frozenset(descendants), rows, closing, demotable, needs_repair)
+    return plans
+
+
+async def _demote_kept_capsules(state, ctx, origin_ids, *, plans=None) -> int:
+    """Replace each eligible completed subtree with its existing finish summary."""
+    from ctx_weft.core.loop.steps.observe import record_id
+
+    plans = await _demotion_plans(state, ctx) if plans is None else plans
     total = 0
-    processed = set()
     for origin in origin_ids:
-        if origin in processed or origin not in finishes:
+        plan = plans.get(origin)
+        if plan is None or not plan.demotable or plan.closing is None:
             continue
-        # When both a parent and child were requested, only reduce the parent.
-        ancestor, seen = parents.get(origin), set()
-        while ancestor in parents and ancestor not in seen and ancestor not in origin_ids:
-            seen.add(ancestor)
-            ancestor = parents.get(ancestor)
-        if ancestor in origin_ids:
-            continue
-        closing = finishes[origin]
-        if closing.metadata.get("finish_policy", {}).get("has_summary") is False:
-            continue  # Failed observations do not authorize discarding raw evidence.
-        if closing.metadata.get("finish_policy", {}).get("capsule_state") == "lean":
-            continue
-        descendants = {origin}
-        while True:
-            expanded = descendants | {oid for oid, parent in parents.items() if parent in descendants}
-            if expanded == descendants:
-                break
-            descendants = expanded
-        # Retain a still-running descendant and its dispatch context intact.
-        if any(task_record_kind(r) == "start" and capsule_origin(r) in descendants
-               and r.metadata.get("child_task_id")
-                and r.metadata.get("child_task_id") not in finishes.keys() | closed_children
-                for r in projected):
-            continue
-        ids = [r.id for r in body if r.address.task_id in descendants]
-        ids.extend(r.id for r in turns if capsule_origin(r) in descendants)
+        closing = plan.closing
+        ids = [r.id for r in plan.rows]
         policy = {**closing.metadata.get("finish_policy", {}), "capsule_state": "lean",
                   "has_summary": True, "slot_count": 1, "preserve_raw": False}
         policy.pop("final_reply_record_id", None)
@@ -820,8 +884,10 @@ async def _demote_kept_capsules(state: LoopState, ctx: LoopContext, origin_ids: 
             role="user", id=record_id("demote_capsule", closing.id), blob_refs=closing.blob_refs,
             metadata=metadata)
         lean.metadata.pop("legacy_task_record", None)  # Read-only normalization facts are not storage.
-        await memory.fold(ids, [lean], ctx.provider_ctx)
-        processed.update(descendants)
+        await _fold_memory(state, ctx, ids, [lean], preserve_plans=True)
+        snapshot = current_snapshot(ctx)
+        if snapshot is not None and snapshot.plans is not None:
+            snapshot.plans.pop(origin, None)
         total += len(ids)
     return total
 
@@ -832,6 +898,9 @@ async def _kept_origin_ids(state: LoopState, ctx: LoopContext, keep_last: int | 
     recs, body = await _history_view(state, ctx)
     roots = _history_units(recs, getattr(state.scope, "task_id", None), body).roots
     if keep_last is None:
+        if current_snapshot(ctx) is not None:
+            plans = await _demotion_plans(state, ctx)
+            return [oid for oid in roots if oid in plans and (plans[oid].demotable or plans[oid].needs_repair)]
         return roots
     return roots[-keep_last:] if keep_last > 0 else []
 
@@ -852,8 +921,16 @@ async def _old_history_remaining(state, ctx) -> bool:
 async def escalating_compact(
     state: LoopState, ctx: LoopContext, *, token_estimate: int, trigger: str = "compact", force: bool = False
 ) -> list[Any]:
+    """Run L0.5 → L1 → L2 → L3 with a cache scoped to this foreground call."""
+    with compact_snapshot(state, ctx):
+        return await _escalating_compact(state, ctx, token_estimate=token_estimate, trigger=trigger, force=force)
+
+
+async def _escalating_compact(
+    state: LoopState, ctx: LoopContext, *, token_estimate: int, trigger: str, force: bool,
+) -> list[Any]:
     """预算驱动升级式 compact：L0.5 图片降级 → L1 rich→lean → L2 lean 历史归并 → L3 当前 task，
-    每级后用 _active_memory_tokens 的增量从 token_estimate 累减，降到 target 以下即停。
+    每级后把历史消息 token 的净变化加到 token_estimate，降到 target 以下即停。
     级间不完整重装配（Q4=c，调用方进 act 前重装配一次校正）。无 context_limit 或已达标 → []。"""
     agent = state.agent
     lc = agent.loop_config
@@ -906,22 +983,35 @@ async def escalating_compact(
 
     last_tokens: int | None = None
 
-    async def _apply(level_coro):
+    async def _apply(level_coro, *, media=False):
         """跑一级折叠，用活跃 token before/after 增量累减 est。返回 (superseded_count, freed)。
 
         before 惰性复用上一级的 after（相邻级间省一次重复测量）；首次或跳级后重新测量。"""
         nonlocal est, last_tokens
-        # 不变量：前一级的 after 直接当这一级的 before 复用，只在 _active_memory_tokens 是纯快照读、
-        # 且两次 _apply 之间没有其他改动内存的操作时才成立。未来若在级间插入其他写操作，须重新测量。
+        # Keep the original baseline: an observer's intervening writes count as
+        # growth on the next measurement, rather than being silently rebased away.
         # 历史归并的「前置降级 + 摘要 + fold」整体作为**一个** level_coro 交给本函数：
         # 把降级提到 _apply 之外会破坏这个前提，且降级省下的 token 要么被重复计入、要么彻底丢掉。
         before = last_tokens if last_tokens is not None else await _active_memory_tokens(state, ctx)
         n = await level_coro if inspect.isawaitable(level_coro) else level_coro
+        if media:
+            await _refresh_media(state, ctx)
         after = await _active_memory_tokens(state, ctx)
-        freed = max(0, before - after)
-        est -= freed
+        delta = after - before
+        est += delta
+        freed = max(0, -delta)
         last_tokens = after
         return n, freed
+
+    async def _checkpoint_budget():
+        """Check a fresh full history before advancing to another lossy level."""
+        nonlocal est, last_tokens
+        snapshot = current_snapshot(ctx)
+        if snapshot is not None and snapshot.ids and last_tokens is not None:
+            await _history_view(state, ctx)
+            after = snapshot.tokens(full=True)
+            est += after - last_tokens
+            last_tokens = after
 
     # L0.5 · 图片降级（子设计 §6：排在所有折叠之前）
     # 三条理由：无 LLM（不花一次调用）、单位收益最高（一张图按当前口径最低 1600 token，
@@ -932,7 +1022,7 @@ async def escalating_compact(
         n, freed = await _apply(demote_for_budget(
             ctx.memory, _agent_half(state.scope), ctx.provider_ctx,
             keep_recent=keep_recent_images, scope=MemoryScope.TASK,
-            kinds=_TASK_VIEW_KINDS))
+            kinds=_TASK_VIEW_KINDS), media=True)
         if n:
             # 注：本级的 n 是**图片张数**，不是记录条数（记录并没有被折走，只是被重写）。
             # 仍填进 superseded_count 以与各级同构、让 MemoryCompactFinished 的聚合口径
@@ -963,6 +1053,7 @@ async def escalating_compact(
         level_payloads.append({
             "superseded_count": l1_n, "layer": "agent", "source": "demote_lean",
             "trigger": trigger, "freed_tokens": l1_freed, "demoted_capsules": l1_capsules})
+    await _checkpoint_budget()
     if (state.extra.get(_DEFERRED_HISTORY_KEY)
             or est < target_tokens and not force
             or await _old_history_remaining(state, ctx)):
@@ -984,6 +1075,7 @@ async def escalating_compact(
         level_payloads.append({
             "superseded_count": l2_n, "layer": "agent", "source": "root_experience",
             "trigger": trigger, "freed_tokens": l2_freed})
+    await _checkpoint_budget()
     if (state.extra.get(_DEFERRED_HISTORY_KEY)
             or est < target_tokens and not force
             or await _old_history_remaining(state, ctx)):

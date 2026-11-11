@@ -44,6 +44,8 @@ class _FakeMemory:
         self.applied = []    # kept for backward-compat (no longer populated)
         self.ingested = []   # collapsed USER_PROMPT events written by collapse_task_layer
         self.superseded = []
+        self._selected = {}
+        self._replacements = {}
 
     async def count_recent(self, scope, types, ctx):
         return self._task_count
@@ -67,8 +69,12 @@ class _FakeMemory:
 
     async def load_view_ids(self, address, scope, ctx, kinds=None, *, end_at=None):
         records = await self._records(address, scope, ctx, kinds)
-        self._selected = {r.id: r for r in records}
-        return list(self._selected)
+        # Immutable ID reads must remain valid after another view is selected.
+        records = [r for r in records if r.id not in self.superseded]
+        records += [r for r in self._replacements.values()
+                    if r.scope == scope and r.id not in self.superseded]
+        self._selected.update((r.id, r) for r in records)
+        return [r.id for r in records]
 
     async def read_records(self, ids, ctx):
         return [self._selected[i] for i in ids]
@@ -82,8 +88,9 @@ class _FakeMemory:
         return [
             SimpleNamespace(
                 id=str(i), type=T.USER_PROMPT, content=f"msg {i}", role="user",
-                kind=MemoryKind.CONVERSATION_TURN, layer=MemoryScope.TASK,
-                address=None, metadata={},
+                kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
+                address=MemoryAddress(session_id=address.session_id, agent_id=address.agent_id,
+                                      task_id=address.task_id or "t1"), metadata={},
                 timestamp=_BASE_DT + timedelta(seconds=i),
             )
             for i in range(self._task_count)
@@ -108,7 +115,11 @@ class _FakeMemory:
         out = []
         for ev in replacements:
             self.ingested.append(ev)
-            out.append(f"mev_fold_{len(self.ingested)}")
+            from dataclasses import replace
+            record_id = f"mev_fold_{len(self.ingested)}"
+            self._replacements[record_id] = replace(ev, id=record_id)
+            self._selected[record_id] = self._replacements[record_id]
+            out.append(record_id)
         return out
 
 

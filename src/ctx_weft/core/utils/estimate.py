@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from ctx_weft.core.utils.content import content_to_text, image_tokens
 
 if TYPE_CHECKING:
-    from ctx_weft.protocols import ContentPart
+    from ctx_weft.protocols import ContentPart, LLMMessage
 
 
 _CJK_RE = re.compile(
@@ -130,9 +130,8 @@ def estimate_content_tokens(content: "str | list[ContentPart] | None", *, count:
     count：文本费率经 count 回调走 tokenizer；None 回退未校准启发式（纯单测/无 llm 场景）。
     framing 常数不过回调。
 
-    注意：本函数带 _MSG_FRAMING_TOKENS 补偿，**不是**纯文本恒等的。只在本就计入
-    framing 的路径（prepare / llm_gateway）使用；装配与 compact 的估算点请改用
-    「既有文本计数 + image_tokens(content)」，见 spec 2026-08-20-multimodal-design §6.5。
+    本函数含 framing，不能再对同一条消息重复补偿。完整消息计数使用
+    estimate_message_tokens；纯文本及模板操作的计数仍直接调用 tokenizer。
     """
     count = count or estimate_tokens
     return _MSG_FRAMING_TOKENS + count(content_to_text(content)) + image_tokens(content)
@@ -150,6 +149,16 @@ def estimate_tool_calls_tokens(tool_calls: "list[dict] | None", *, count: Callab
     for tc in tool_calls or []:
         total += count(str(tc.get("name", "")))
         total += count(_dumps_for_estimate(tc.get("arguments", tc.get("input", {}))))
+    return total
+
+
+def estimate_message_tokens(message: LLMMessage, count: Callable[[str], int] | None = None) -> int:
+    """Count the emitted message, including tools, images, framing and reasoning."""
+    count = count or estimate_tokens
+    total = estimate_content_tokens(message.content, count=count)
+    total += estimate_tool_calls_tokens(message.tool_calls, count=count)
+    if getattr(message, "reasoning_content", None):
+        total += count(message.reasoning_content)
     return total
 
 
