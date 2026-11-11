@@ -31,6 +31,7 @@ from ctx_weft.core.loop.steps.recognize_intent import should_recognize_intent
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.core.utils.estimate import (
     estimate_content_tokens,
+    estimate_message_tokens,
     estimate_tokens,
     estimate_tool_calls_tokens,
 )
@@ -72,11 +73,7 @@ def _estimate_assembled_tokens(prompt, count: Callable[[str], int] | None = None
 
     c = count or estimate_tokens
     total = c(prompt.system or "")
-    for m in prompt.messages:
-        total += estimate_content_tokens(m.content, count=count) + estimate_tool_calls_tokens(
-            m.tool_calls, count=count)
-        if getattr(m, "reasoning_content", None):
-            total += c(m.reasoning_content)
+    total += sum(estimate_message_tokens(m, count) for m in prompt.messages)
     total += estimate_tools_tokens(getattr(prompt, "tools", None), count)
     return total
 

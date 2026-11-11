@@ -49,11 +49,11 @@ async def test_active_tokens_counts_image_parts():
                           llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
     total = await _active_memory_tokens(state, ctx)
     text_only = HeuristicTokenizer().count("look")
-    assert total == text_only + 1600
+    assert total == text_only + 1600 + 4  # Message framing matches prepare/gateway.
 
 
-async def test_active_tokens_plain_text_unchanged():
-    """纯文本口径不得漂移：值恒等于逐条 tokenizer.count(text) 之和。"""
+async def test_active_tokens_plain_text_includes_message_framing():
+    """Count each emitted message's framing as well as its text."""
     mem = InMemoryMemoryProvider()
     scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
     for i in range(3):
@@ -64,4 +64,4 @@ async def test_active_tokens_plain_text_unchanged():
     ctx = SimpleNamespace(memory=mem, provider_ctx=_pctx(),
                           llm=SimpleNamespace(tokenizer=HeuristicTokenizer()))
     total = await _active_memory_tokens(state, ctx)
-    assert total == 3 * HeuristicTokenizer().count("x" * 400)
+    assert total == 3 * (HeuristicTokenizer().count("x" * 400) + 4)

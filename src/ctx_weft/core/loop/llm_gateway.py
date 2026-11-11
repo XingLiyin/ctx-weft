@@ -50,13 +50,12 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.llm_stream import DelegatingLLMStream, stream_until_cancel
+from ctx_weft.core.orchestrator.model import ResolvedModel
 from ctx_weft.core.utils.content import redact_content_for_event, rehydrate_content
 from ctx_weft.core.utils.estimate import (
     dynamic_max_tokens,
-    estimate_content_tokens,
-    estimate_tool_calls_tokens,
+    estimate_message_tokens,
 )
-from ctx_weft.core.orchestrator.model import ResolvedModel
 from ctx_weft.protocols import LLMMessage, LLMOutageError, TextPart
 from ctx_weft.protocols.events import EventType
 
@@ -319,11 +318,7 @@ def _estimate_message_tokens(m: LLMMessage, count) -> int:
 
     ``count``：文本费率回调，caller 传 ``tokenizer.count``（已校准）。
     """
-    total = estimate_content_tokens(m.content, count=count) \
-        + estimate_tool_calls_tokens(m.tool_calls, count=count)
-    if m.reasoning_content:
-        total += count(m.reasoning_content)
-    return total
+    return estimate_message_tokens(m, count)
 
 
 def _estimate_request_tokens(request: "LLMRequest", count) -> int:

@@ -202,7 +202,7 @@ async def test_escalating_passes_l3_summary_lazily(monkeypatch):
         await s.round(f"r{i}", f"c{i}")
 
     await cm.escalating_compact(_escalating_state(limit=1000, target=0.5), _ctx(mem),
-                                token_estimate=900)
+                                token_estimate=900, force=True)
 
     assert len(captured) == 1 and callable(captured[0]), captured
     assert summarized == [], "L3 放弃折叠时摘要不该已经被算过"

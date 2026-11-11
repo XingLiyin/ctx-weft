@@ -23,8 +23,7 @@ from ctx_weft.core.utils.content import (
     image_part_count,
 )
 from ctx_weft.core.utils.estimate import (
-    estimate_content_tokens,
-    estimate_tool_calls_tokens,
+    estimate_message_tokens,
     estimate_tools_tokens,
 )
 from ctx_weft.protocols import LLMMessage, LLMTool
@@ -416,10 +415,7 @@ class PromptBuilder:
 
         if isinstance(content, LLMMessage):
             counted = self.message_transform(content) if self.message_transform else content
-            tokens = estimate_content_tokens(counted.content, count=self.token_counter)
-            tokens += estimate_tool_calls_tokens(counted.tool_calls, count=self.token_counter)
-            if counted.reasoning_content:
-                tokens += self.token_counter(counted.reasoning_content)
+            tokens = estimate_message_tokens(counted, self.token_counter)
         else:
             tokens = self.token_counter(content)
 
@@ -755,9 +751,7 @@ class PromptBuilder:
         self._last_refs = tuple(message_refs)
         self._last_trace = trace
         final_count = self.token_counter(system) + sum(
-            estimate_content_tokens(message.content, count=self.token_counter)
-            + estimate_tool_calls_tokens(message.tool_calls, count=self.token_counter)
-            + (self.token_counter(message.reasoning_content) if message.reasoning_content else 0)
+            estimate_message_tokens(message, self.token_counter)
             for message in messages
         ) + tools_tokens
         return AssembledPrompt(
