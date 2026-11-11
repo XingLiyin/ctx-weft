@@ -414,8 +414,8 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", resolved_model: Resolve
     used = request.prompt_token_estimate
     hard_cap = resolved_model.output_ceiling or resolved_model.context_limit
     if used is None:
-        if request.max_tokens is not None:
-            request.max_tokens = min(request.max_tokens, hard_cap)
+        if request.config.max_tokens is not None:
+            request.config.max_tokens = min(request.config.max_tokens, hard_cap)
         return
     if used >= resolved_model.context_limit:
         from ctx_weft.core.models.errors import ContextOverflowError
@@ -427,13 +427,13 @@ def apply_dynamic_max_tokens(ctx, request: "LLMRequest", resolved_model: Resolve
     if used > resolved_model.effective_input_limit:
         logger.warning("prompt estimate %d exceeds effective window %d; tightening max_tokens",
                        used, resolved_model.effective_input_limit)
-    if request.max_tokens is not None:
-        request.max_tokens = min(request.max_tokens, hard_cap, resolved_model.context_limit - used)
+    if request.config.max_tokens is not None:
+        request.config.max_tokens = min(request.config.max_tokens, hard_cap, resolved_model.context_limit - used)
         return
     policy = resolved_model.output_policy
     margin = max(policy.margin, int(policy.margin_ratio * used))
     soft_cap = max(1, int(policy.output_ratio * resolved_model.context_limit), policy.output_min)
-    request.max_tokens = dynamic_max_tokens(
+    request.config.max_tokens = dynamic_max_tokens(
         resolved_model.context_limit, used, min(hard_cap, soft_cap), margin=margin, floor=max(1, policy.floor),
     )
 
@@ -605,6 +605,7 @@ async def build_llm_request(ctx, state, inputs: PromptContext, *,
         model=resolve_llm_identity(state)[0], system=prompt.system,
         messages=[*prompt.messages, *appended_messages], tools=prompt.tools,
         metadata={"turn": turn},
+        config=copy.deepcopy(state.resolved_model.config),
         tool_refs=tool_refs if tool_refs is not None else getattr(prompt, "tool_refs", []),
         capability_errors=list(getattr(prompt, "capability_errors", [])))
     request.prompt_token_estimate = request_prompt_estimate(
@@ -698,13 +699,10 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
     循环、也就是第一次 emit 之前），因此 ``state.sequence_counter`` 两处读到的是
     同一个值，算出来天然相等，不需要新增参数或跨函数传值。
 
-    ``apply_dynamic_max_tokens`` 的调用位置（task-6 复审修复第二轮）：故意排在
-    LLM_REQUEST_STARTED/LLM_PROMPT_SENT 发射**之后**，而不是紧挨在函数开头——这样
-    「进了这段代码往下走」就蕴含「STARTED 已经发出」，调用方（如
-    ``recognize_intent.py``）的收尾逻辑不必自己猜「STARTED 到底发没发」就能决定该不该
-    补发 ``LLM_RESPONSE_FINISHED``。两个事件的 payload 都不读 ``request.max_tokens``，
-    挪后不改变事件内容；``apply_dynamic_max_tokens`` 仍在真正发起 LLM 调用（下面
-    ``stream_llm``）之前完成，行为不变。
+    Output allocation follows REQUEST_STARTED, so allocation errors retain the
+    started/finished lifecycle contract. PROMPT_SENT follows allocation and records
+    the request-local config handed to the adapter; saved agent/run settings are
+    never changed. Retries copy this bounded request, not an adapter's mutations.
     """
     from ctx_weft.protocols import LLMCallError  # local to avoid re-export confusion
 
@@ -736,12 +734,15 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
                 {"role": m.role, "content": redact_content_for_event(m.content)}
                 for m in request.messages
             ])
-        await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload=prompt_payload))
 
     # Direct gateway callers have no run state; snapshot their configured client once.
     resolved_model = (state.resolved_model if state is not None else
                       ResolvedModel.from_client(ctx.llm) if request.prompt_token_estimate is not None else None)
     apply_dynamic_max_tokens(ctx, request, resolved_model)
+    if emit_stream_events:
+        from ctx_weft.protocols.llm import serialize_call_config
+        prompt_payload["llm_config"] = serialize_call_config(request.config)
+        await bus.emit(make_event(state, EventType.LLM_PROMPT_SENT, payload=prompt_payload))
 
     max_attempts = max(1, int(_cfg_val(ctx, "llm_self_heal_max_attempts", _DEFAULT_MAX_ATTEMPTS)))
     max_duration = _cfg_val(ctx, "llm_self_heal_max_duration_sec", _DEFAULT_MAX_DURATION_SEC)

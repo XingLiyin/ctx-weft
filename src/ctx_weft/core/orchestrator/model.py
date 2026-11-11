@@ -13,10 +13,11 @@ binding 交给 execute），于是调度那半边不得不 `TYPE_CHECKING` 反�
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from ctx_weft.protocols import LLMClient, OutputPolicy
+from ctx_weft.protocols import LLMClient, ModelCallConfig, OutputPolicy
 
 __all__ = ["ModelChoice", "ModelResolver", "ResolvedModel"]
 
@@ -31,6 +32,14 @@ class ModelChoice:
 
     account: str = ""
     model: str = ""
+    config: ModelCallConfig = field(default_factory=ModelCallConfig)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.config, ModelCallConfig):
+            raise TypeError("config must be a ModelCallConfig")
+        copied = deepcopy(self.config)
+        copied.validate()
+        object.__setattr__(self, "config", copied)
 
 
 @dataclass(frozen=True)
@@ -44,8 +53,13 @@ class ResolvedModel:
     reserved_output_tokens: int
     output_ceiling: int | None = None
     output_policy: OutputPolicy = field(default_factory=OutputPolicy)
+    config: ModelCallConfig = field(default_factory=ModelCallConfig)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.config, ModelCallConfig):
+            raise TypeError("config must be a ModelCallConfig")
+        object.__setattr__(self, "config", deepcopy(self.config))
+        self.config.validate()
         if type(self.context_limit) is not int or self.context_limit <= 0:
             raise ValueError("context_limit must be a positive integer")
         if (
@@ -68,7 +82,8 @@ class ResolvedModel:
         return self.context_limit - self.reserved_output_tokens
 
     @classmethod
-    def from_client(cls, client: LLMClient, *, account: str = "", model: str = "") -> ResolvedModel:
+    def from_client(cls, client: LLMClient, *, account: str = "", model: str = "",
+                    config: ModelCallConfig | None = None) -> ResolvedModel:
         """Resolve identity and copy model configuration once for this run."""
         return cls(
             client=client,
@@ -78,6 +93,7 @@ class ResolvedModel:
             reserved_output_tokens=client.output_reserve,
             output_ceiling=getattr(client, "output_ceiling", None),
             output_policy=getattr(client, "output_policy", OutputPolicy()),
+            config=config if config is not None else ModelCallConfig(),
         )
 
 

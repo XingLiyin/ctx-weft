@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import ClassVar, Protocol
@@ -18,6 +19,7 @@ from ctx_weft.core.utils.event import new_event
 from ctx_weft.core.models.errors import AgentBusyError, AgentNotFound, AgentTerminatedError, CtxWeftError
 from ctx_weft.core.orchestrator.lifecycle.agent_state import AgentInput, next_agent_transition
 from ctx_weft.core.orchestrator.model import ModelChoice, ModelResolver, ResolvedModel
+from ctx_weft.protocols.llm import serialize_call_config, deserialize_call_config
 from ctx_weft.core.orchestrator.lifecycle.template_lookup import TemplateLookup
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.utils.clock import now_utc
@@ -631,6 +633,10 @@ class AgentLifecycleManager:
                     f"agent_id {av.id} is registered to session {live.session_id!r}, "
                     f"but the event log of session {session_id!r} claims it too"
                 )
+        # Decode before publishing any recovered records. Unknown adapter types
+        # remain intact in the projection and cannot partially reset this owner.
+        configs = {aid: deserialize_call_config(getattr(av, "llm_config", None))
+                   for aid, av in agent_views.items()}
         self.register_session(session_id, tenant_id=tenant_id)
         ctx = ProviderContext(session_id=session_id, tenant_id=tenant_id)
         n = 0
@@ -687,7 +693,8 @@ class AgentLifecycleManager:
                 loop_config=loop_config,
                 # D1 修复：模型选择从 AgentView 读回，跨重启存活——不再是
                 # ModelChoice() 默认值（那是修复前 recover_agent 静默降级的根因）。
-                llm=ModelChoice(account=av.llm_account, model=av.llm_model),
+                llm=ModelChoice(account=av.llm_account, model=av.llm_model,
+                                config=configs[av.id]),
                 # Task 14：五态机状态从 AgentView 读回，跨重启存活——不这样做的话
                 # 冷恢复后每个 agent 都会被 `_AgentRecord.status` 的字段默认值
                 # 重置成 idle，即使它重启前正处于 waiting_human（有未决 HITL 挂着），
@@ -860,6 +867,8 @@ class AgentLifecycleManager:
             # 模板的空值走同一条规则（见方法开头那段，以及 docstring）。
             llm = parent_rec.llm if parent_agent_id is not None else ModelChoice()
 
+        llm = deepcopy(llm)
+        llm_payload = serialize_call_config(llm.config)
         self._agents[agent_id] = _AgentRecord(
             session_id=session_id,
             tenant_id=tenant_id,
@@ -924,6 +933,7 @@ class AgentLifecycleManager:
             "template_version": template.version,
             "llm_account": llm.account,
             "llm_model": llm.model,
+            "llm_config": llm_payload,
             },
         )
 
@@ -942,7 +952,8 @@ class AgentLifecycleManager:
         rec = self._agents.get(agent_id)
         if rec is None or rec.llm == choice:
             return False
-        rec.llm = choice
+        choice = deepcopy(choice)
+        config_payload = serialize_call_config(choice.config)
         await emit_event(
             self.event_bus, EventType.AGENT_LLM_CHANGED,
             session_id=rec.session_id,
@@ -952,10 +963,12 @@ class AgentLifecycleManager:
             payload={
             "llm_account": choice.account,
             "llm_model": choice.model,
+            "llm_config": config_payload,
             "reason": reason,
             },
             causation_id=causation_id,
         )
+        rec.llm = choice
         return True
 
     async def set_session_llm(self, session_id: str, choice: ModelChoice, *, reason: str) -> int:
@@ -968,6 +981,8 @@ class AgentLifecycleManager:
         reducer 不必处理「一条事件改 N 个实体」。N 条事件共享一个 causation_id，
         host 要展示「这是一次会话级切换」→ 按它聚合，不需要第三种事件类型。
         """
+        choice = deepcopy(choice)
+        serialize_call_config(choice.config)  # reject invalid settings before any agent changes
         cid = generate_id("cau")
         ids = self.agent_ids_of_session(session_id)
         n = 0
@@ -984,7 +999,8 @@ class AgentLifecycleManager:
         """
         choice = self._agents[agent_id].llm
         client = self.model_resolver(choice.account, choice.model)
-        return ResolvedModel.from_client(client, account=choice.account, model=choice.model)
+        return ResolvedModel.from_client(client, account=choice.account, model=choice.model,
+                                         config=choice.config)
 
     def materialize(
         self, agent_id: str, *, session_id: str, tenant_id: str,

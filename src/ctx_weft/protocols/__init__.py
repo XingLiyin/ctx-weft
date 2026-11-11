@@ -94,6 +94,11 @@ from ctx_weft.protocols.knowledge import (
 )
 from ctx_weft.protocols.llm import (
     RAW_ARGS_KEY,
+    ModelCallConfig,
+    ModelCallConfigError,
+    register_model_call_config,
+    serialize_call_config,
+    deserialize_call_config,
     OutputPolicy,
     # adapter 契约：实现一个 LLM adapter 所需的全部类型
     LLMCallError,
@@ -149,6 +154,8 @@ from ctx_weft.protocols.template import (
 )
 
 __all__ = [
+    "ModelCallConfig", "ModelCallConfigError", "register_model_call_config",
+    "serialize_call_config", "deserialize_call_config",
     "OutputPolicy",
     # Capability
     "AgentCapability",

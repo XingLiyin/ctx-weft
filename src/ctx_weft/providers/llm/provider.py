@@ -7,7 +7,7 @@ import logging
 import time
 
 from ctx_weft.core.utils.estimate import default_output_reserve
-from ctx_weft.protocols.llm import OutputPolicy
+from ctx_weft.protocols.llm import ModelCallConfig, OutputPolicy
 from ctx_weft.protocols import ImagePart, LLMClient, LLMMessage, LLMRequest, TextPart
 from ctx_weft.providers.llm.config import (
     LLMAccount,
@@ -301,7 +301,7 @@ class LLMProvider:
             model=cfg.name,
             system="",
             messages=[LLMMessage(role="user", content=content)],
-            max_tokens=_PROBE_MAX_TOKENS,
+            config=ModelCallConfig(max_tokens=_PROBE_MAX_TOKENS),
         )
         async for _ in adapter.complete(request, stream=True):
             pass

@@ -6,6 +6,8 @@ request.prompt_token_estimate → 网关 apply_dynamic_max_tokens 纯消费。�
 
 from __future__ import annotations
 
+from ctx_weft.protocols import ModelCallConfig
+
 from ctx_weft.core.orchestrator.model import ResolvedModel
 
 from types import SimpleNamespace
@@ -64,6 +66,8 @@ def test_floor_when_window_nearly_full():
 
 def _req(**kw):
     base = dict(model="m", system="sys", messages=[LLMMessage(role="user", content="hi")], tools=[])
+    if "max_tokens" in kw:
+        kw["config"] = ModelCallConfig(max_tokens=kw.pop("max_tokens"))
     base.update(kw)
     return LLMRequest(**base)
 
@@ -225,7 +229,7 @@ def test_apply_soft_cap_binds_when_window_has_room():
     # 窗口有余量：ceiling = 软顶 0.2*200k = 40k（不再整窗放输出）
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
-    assert req.max_tokens == 40_000
+    assert req.config.max_tokens == 40_000
 
 
 def test_apply_tail_regime_when_window_tight():
@@ -233,54 +237,54 @@ def test_apply_tail_regime_when_window_tight():
     # margin 比例制：max(8192, 5%*170_000=8500) = 8500
     req = _req(prompt_token_estimate=170_000)
     apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
-    assert req.max_tokens == 200_000 - 170_000 - 8500  # 21500 < 40k 软顶
+    assert req.config.max_tokens == 200_000 - 170_000 - 8500  # 21500 < 40k 软顶
 
 
 def test_apply_fixed_margin_floors_when_ratio_smaller():
     # 5%*155_000=7750 < 8192 → 固定 margin 兜底
     req = _req(prompt_token_estimate=155_000)
     apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
-    assert req.max_tokens == 200_000 - 155_000 - 8192  # 36808 < 40k 软顶
+    assert req.config.max_tokens == 200_000 - 155_000 - 8192  # 36808 < 40k 软顶
 
 
 def test_apply_margin_ratio_configurable():
     # config 提高比例 → margin 随之放大
     req = _req(prompt_token_estimate=170_000)
     apply_dynamic_max_tokens(_ctx(_llm(output_policy=OutputPolicy(margin_ratio=0.1))), req, ResolvedModel.from_client(_llm(output_policy=OutputPolicy(margin_ratio=0.1))))
-    assert req.max_tokens == 200_000 - 170_000 - 17_000
+    assert req.config.max_tokens == 200_000 - 170_000 - 17_000
 
 
 def test_apply_output_min_floors_soft_cap_on_small_window():
     # 小窗口：0.2*16k=3200 < 4096 → 软顶兜到 4096
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm(context_limit=16_000)), req, ResolvedModel.from_client(_llm(context_limit=16000)))
-    assert req.max_tokens == 4096
+    assert req.config.max_tokens == 4096
 
 
 def test_apply_hard_ceiling_above_soft_clamped_to_soft():
     # 显式 output_ceiling 高于软顶 → 被软顶夹下（min 语义）
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=64_000)), req, ResolvedModel.from_client(_llm(output_ceiling=64000)))
-    assert req.max_tokens == 40_000  # min(64k, 0.2*200k)
+    assert req.config.max_tokens == 40_000  # min(64k, 0.2*200k)
 
 
 def test_apply_noop_when_estimate_missing():
     # caller 未挂估算 → 网关不设 max_tokens（feature off，无旧回退自估）
     req = _req()  # prompt_token_estimate=None
     apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
-    assert req.max_tokens is None
+    assert req.config.max_tokens is None
 
 
 def test_apply_respects_explicit_max_tokens():
     req = _req(max_tokens=16, prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm()), req, ResolvedModel.from_client(_llm()))
-    assert req.max_tokens == 16  # 不覆盖显式值
+    assert req.config.max_tokens == 16  # 不覆盖显式值
 
 
 def test_apply_noop_when_loop_guard_none():
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm()), req, None)
-    assert req.max_tokens is None
+    assert req.config.max_tokens is None
 
 
 def test_apply_soft_cap_default_when_ceiling_unset():
@@ -289,14 +293,14 @@ def test_apply_soft_cap_default_when_ceiling_unset():
     apply_dynamic_max_tokens(
         _ctx(_llm(context_limit=50_000, output_ceiling=None)), req, ResolvedModel.from_client(_llm(context_limit=50000, output_ceiling=None))
     )
-    assert req.max_tokens == 10_000
+    assert req.config.max_tokens == 10_000
 
 
 def test_apply_hard_ceiling_below_soft_wins():
     # 硬上限 8192 低于软顶 40k → 取硬上限（Anthropic 场景）
     req = _req(prompt_token_estimate=100)
     apply_dynamic_max_tokens(_ctx(_llm(output_ceiling=8192)), req, ResolvedModel.from_client(_llm(output_ceiling=8192)))
-    assert req.max_tokens == 8192
+    assert req.config.max_tokens == 8192
 
 
 # ── 瞬态字段不进线上 payload ─────────────────────────────────────────────────────

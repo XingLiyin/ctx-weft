@@ -1,6 +1,8 @@
 """adapter.list_models() —— GET {base}/v1/models，解析 data[].id。httpx.MockTransport 假后端。"""
 from __future__ import annotations
 
+from ctx_weft.protocols import ModelCallConfig
+
 import httpx
 import pytest
 
@@ -85,7 +87,7 @@ async def test_subclass_url_policy_applies_to_generation_and_discovery(adapter_t
     adapter = CustomAdapter(api_key="k", base_url="https://gateway.test")
     try:
         assert await adapter.list_models() == ["m"]
-        request = LLMRequest("m", "", [LLMMessage(role="user", content="hi")], max_tokens=32)
+        request = LLMRequest("m", "", [LLMMessage(role="user", content="hi")], config=ModelCallConfig(max_tokens=32))
         chunks = [chunk async for chunk in adapter.complete(request)]
         assert any(chunk.kind == "done" for chunk in chunks)
     finally:

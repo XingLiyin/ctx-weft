@@ -102,6 +102,7 @@ class AgentView:
     # D1 修复：跨重启存活——`load()` 据此重建 registry 里的 ModelChoice。
     llm_account: str = ""
     llm_model: str = ""
+    llm_config: dict[str, Any] | None = None
     # Task 14：五态机当前值，来自 5 个 AGENT_* 事件的折叠（terminated 粘滞，见
     # reducers._AGENT_STATUS_BY_EVENT）。跨重启存活——`load()` 据此重建
     # `_AgentRecord.status`，否则冷恢复后每个 agent 都会被重置成 idle。

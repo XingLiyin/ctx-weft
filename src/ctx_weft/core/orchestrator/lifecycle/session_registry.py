@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -21,6 +22,7 @@ from ctx_weft.core.models.task import (
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols.context import ProviderContext
+from ctx_weft.protocols.llm import ModelCallConfig, serialize_call_config
 
 
 
@@ -144,6 +146,7 @@ class SessionRegistry:
         unattended: bool = False,
         port_key: str | None = None,
         with_root_task: bool = True,
+        llm_config: ModelCallConfig | None = None,
     ) -> tuple[Session, "Task | None", TaskManager]:
         """Create a new session, instantiate root agent, push initial task.
 
@@ -169,6 +172,8 @@ class SessionRegistry:
         已经是 memory 侧归一化过的内容，图片 part 是 memory ref，再算一次只会把一个
         event store 打不开的引用写进事件（blob-store 解耦 Task 3）。
         """
+        config = deepcopy(llm_config) if llm_config is not None else ModelCallConfig()
+        serialize_call_config(config)  # validate before SessionCreated or any side effects
         sid = session_id or generate_id("ses")
         ctx = ProviderContext(session_id=sid, tenant_id=tenant_id)
         # 先于 agent_lifecycle_manager.instantiate / 任何 emit：被拒的入参不该留下半个 session
@@ -238,7 +243,7 @@ class SessionRegistry:
         await self.agent_lifecycle_manager.instantiate(
             template_id=template_id, session_id=sid, tenant_id=tenant_id,
             agent_id=agent_id, template=template, ctx=ctx,
-            llm=ModelChoice(account=llm_account or "", model=llm_model or ""),
+            llm=ModelChoice(account=llm_account or "", model=llm_model or "", config=config),
         )
         self.register_session(sid, tenant_id=tenant_id)
 
