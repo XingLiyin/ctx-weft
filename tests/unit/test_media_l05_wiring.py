@@ -163,14 +163,14 @@ async def test_l05_runs_before_l1(monkeypatch):
         order.append("L0.5")
         return await real(*a, **k)
 
-    async def spy_fold_root(state, ctx, keep_last, summary):
+    async def spy_demote_history(state, ctx, origins, **kwargs):
         order.append("L1")
         return 1
 
     monkeypatch.setattr(cm, "demote_for_budget", spy_demote)
-    monkeypatch.setattr(cm, "fold_root_experience", spy_fold_root)
+    monkeypatch.setattr(cm, "demote_kept_capsules", spy_demote_history)
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(99))
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(["old"]))
     monkeypatch.setattr(cm, "summarize_for_compact",
                         lambda s, c, *, scope="task": _const("S"))
 
@@ -181,7 +181,7 @@ async def test_l05_runs_before_l1(monkeypatch):
     assert order == ["L0.5", "L1"], order
     # 对照：两级都真的产出了事件（否则「顺序对」可能只是因为某级没跑）
     assert [e.payload.get("source") for e in events
-            if e.type == "MemoryCompacted"] == ["demote_images", "root_experience"]
+            if e.type == "MemoryCompacted"] == ["demote_images", "demote_lean"]
 
 
 # ── 2./3. 事件形状 + freed_tokens 真的 > 0 ────────────────────────────────────
@@ -229,13 +229,13 @@ async def test_l05_alone_can_stop_escalation(monkeypatch):
     """
     calls: list[str] = []
 
-    async def spy_fold_root(state, ctx, keep_last, summary):
+    async def spy_demote_history(state, ctx, origins, **kwargs):
         calls.append("L1")
         return 1
 
-    monkeypatch.setattr(cm, "fold_root_experience", spy_fold_root)
+    monkeypatch.setattr(cm, "demote_kept_capsules", spy_demote_history)
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(99))
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(["old"]))
     monkeypatch.setattr(cm, "summarize_for_compact",
                         lambda s, c, *, scope="task": _const("S"))
 
@@ -655,17 +655,16 @@ async def test_l1_summary_input_holds_the_placeholder_not_a_vanished_image(monke
         return f"SUM-{scope}"
 
     monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
 
     events = await cm.escalating_compact(
-        _l1_state(target_ratio=0.01), _ctx(mem, blobs=_Blobs()),
+        _l1_state(target_ratio=0.8), _ctx(mem, blobs=_Blobs()),
         token_estimate=9000, trigger="compact")
 
     sources = [e.payload["source"] for e in events if e.type == "MemoryCompacted"]
     # 前提：L0.5 一张都没降（两张图正好被 keep_recent=2 保住）→ 图是「最新的」那种
     assert "demote_images" not in sources, sources
     # 对照：L1 **确实**跑了并折了东西（否则下面的断言可能只是因为什么都没发生）
-    assert sources == ["root_experience"], sources
+    assert sources == ["demote_lean"], sources
 
     text = captured["agent"]
     assert "body-old" in text                                  # 折区那条确实进了摘要输入
@@ -730,9 +729,7 @@ async def test_l1_freed_tokens_account_for_the_demotion_exactly_once(monkeypatch
     await _seed_two_top_units(mem)
     monkeypatch.setattr(cm, "summarize_for_compact",
                         lambda s, c, *, scope="task": _const(f"SUM-{scope}"))
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(set()))
-
-    state = _l1_state(target_ratio=0.01)
+    state = _l1_state(target_ratio=0.8)
     ctx = _ctx(mem, blobs=_Blobs())
     before = await cm._active_memory_tokens(state, ctx)
     events = await cm.escalating_compact(state, ctx, token_estimate=9000,
@@ -740,8 +737,8 @@ async def test_l1_freed_tokens_account_for_the_demotion_exactly_once(monkeypatch
     after = await cm._active_memory_tokens(state, ctx)
 
     folded = [e for e in events if e.type == "MemoryCompacted"]
-    assert [e.payload["source"] for e in folded] == ["root_experience"]
+    assert [e.payload["source"] for e in folded] == ["demote_lean"]
     fin = events[-1].payload
-    assert before - after > 1600                       # 至少含那张图（对照，非永真）
+    assert before - after > 1500                       # 图片额度扣除 lean 收尾记录的文本开销
     assert fin["freed_tokens"] == before - after       # 不重复、不遗漏
     assert fin["est_after"] == 9000 - (before - after)

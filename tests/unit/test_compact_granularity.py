@@ -8,7 +8,7 @@
   调两个工具时，「保留最近 3 条」留下的是 `[result, audit, result]`，渲染出来 **0 条**。
   恢复路径上这几乎必然发生：act 段总在工具执行完后才退出，时间线末尾一定是工具结果。
 
-- **L2**（`demote_kept_capsules`）原先对 L1 保下的全部胶囊**一次性**降级。哪怕降一颗就
+- **L1**（`demote_kept_capsules`）原先对 所有候选胶囊**一次性**降级。哪怕降一颗就
   够达标，6 颗也一起被掏空（USER_PROMPT 原文、段摘要、act_recap 全删，只剩综合总结）。
 """
 
@@ -208,7 +208,7 @@ async def test_escalating_passes_l3_summary_lazily(monkeypatch):
     assert summarized == [], "L3 放弃折叠时摘要不该已经被算过"
 
 
-# ── L2：从最老的胶囊开始逐颗降级 ───────────────────────────────────────────────
+# ── L1：从最老的胶囊开始逐颗降级 ───────────────────────────────────────────────
 
 
 async def _capsule(mem, oid: str, t: int, body_chars: int):
@@ -265,7 +265,7 @@ async def test_kept_capsules_are_ordered_oldest_first():
     assert list(kept) == ["c_old", "c_mid", "c_new"], kept
 
 
-async def test_l2_demotes_oldest_capsule_first_and_stops_at_target():
+async def test_l1_demotes_oldest_capsule_first_and_stops_at_target():
     """降一颗就达标 → 只降最老那颗，新的保持 rich。
 
     三颗胶囊 body 各 ~1000 token（HeuristicTokenizer 口径 len//4）。target=0.6×5000=3000，
@@ -287,7 +287,7 @@ async def test_l2_demotes_oldest_capsule_first_and_stops_at_target():
     assert len(l2) == 1 and l2[0]["demoted_capsules"] == 1, l2
 
 
-async def test_l2_keeps_going_until_target_when_one_is_not_enough():
+async def test_l1_keeps_going_until_target_when_one_is_not_enough():
     """对照：一颗不够就接着降第二颗，仍然按从老到新的顺序。"""
     mem = InMemoryMemoryProvider()
     await _capsule(mem, "c1", t=1, body_chars=4000)

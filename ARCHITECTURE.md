@@ -189,19 +189,27 @@ memory；首字前撤销仍丢弃整批，并恢复原气泡。
 Compact 在可能改写记忆前清除旧的增量 token 基线；重装配使用完整估算，后续真实 Act usage
 重建基线。压缩 noop 仍只回 Prepare 一次，并保留上下文恢复次数与压不动时的止损规则。
 
-旧 task 的识别由 L1 计数、L1 折叠和 L2 降级共用一套规则。任务自身的收尾记录决定
+预算压缩顺序为 L0.5 图片降级 → L1 已完成历史 rich→lean → L2 lean 历史归并摘要 →
+L3 当前任务折叠。L0.5 保持原有图片范围与最近图片保护。L1 从最老历史逐颗降级，达标即停，
+不受 `compact_keep_last` 数量门控；通常复用已有收尾总结，无需 LLM。缺总结或有晚到残留时，
+先对该历史单元生成固定快照摘要，再写 lean 收尾记录。L2 仅归并 lean 历史及既有历史摘要，
+即使没有原始历史 root 也能归并已有摘要。`compact_keep_last` 是 L2 优先保留最近 lean 历史的
+软偏好；预算仍不足时继续归并这些历史，最后才进入 L3。L1/L2 任一级达标都立即停止。
+
+历史候选筛选由 L1 降级与 L2 归并共用。当前任务或运行中后代保护自身及祖先，
+其已完成的子树、兄弟分支仍可独立压缩，不因整棵任务树尚未结束而被排除。任务自身的收尾记录决定
 父关系；派发记录的 origin 是拥有者，child_task_id 是子任务，旧记录中的 origin==parent
-自指关系在读侧忽略。L1 摘要只接收本次选中的不可变记录 ID，不含保留窗口和当前任务。
+自指关系在读侧忽略。历史摘要只接收本次选中的不可变记录 ID，不含保留窗口和当前任务。
 摘要对应媒体降级后选定的固定 ID 快照；生成摘要期间不持有写锁。提交时与 observer
 写入互斥，只 fold 该快照的 ID，不因后台替换记录而重新摘要，也不扩大删除范围。
 后来写入的新记录继续保留，供后续压缩处理。历史摘要锚在快照中保留记录之前。
 若晚到的 task 层记录已没有收尾记录承载其归属，摘要 metadata 仅保留这些残留 task ID，
 让下次压缩仍可识别；本次到此收尾，不追着后台写入反复摘要。
 预算仍超标、确需压当前 task 时，
-先把已完成旧 task 的剩余执行细节收敛成摘要（缺少可用收尾总结时重新生成）；旧详情
+先在 L1 收敛已完成旧 task 的剩余执行细节，再由 L2 归并 lean 历史；旧详情
 尚未收敛就不进入 L3。已达预算目标时仍立即停止，保留最近完整 task 的机会。
 
-**digest 保真契约（spec: compact-fidelity）**：L1/L3 的 digest 按五固定小节生成（`## Goal / ## Constraints / ## Done / ## Remaining / ## Evidence`，Evidence 可缺）；`summarize_for_compact` 落库前经 `parse_structured_digest` 宽松解析，缺必需节整文降级（落库点 metadata `digest_degraded`）。Evidence 引用可回取的执行身份（tool-result-recovery 的 read_tool_output）。验收三层：CI 管道层（材料传递/解析/落库/降级）+ CI 请求层（cue 契约断言——固定 mock 输出不随 cue 变化，语义不归 mock 证）+ 非 CI 语义层（`benchmarks/compact_fidelity_eval.py`，真模型）。**不可逆边界**：fold 即 supersede，对话文本原文不可恢复——本契约不承诺原文回取；可回取面 = 工具产出（结果存储）+ 图片（ref 机制）。段摘要（act_recap / Progress So Far）不在此契约内。
+**digest 保真契约（spec: compact-fidelity）**：L2/L3 及 L1 补摘要的 digest 按五固定小节生成（`## Goal / ## Constraints / ## Done / ## Remaining / ## Evidence`，Evidence 可缺）；`summarize_for_compact` 落库前经 `parse_structured_digest` 宽松解析，缺必需节整文降级（落库点 metadata `digest_degraded`）。Evidence 引用可回取的执行身份（tool-result-recovery 的 read_tool_output）。验收三层：CI 管道层（材料传递/解析/落库/降级）+ CI 请求层（cue 契约断言——固定 mock 输出不随 cue 变化，语义不归 mock 证）+ 非 CI 语义层（`benchmarks/compact_fidelity_eval.py`，真模型）。**不可逆边界**：fold 即 supersede，对话文本原文不可恢复——本契约不承诺原文回取；可回取面 = 工具产出（结果存储）+ 图片（ref 机制）。段摘要（act_recap / Progress So Far）不在此契约内。
 
 **recognize_intent（取代已删除的 metadata_filler 后台协程）**：PrepareStep 判定需要时置 pending 标记（`core/loop/steps/prepare.py:178`），**起飞在 act 的提交点**（`core/loop/steps/act.py:304`-`306` `launch_recognize_intent`）——与 ActStep 并发、单发、不进 step 状态机。`MetadataFillerTaskSettings` 仅作 dataclass 残留（反序列化兼容）。
 
@@ -241,7 +249,7 @@ ASCII 版（同一张图）：
 ```
           initial_step = prepare（dangling tool_call → 先 reconcile → prepare）
         │
-        │  命中 token 阈值：正式切换 compact → prepare(after_compact=True)（L0.5 图片→L1 折→L2 降级→L3 坍缩）
+        │  命中 token 阈值：正式切换 compact → prepare(after_compact=True)（L0.5 图片→L1 降级→L2 历史归并→L3 坍缩）
         │  ┌──────────────────────────────────────────────────┐
         │  │ compact: 复用 act 装配 + 压缩指令 → fold → 重装配  │
         │  └──────────────────────────────────────────────────┘
@@ -425,7 +433,7 @@ ActStep 一次工具调用（最终走 `CapabilityGateway.invoke` `:236`）的�
 | `TOOL_AUDIT / TASK` | gateway `_record_invocation` `core/loop/capability_gateway.py:512`→`:561` | 一次 capability 调用审计 |
 | `CONVERSATION_TURN / TASK / tool` | gateway `_record_result` `:669`→`:688`；打断补挂 `core/loop/steps/act.py:723` | 工具结果对话回合（silent 工具不写） |
 | `SUMMARY`（段摘要） | `segment_fold.fold_segment` `core/loop/steps/segment_fold.py:88` | replacement 经 `fold` 原子写入；observe retry 段折与 bg 边界段折共用 |
-| agent 层折（L1 压缩） | `core/loop/steps/compact.py:521` | 升级压缩的 agent 层产物 |
+| agent 层折（L2 历史归并） | `core/loop/steps/compact.py` / `fold_root_experience` | 升级压缩的 agent 层产物 |
 | `PUBLICATION / SESSION` | `core/loop/steps/finalize.py:751`（仅 task success） | topic=task.id，content=outputs+task_summary；随后发 EventBus `BLACKBOARD_PUBLISHED` `:763` |
 | 派发框 + running ack（`CONVERSATION_TURN / AGENT`） | `finalize.ensure_dispatch_frame_at_start` `core/loop/steps/finalize.py:226`（driver.run 每轮调用 `core/loop/driver.py:282`）；plan 框 eager 写 `gateway:494`-`:560` | 子任务真正 start 时在**父 scope** 铸；没跑起来的子任务从不写框（零清理） |
 | 派发结果终态化（tool 槽替换） | `_close_one` `core/loop/steps/finalize.py:487`：跨 agent 分支 `:526` / 同 agent 分支 `:540` | close 时把 running ack **fold 替换**为终态结果（跨 agent=交付物内容；同 agent=终态文案） |

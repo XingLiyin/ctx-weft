@@ -29,8 +29,9 @@ async def test_stops_after_l1_when_under_target(monkeypatch):
     monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
     monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
-    monkeypatch.setattr(cm, "fold_root_experience", lambda s, c, k, t: (calls.append("L1") or 5))
-    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o: (calls.append("L2") or 0))
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(["c1"]))
+    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o, **kw: (calls.append("L1") or 5))
+    monkeypatch.setattr(cm, "fold_root_experience", lambda *a, **kw: pytest.fail("L2 must not run"))
     monkeypatch.setattr(cm, "collapse_task_layer", lambda s, c, k, t: (calls.append("L3") or 0))
 
     events = await cm.escalating_compact(_state(), SimpleNamespace(memory=None, provider_ctx=None),
@@ -45,8 +46,8 @@ async def test_escalates_l1_l2_l3(monkeypatch):
     monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
     monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
-    monkeypatch.setattr(cm, "fold_root_experience", lambda s, c, k, t: (calls.append("L1") or 3))
-    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o: (calls.append("L2") or 2))
+    monkeypatch.setattr(cm, "fold_root_experience", lambda s, c, k, t, **kw: (calls.append("L2") or 3))
+    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o, **kw: (calls.append("L1") or 2))
     monkeypatch.setattr(cm, "collapse_task_layer", lambda s, c, k, t: (calls.append("L3") or 4))
     monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const({"c1"}))
     monkeypatch.setattr(cm, "_old_history_remaining", lambda s, c: _const(False))
@@ -55,7 +56,9 @@ async def test_escalates_l1_l2_l3(monkeypatch):
     memory = SimpleNamespace(load_view_ids=lambda *a, **kw: _const(list(range(10))),
                              read_records=lambda ids, ctx: _const([object()] * len(ids)))
 
-    await cm.escalating_compact(_state(), SimpleNamespace(memory=memory, provider_ctx=None),
+    state = _state()
+    state.agent.loop_config.compact_keep_last = 0
+    await cm.escalating_compact(state, SimpleNamespace(memory=memory, provider_ctx=None),
                                 token_estimate=900, trigger="compact")
     assert calls == ["L1", "L2", "L3"]
 
@@ -71,7 +74,8 @@ async def test_finished_event_aggregates(monkeypatch):
     monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
     monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
-    monkeypatch.setattr(cm, "fold_root_experience", lambda s, c, k, t: 5)
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(["c1"]))
+    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o, **kw: 5)
 
     events = await cm.escalating_compact(
         _state(), SimpleNamespace(memory=None, provider_ctx=None),
@@ -83,7 +87,7 @@ async def test_finished_event_aggregates(monkeypatch):
     fin = events[-1].payload
     assert fin["total_superseded"] == 5
     assert fin["freed_tokens"] == 400
-    assert fin["levels"] == ["root_experience"]
+    assert fin["levels"] == ["demote_lean"]
     assert fin["est_before"] == 900 and fin["target_tokens"] == 600
 
 
@@ -118,7 +122,8 @@ async def test_started_emitted_live_via_bus(monkeypatch):
     monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
     monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
-    monkeypatch.setattr(cm, "fold_root_experience", lambda s, c, k, t: 5)
+    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(["c1"]))
+    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o, **kw: 5)
 
     emitted = []
     class _Bus:

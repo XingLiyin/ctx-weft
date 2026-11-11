@@ -18,16 +18,23 @@ from __future__ import annotations
 
 import dataclasses as _dc
 import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from ctx_weft.core.loop.driver import CONTEXT_RECOVERY_COUNT_KEY
 from ctx_weft.core.loop.steps import compact as cm
 from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, ParsedDigest
+from ctx_weft.core.loop.task_memory_fold import build_finish_slots
 from ctx_weft.protocols import (
     AgentTemplate,
     IdentityFacet,
     LoopConfig,
+    MemoryAddress,
     MemoryConfig,
+    MemoryEvent,
+    MemoryKind,
+    MemoryScope,
     ProviderContext,
     ToolCall,
 )
@@ -200,10 +207,10 @@ async def test_recovers_in_place_without_spending_a_retry(monkeypatch, caplog):
         handle, state = await runtime.run_single_task(
             template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    # ① 续跑真的发生在**同一个 run 内**：prepare 出现两次，且第二次在第一段 act 之后。
+    # ① 初始预算未越线；唯一一次恢复经过 prepare→compact→prepare 后在同一 run 续跑。
     steps = _steps(seen)
-    assert steps.count("prepare") == 4, f"应恰好恢复一次（每次 compact 后再跑 prepare），实际 {steps}"
-    assert steps[:8] == ["prepare", "compact", "prepare", "act", "prepare", "compact", "prepare", "act"], steps
+    assert steps == ["prepare", "act", "prepare", "compact", "prepare", "act", "observe", "finalize"], steps
+    assert state.extra[CONTEXT_RECOVERY_COUNT_KEY] == 1
 
     # ② 没有吃掉重试预算，也没有被重排
     assert state.task.retry_count == 0
@@ -242,6 +249,59 @@ async def test_recovers_in_place_without_spending_a_retry(monkeypatch, caplog):
     collapsed = [u.content for u in ups if COLLAPSE_DELIM in u.content]
     assert collapsed, "L3 应坍缩出带 COLLAPSE_DELIM 的 USER_PROMPT"
     assert all(c.count(_USER_PROMPT) == 1 for c in collapsed), "原始节有界，不嵌套膨胀"
+
+
+async def test_initial_overbudget_history_is_compacted_before_first_actor_call(monkeypatch):
+    """真实历史使首次完整估算越线；压缩和重装配必须发生在首次 actor 请求之前。"""
+    runtime, llm, seen = _wire(
+        monkeypatch, responses=[MockResponse(text="Here is the final answer.")], inflate_on=set())
+    memory = runtime.providers.get_memory()
+    raw_marker = "INITIAL-HISTORY-RAW-MUST-BE-COMPACTED"
+
+    async def seed_completed_history(event):
+        address = MemoryAddress(session_id=event.session_id, agent_id=event.agent_id,
+                                task_id="initial-history")
+        half = MemoryAddress(session_id=event.session_id, agent_id=event.agent_id)
+        pctx = ProviderContext(session_id=event.session_id, tenant_id=event.tenant_id)
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        await memory.ingest(MemoryEvent(
+            kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK, address=address,
+            role="user", content=raw_marker + "x" * 8000, timestamp=base), pctx)
+        slots = build_finish_slots(
+            scope=half, task_id=address.task_id, parent_task_id=None, title="Earlier task",
+            outcome="success", act_recap="Earlier work", task_summary="Earlier task completed",
+            final_reply="", base=base + timedelta(seconds=1), tool_call_id="initial-close")
+        for slot in slots:
+            slot.metadata["finish_policy"] = {
+                "has_summary": True, "capsule_state": "full", "slot_count": len(slots),
+                "preserve_raw": True, "outcome": "success",
+            }
+            await memory.ingest(slot, pctx)
+
+    runtime.event_bus.subscribe(EventType.AGENT_INSTANTIATED, seed_completed_history)
+    await initialize_all(runtime)
+    _, state = await runtime.run_single_task(
+        template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
+
+    assert _steps(seen) == ["prepare", "compact", "prepare", "act", "observe", "finalize"]
+    started = _types(seen, EventType.MEMORY_COMPACT_STARTED)
+    assert len(started) == 1 and started[0]["trigger"] == "prepare_budget"
+    assert started[0]["token_estimate"] > state.resolved_model.effective_input_limit
+    folded = _types(seen, EventType.MEMORY_COMPACTED)
+    assert any(p.get("source") == "demote_lean" and p["superseded_count"] > 0 for p in folded)
+    compact_finished = next(i for i, (t, _) in enumerate(seen)
+                            if t == EventType.MEMORY_COMPACT_FINISHED)
+    first_actor = next(i for i, (t, _) in enumerate(seen) if t == EventType.ACT_TURN_STARTED)
+    assert compact_finished < first_actor
+    rebuilt = _types(seen, EventType.CONTEXT_TOKENS_ESTIMATED)
+    assert len(rebuilt) == 1
+    assert rebuilt[0]["estimated_tokens"] < (
+        state.resolved_model.effective_input_limit * state.agent.loop_config.compact_token_ratio)
+    assert llm._calls == 1
+    assert raw_marker not in llm.seen[0]
+    assert _USER_PROMPT in llm.seen[0] and _REMAINING_MARK in llm.seen[0]
+    assert state.extra.get(CONTEXT_RECOVERY_COUNT_KEY, 0) == 0
+    assert state.task.status == "FINISHED" and state.task.retry_count == 0
 
 
 async def test_tool_result_is_persisted_before_compaction(monkeypatch):
@@ -284,7 +344,8 @@ async def test_turn_budget_is_not_reset_by_recovery(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 4, "仍应恢复一次"
+    assert _steps(seen).count("prepare") == 3, "初始一次，加恢复的 prepare→compact→prepare"
+    assert state.extra[CONTEXT_RECOVERY_COUNT_KEY] == 1
     assert _types(seen, EventType.MAX_TURNS_REACHED), \
         "恢复后轮数预算已耗尽，必须落到 max_turns 退出而不是白送一轮"
     # 第二段 act 一次 LLM 都不该发：预算为 0 时循环体根本不进
@@ -298,8 +359,8 @@ async def test_gives_up_when_compaction_cannot_free_anything(monkeypatch):
     调用。`collapse_keep_last=99` 让 L3 的 `task_n > keep` 永假（L1/L2 本就无可折胶囊）→
     每次 compact 都零折叠。
 
-    配额是 2，所以「恰好恢复一次」（prepare 跑两次）才能区分两种停下的理由：若 noop 否决
-    失效，配额会允许第二次恢复 → prepare 跑三次。usage 全程抬着，保证每段 act 都真越线。
+    配额是 2，所以「恰好恢复一次」（prepare 跑三次）才能区分两种停下的理由：若 noop 否决
+    失效，配额会允许第二次恢复 → prepare 跑五次。usage 全程抬着，保证每段 act 都真越线。
     """
     runtime, llm, seen = _wire(monkeypatch, collapse_keep_last=99,
                                responses=[_working(i) for i in range(4)],
@@ -309,14 +370,15 @@ async def test_gives_up_when_compaction_cannot_free_anything(monkeypatch):
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
     steps = _steps(seen)
-    assert steps.count("prepare") == 4, f"应在第一次恢复无果后就放弃，实际 {steps}"
+    assert steps.count("prepare") == 3, f"应在第一次恢复无果后就放弃，实际 {steps}"
+    assert state.extra[CONTEXT_RECOVERY_COUNT_KEY] == 1
+    assert llm._calls == 2
     assert "observe" in steps, steps
     # 退回老路：机械退出 → 强制 retry
     assert state.verdict is not None and state.verdict.task_outcome == "continue"
-    # 只看 escalating_compact 那一类折叠（trigger="compact"）。退回老路后 observe 的
+    # 只看预算压缩（trigger="prepare_budget"）。退回老路后 observe 的
     # `_fold_retry_segment` 也会发 MEMORY_COMPACTED（trigger="observe_retry"）——那是 retry
-    # 路径本来的动作，不是「压缩有效」的证据。本分支上它恰好不发（机械判决的 act_recap 为空
-    # → 段保 raw），但断言不该依赖这个巧合：换个分支或改了机械判决就会误红。
+    # 路径本来的动作，不是「压缩有效」的证据，不能计作恢复阶段释放的预算。
     assert not [p for p in _types(seen, EventType.MEMORY_COMPACTED)
                 if p.get("trigger") == "prepare_budget"], "恢复驱动的压缩本例应一无所获"
 
@@ -335,24 +397,49 @@ async def test_plain_text_finish_wins_over_the_stop_line(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 2, "纯文本收尾不该触发恢复"
+    assert _steps(seen).count("prepare") == 1, "纯文本收尾不该触发恢复"
+    assert state.extra.get(CONTEXT_RECOVERY_COUNT_KEY, 0) == 0
+    assert not _types(seen, EventType.MEMORY_COMPACT_STARTED)
     assert state.task.status == "FINISHED", state.task.status
     assert not _types(seen, EventType.TASK_REQUEUED), "不得被改判成 retry 重排"
     assert "Here is the final answer." in (state.task.outputs or ""),         "越线不得吞掉模型刚交出的答复"
 
 
 async def test_actor_done_wins_over_the_stop_line(monkeypatch):
-    """越线 + **finish_task** 同一轮 → actor_done 胜出：任务已完成，没有可续的跑。"""
+    """工具轮次越线且收到 actor_done 信号 → 真正走 actor_done 分支，不恢复、不挂起。"""
     runtime, llm, seen = _wire(monkeypatch, responses=[
         MockResponse(text="all done",
-                     tool_calls=[]),
+                     tool_calls=[ToolCall(id="tc_done", name=_NOOP_NAME, arguments={})]),
     ], inflate_on={1})
+    done_signals = []
+
+    async def signal_actor_done(event):
+        if event.payload.get("capability_name") != _NOOP_NAME:
+            return
+        # finish_task 已下线；仅在真实工具完成事件处模拟收尾信号的来源。
+        # Gateway、工具结果落库、Act 的优先级判断和后续 observe/finalize 均走真实实现。
+        task = runtime._task_managers[event.session_id].get_task(event.task_id)
+        assert task is not None and not task.actor_done
+        assert not task.suspend_requested and not task.switch_requested
+        task.actor_done = True
+        done_signals.append(event.payload["tool_call_id"])
+
+    runtime.event_bus.subscribe(EventType.CAPABILITY_FINISHED, signal_actor_done)
     await initialize_all(runtime)
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 2, "已收尾的 task 不该再压缩续跑"
+    assert _steps(seen) == ["prepare", "act", "observe", "finalize"]
+    assert state.act_exit_reason == "actor_done"
+    assert state.extra.get(CONTEXT_RECOVERY_COUNT_KEY, 0) == 0
+    assert not _types(seen, EventType.MEMORY_COMPACT_STARTED)
+    assert llm._calls == 1 and len(state.transcript) == 1
+    turn = state.transcript[0]
+    assert turn.usage.prompt_tokens == _INFLATED
+    assert [tc.id for tc in turn.tool_calls] == done_signals and len(done_signals) == 1
+    assert [r["tool_call_id"] for r in turn.tool_results] == done_signals
     assert state.task.status == "FINISHED", state.task.status
+    assert state.task.outputs == "all done"
     assert not _types(seen, EventType.TASK_REQUEUED)
 
 
@@ -374,7 +461,8 @@ async def test_suspend_wins_over_the_stop_line(monkeypatch):
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
     steps = _steps(seen)
-    assert steps.count("prepare") == 2, f"挂起前只允许初始 prepare/compact/prepare，实际 {steps}"
+    assert steps.count("prepare") == 1, f"初始预算未越线，挂起不应触发恢复，实际 {steps}"
+    assert state.extra.get(CONTEXT_RECOVERY_COUNT_KEY, 0) == 0
     assert "suspend" in steps, steps
     assert "observe" not in steps, steps
 
@@ -389,7 +477,8 @@ async def test_predispatch_compact_reassembles_then_dispatches_without_another_l
     )
     await initialize_all(runtime)
     _, state = await runtime.run_single_task(template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
-    assert _steps(seen) == ["prepare", "compact", "prepare", "act", "compact", "prepare", "act", "suspend"]
+    assert _steps(seen) == ["prepare", "act", "compact", "prepare", "act", "suspend"]
+    assert state.extra.get(CONTEXT_RECOVERY_COUNT_KEY, 0) == 0
     assert llm._calls == 2
     assert state.pending_act_turn is None
     assert state.task.status == "SUSPENDED"
@@ -405,7 +494,8 @@ async def test_quota_exhaustion_falls_back_to_the_retry_path(monkeypatch):
 
     与 `test_gives_up_when_compaction_cannot_free_anything` 成对：那条是「压不动」提前
     否决（恢复一次就停），这条是压得动但救不住、一路用满 `max_context_recoveries=2`
-    （恢复两次 → prepare 跑三次）。两条走的是 `_can_recover_context` 的不同否决分支。
+    （恢复两次 → 初始一次加两组 prepare→compact→prepare，共五次）。
+    两条走的是 `_can_recover_context` 的不同否决分支。
     """
     # 第 1 次调用不越线，给第一次恢复的 L3 留下一轮可折的历史；之后每次都越线。每次恢复
     # L3 都折掉前一轮（压缩有效 → noop 旗不立），直到配额用满。observe 也会发 LLM 请求，
@@ -417,7 +507,9 @@ async def test_quota_exhaustion_falls_back_to_the_retry_path(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 6, f"配额 2 → 恰好恢复两次，实际 {_steps(seen)}"
+    assert _steps(seen).count("prepare") == 5, f"配额 2 → 恰好恢复两次，实际 {_steps(seen)}"
+    assert state.extra[CONTEXT_RECOVERY_COUNT_KEY] == 2
+    assert llm._calls == 4
     assert [p for p in _types(seen, EventType.MEMORY_COMPACTED)
             if p.get("trigger") == "prepare_budget"], "本例的压缩是有效的（与 give-up 那条相区分）"
     assert state.verdict is not None and state.verdict.task_outcome == "continue"
@@ -430,5 +522,7 @@ async def test_recovery_disabled_keeps_legacy_retry_path(monkeypatch):
     handle, state = await runtime.run_single_task(
         template_id="agent:tpl_recover", user_prompt=_USER_PROMPT)
 
-    assert _steps(seen).count("prepare") == 2
+    assert _steps(seen).count("prepare") == 1
+    assert state.extra.get(CONTEXT_RECOVERY_COUNT_KEY, 0) == 0
+    assert not _types(seen, EventType.MEMORY_COMPACT_STARTED)
     assert state.verdict is not None and state.verdict.task_outcome == "continue"

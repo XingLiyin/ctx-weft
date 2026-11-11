@@ -129,7 +129,7 @@ EventBus             事件总线，所有状态变更的唯一出口
 >
 > **工具面预算口径（2026-09 起，spec: context-budget）**：装配预算先扣工具面预留（名称 + 描述 + 入参 schema，按能力快照现算，`AssembledPrompt.metadata.tools_reserved_tokens` 可读）——工具声明不参与裁剪，预算压力由预留承担；溢出报错仍报真窗口。act 循环内增量估算追踪工具面指纹（覆盖 name+description+schema 的规范化定义哈希——同名工具 schema 更新可感知）：运行期 pin 大 schema 后估算立即增长（`max_tokens` 随之收紧）；工具面不变时增量行为与旧口径一致。发送前超限**不硬拒**（明示决策）：收紧 max_tokens + WARNING 留痕 + 既有比例机制触发下轮压缩。估算与实际 usage 的偏差留工具面分项记录（指纹/估算/实测同现于回喂日志）。
 >
-> **压缩摘要保真（2026-09 起，spec: compact-fidelity）**：task 域（L3 坍缩）与 agent 域（L1 折叠）的压缩 digest 按五个固定小节生成——`## Goal / ## Constraints / ## Done / ## Remaining / ## Evidence`（Evidence 可缺）；落库前宽松解析，缺必需小节整文降级存档（metadata `digest_degraded: true`）、不中断压缩。`## Evidence` 引用可回取的工具产出（`results__read_tool_output(invocation_id=...)`）。验收分三层：管道层与请求层（cue 契约）在 CI（`tests/unit/test_compact_fidelity.py`）；**语义质量层不入 CI**——真模型是否按 cue 保留约束，发布前人工运行 `python benchmarks/compact_fidelity_eval.py`（需真实 LLM key）。**不可逆边界**：对话文本原文在 fold 后不可恢复（既有 supersede 语义不变，本契约不承诺原文回取）；可回取面仅限工具产出（结果存储）与图片（既有 ref 机制）。段摘要（act_recap / Progress So Far）不在本契约范围（逐段生成、消费方为观察锚点，见 ARCHITECTURE）。
+> **压缩摘要保真（2026-09 起，spec: compact-fidelity）**：task 域（L3 坍缩）与 agent 域（L2 历史归并）的压缩 digest 按五个固定小节生成——`## Goal / ## Constraints / ## Done / ## Remaining / ## Evidence`（Evidence 可缺）；落库前宽松解析，缺必需小节整文降级存档（metadata `digest_degraded: true`）、不中断压缩。`## Evidence` 引用可回取的工具产出（`results__read_tool_output(invocation_id=...)`）。验收分三层：管道层与请求层（cue 契约）在 CI（`tests/unit/test_compact_fidelity.py`）；**语义质量层不入 CI**——真模型是否按 cue 保留约束，发布前人工运行 `python benchmarks/compact_fidelity_eval.py`（需真实 LLM key）。**不可逆边界**：对话文本原文在 fold 后不可恢复（既有 supersede 语义不变，本契约不承诺原文回取）；可回取面仅限工具产出（结果存储）与图片（既有 ref 机制）。段摘要（act_recap / Progress So Far）不在本契约范围（逐段生成、消费方为观察锚点，见 ARCHITECTURE）。
 
 这些**协议**是对外的接入面。外部系统只需实现其中一个协议，ctx-weft 自动用上（LLM 详见
 [LLM 接入](#llm-接入) 一节）：
@@ -392,7 +392,7 @@ template = AgentTemplate(
         max_spawn_depth=4,          # 子 agent 最大嵌套深度
         compact_token_ratio=0.8,    # token 占 context_limit 比例超过则压缩
         compact_message_delta=20,   # 距上次 compact 累积多少条再触发
-        compact_keep_last=6,        # compact 后保留最近多少条
+        compact_keep_last=6,        # L2 优先保留的最近 lean 历史数，预算不足时继续归并
     ),
 )
 ```
