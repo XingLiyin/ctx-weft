@@ -171,6 +171,7 @@ async def worker(path, stage, fault, cut):
             if stage == "idle":
                 agent = tm.get_task(target).assigned_agent_id
                 assert rt._agent_lifecycle_manager.status_of(agent) == "idle"
+                assert await rt.recover_storage("tree-session")
                 followup = await rt.dispatch_task("tree-session", "UNRELATED RUN FOLLOWUP", agent_id=agent,
                     settings={"use_subagent": False}, unattended=True)
                 async with asyncio.timeout(10):

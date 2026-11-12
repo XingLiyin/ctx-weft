@@ -75,7 +75,7 @@ async def test_run_start_does_not_wait_for_pending_observe():
     state, task, agent = _make_state_and_task()
     recap = asyncio.create_task(slow_recap())
     driver = _RecordingDriver(order)
-    driver.executions.register("recap-run", task.id, "observe", recap)
+    driver.executions.register("recap-run", task.id, "observe", recap, agent_id=agent.id)
 
     await CtxWeftRuntime._run_loop(
         _fake_runtime_self(), state, SimpleNamespace(task_manager=None), driver,
@@ -116,7 +116,7 @@ async def test_run_start_unaffected_by_errored_recap():
     state, task, agent = _make_state_and_task()
     recap = asyncio.create_task(errored_recap())
     driver = _RecordingDriver(order)
-    driver.executions.register("recap-run", task.id, "observe", recap)
+    driver.executions.register("recap-run", task.id, "observe", recap, agent_id=agent.id)
 
     await CtxWeftRuntime._run_loop(
         _fake_runtime_self(), state, SimpleNamespace(task_manager=None), driver,

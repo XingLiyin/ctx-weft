@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 from ctx_weft.core.loop.driver import make_event
 from ctx_weft.core.loop.llm_stream import DelegatingLLMStream, stream_until_cancel
+from ctx_weft.core.models.discriminators import InterruptReason
 from ctx_weft.core.orchestrator.model import ResolvedModel
 from ctx_weft.core.utils.content import redact_content_for_event, rehydrate_content
 from ctx_weft.core.utils.estimate import (
@@ -830,7 +831,7 @@ async def _stream_llm_resilient(owner, ctx, state, request, *, inputs=None,
                 owner.discard_result()
                 if emit_stream_events:
                     await bus.emit(make_event(state, EventType.LLM_RESPONSE_DISCARDED, payload={
-                        "request_id": request_id, "reason": "llm_outage",
+                        "request_id": request_id, "reason": InterruptReason.LLM_OUTAGE,
                         "error": str(e), "error_code": getattr(e, "status_code", 0),
                         "will_retry": will_retry, "usage": dataclasses.asdict(usage),
                         "usage_known": usage.total_tokens > 0 or usage.prompt_tokens > 0

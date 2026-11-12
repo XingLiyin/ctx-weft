@@ -169,7 +169,14 @@ async def test_repeated_edit_retract_finish_restart_and_next_task(tmp_path, entr
             if hold_old:
                 await asyncio.wait_for(old_report_waiting.wait(), 10)
             first, = rt.hitl_registry.list_pending(session_id=SID)
-            await answer(rt, h, entry, "WITHDRAWN_INPUT")
+            if hold_old and entry == "reply":
+                reply = asyncio.create_task(answer(rt, h, entry, "WITHDRAWN_INPUT"))
+                await asyncio.sleep(0)
+                assert not reply.done()
+                release_old_report.set()
+                await asyncio.wait_for(reply, 10)
+            else:
+                await answer(rt, h, entry, "WITHDRAWN_INPUT")
             await asyncio.wait_for(llm.retracted_started.wait(), 10)
             await rt.pause_agent(h.agent_id)
             await wait_until(lambda: not tm._dispatch_tasks)
@@ -183,7 +190,10 @@ async def test_repeated_edit_retract_finish_restart_and_next_task(tmp_path, entr
             if hold_old:
                 registry = rt._step_executions[SID]
                 await wait_until(lambda: registry.pending_run_id(h.task_id) is None)
-                assert registry.tasks  # The older producer is still waiting on storage.
+                if entry == "reply":
+                    assert release_old_report.is_set()
+                else:
+                    assert registry.tasks  # send can proceed while the old report is held.
             await answer(rt, h, entry, "FINAL_REQUEST")
             release_old_report.set()
             await settled(rt, h)
@@ -418,13 +428,14 @@ async def test_uncertain_input_then_repeated_finish_failure_retains_original_run
             original = store.append_batch
             input_failed = []
             finish_attempts = []
+            finish_available = asyncio.Event()
 
             async def append(sid, bid, events, *args, **kwargs):
                 if not input_failed and any("FINAL_REQUEST" in str(e.payload) for e in events):
                     input_failed.append(bid)
                     await original(sid, bid, events, *args, **kwargs)
                     raise OSError("input receipt lost")
-                if (len(finish_attempts) < 2 and any(
+                if (not finish_available.is_set() and any(
                         e.type == "RunFinished" and e.origin == "runtime" for e in events)):
                     finish_attempts.append((bid, deepcopy(events)))
                     if finish_fault == "unknown":
@@ -443,7 +454,9 @@ async def test_uncertain_input_then_repeated_finish_failure_retains_original_run
                     await rt.recover_agent(h.agent_id, session_id=SID)
                 assert rt._pending_actor_runs[(SID, h.task_id)].finished.id == original_finish
                 assert h.task_id in tm.running_task_ids() and not tm._dispatch_tasks
-            assert finish_attempts[0] == finish_attempts[1]
+            assert len(finish_attempts) >= 2
+            assert all(attempt == finish_attempts[0] for attempt in finish_attempts)
+            finish_available.set()
             store.append_batch = original
             rt.clear_storage_isolation(SID)
             await rt.recover_agent(h.agent_id, session_id=SID)

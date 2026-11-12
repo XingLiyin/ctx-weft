@@ -7,7 +7,8 @@ import pytest
 from ctx_weft.core.loop.driver import ACT_TURNS_USED_KEY, COMPACT_NOOP_KEY, StepDriver
 from ctx_weft.core.loop.steps import act as act_mod
 from ctx_weft.core.loop.steps.act import ActStep, PendingActTurn, TurnRecord
-from ctx_weft.core.loop.steps.compact import CompactStep, collapse_task_layer
+from ctx_weft.core.loop.steps.compact import CompactStep
+from tests.compaction_testkit import collapse_task_layer
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.utils.clock import now_utc
 from ctx_weft.protocols import (
@@ -66,6 +67,7 @@ async def test_predispatch_compact_resumes_original_tools_once(monkeypatch, susp
 
     async def assemble(request):
         records = await load_records(ctx.memory, state.scope, MemoryScope.TASK, ctx.provider_ctx)
+        records = request.extra.get("organize_records", records)
         records = [r for r in records if r.id not in request.extra.get("exclude_memory_ids", [])]
         assembled.append((request.purpose, [r.content for r in records]))
         return scripted_inputs(NS(system="SYS", messages=[LLMMessage(
@@ -126,7 +128,8 @@ async def test_pending_dispatch_assistant_survives_zero_keep_last(monkeypatch):
     state, ctx, _, _ = await _prepare_compact_transition(monkeypatch)
     # Dispatch calls are deliberately omitted from the task message metadata.
     record = MemoryEvent(kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
-                         address=state.scope, role="assistant", content="dispatching", timestamp=now_utc())
+                         address=state.scope, role="assistant", content="dispatching", timestamp=now_utc(),
+                         metadata={"execution_call_ids": ["dispatch-pending"]})
     rid = await ctx.memory.ingest(record, ctx.provider_ctx)
     state.pending_act_turn = PendingActTurn(TurnRecord(1, [], "dispatching"), rid, False)
     from ctx_weft.core.assembler import ContextRequest
@@ -165,7 +168,7 @@ async def test_compact_rejects_invalid_continuation_before_mutation(monkeypatch,
 
 
 async def test_failed_compact_invalidates_old_baseline(monkeypatch):
-    from ctx_weft.core.loop.steps import compact as cm
+    from tests import compaction_testkit as cm
 
     state, ctx, _, driver = await _prepare_compact_transition(monkeypatch)
     state.agent.loop_guard.context_tokens = 90_000
@@ -174,7 +177,7 @@ async def test_failed_compact_invalidates_old_baseline(monkeypatch):
     async def fail(*args, **kwargs):
         raise RuntimeError("later compact level failed")
 
-    monkeypatch.setattr(cm, "escalating_compact", fail)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.compact._run_compact", fail)
     with pytest.raises(RuntimeError):
         await driver.execute("compact", state, ctx, options={"after": "prepare"})
     assert state.agent.loop_guard.context_tokens == 0

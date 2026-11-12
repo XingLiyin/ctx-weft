@@ -6,8 +6,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from ctx_weft.core.loop.llm_gateway import _estimate_message_tokens
-from ctx_weft.core.loop.steps.prepare import _estimate_assembled_tokens
-from ctx_weft.core.utils.estimate import estimate_message_tokens
+from ctx_weft.core.utils.estimate import estimate_assembled_tokens, estimate_message_tokens
 from ctx_weft.protocols import (
     ImagePart,
     LLMMessage,
@@ -20,7 +19,6 @@ from ctx_weft.protocols import (
 )
 from ctx_weft.protocols.events import EventType
 from tests.unit.test_compact_history_priority import BASE, capsule, cm, setup
-from tests.unit.test_escalating_compact import _const, _state
 
 
 def test_message_costs_agree_for_tools_images_framing_and_emitted_reasoning():
@@ -32,7 +30,7 @@ def test_message_costs_agree_for_tools_images_framing_and_emitted_reasoning():
     cost = estimate_message_tokens(message, len)
     assert cost > 2600
     assert cost == _estimate_message_tokens(message, len)
-    assert cost == _estimate_assembled_tokens(NS(system="", messages=[message], tools=[]), len)
+    assert cost == estimate_assembled_tokens(NS(system="", messages=[message], tools=[]), len)
 
 
 @pytest.mark.asyncio
@@ -51,7 +49,7 @@ async def test_l1_removing_large_tool_arguments_stops_before_summarization(monke
     async def unexpected_summary(*args, **kwargs):
         pytest.fail("Removing the large call already meets the budget")
 
-    monkeypatch.setattr(cm, "summarize_for_compact", unexpected_summary)
+    cm.patch_summary(monkeypatch, unexpected_summary)
     events = await cm.escalating_compact(state, ctx, token_estimate=80_000)
     levels = [e.payload for e in events if e.type == EventType.MEMORY_COMPACTED]
     assert [p["source"] for p in levels] == ["demote_lean"]
@@ -62,22 +60,15 @@ async def test_l1_removing_large_tool_arguments_stops_before_summarization(monke
 
 @pytest.mark.asyncio
 async def test_growth_during_compaction_is_not_discarded_from_budget(monkeypatch):
-    costs = iter([900, 1100, 800, 500])
-
-    async def measure(*args):
-        return next(costs)
-
-    monkeypatch.setattr(cm, "_active_memory_tokens", measure)
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda *args: _const(["old"]))
-    monkeypatch.setattr(cm, "demote_kept_capsules", lambda *args, **kwargs: 1)
-    monkeypatch.setattr(cm, "_old_history_remaining", lambda *args: _const(False))
-    monkeypatch.setattr(cm, "fold_root_experience", lambda *args, **kwargs: 1)
-    collapsed = []
-    monkeypatch.setattr(cm, "collapse_task_layer", lambda *args: collapsed.append(True) or 1)
-    state = _state(ratio_target=0.65)
-    state.agent.loop_config.compact_keep_last = 0
-    memory = NS(load_view_ids=lambda *args, **kwargs: _const(list(range(10))),
-                read_records=lambda ids, ctx: _const([object()] * len(ids)))
-    events = await cm.escalating_compact(state, NS(memory=memory, provider_ctx=None), token_estimate=900)
-    assert collapsed == [True]  # 800 after L2 is still above 650.
-    assert events[-1].payload["est_after"] == 500
+    state,ctx,_=await setup(monkeypatch,target=0.01)
+    for i in range(8):await capsule(state,ctx,f"old{i}",i)
+    before=await cm._active_memory_tokens(state,ctx)
+    calls=[]
+    async def summary(*args,scope="task",**kwargs):
+        calls.append(scope)
+        return "growth"*1000 if len(calls)==1 else "digest"
+    cm.patch_summary(monkeypatch,summary)
+    events=await cm.escalating_compact(state,ctx,token_estimate=90_000)
+    after=await cm._active_memory_tokens(state,ctx)
+    assert calls==["agent","agent","task"]
+    assert events[-1].payload["est_after"]==90_000+after-before

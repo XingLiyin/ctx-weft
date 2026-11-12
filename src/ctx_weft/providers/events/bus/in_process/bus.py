@@ -93,6 +93,7 @@ class _Delivery:
     done: bool = False
     recovering: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    notifying_task: asyncio.Task | None = None
 
 
 class InProcessEventBus(EventBus):
@@ -158,6 +159,12 @@ class InProcessEventBus(EventBus):
             await self._deliver_registered(key, delivery)
 
     async def _deliver_registered(self, key, delivery):
+        # A subscriber may synchronously reconcile storage. This delivery's
+        # receipt is already confirmed; joining its own notification would
+        # wait for the subscriber that is making this call.
+        if (delivery.notifying_task is not None
+                and delivery.notifying_task is asyncio.current_task()):
+            return
         async with delivery.lock:
             if delivery.done:
                 return
@@ -171,8 +178,12 @@ class InProcessEventBus(EventBus):
             while delivery.notified < len(delivery.events):
                 event = delivery.events[delivery.notified]
                 self._track_background_run(event)
-                await self._fanout(event, to_provisional=True, to_rest=True,
-                                   position=delivery.positions.get(event.id))
+                delivery.notifying_task = asyncio.current_task()
+                try:
+                    await self._fanout(event, to_provisional=True, to_rest=True,
+                                       position=delivery.positions.get(event.id))
+                finally:
+                    delivery.notifying_task = None
                 delivery.notified += 1
             delivery.done = True
             self._deliveries.pop(key, None)

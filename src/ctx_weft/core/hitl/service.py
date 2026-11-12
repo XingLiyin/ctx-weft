@@ -422,7 +422,11 @@ class HitlService:
                     resolved.claimed = self._deliver(slot, pending.decision, req.id)
                 self._pending_resolutions.pop(req.id, None)
                 self.registry.gc()
-                confirmed.set_result(True)
+                # Receipt retries retain the original callback. Its attempt's
+                # future may already be finished; wake the current waiters.
+                active = pending.confirming
+                if active is not None and not active.done():
+                    active.set_result(True)
 
             # Bypass retractable rounds. The exact envelope and event/batch ID
             # survive failure; publication is synchronous after confirmation

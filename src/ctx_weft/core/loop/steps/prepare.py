@@ -30,8 +30,8 @@ from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
 from ctx_weft.core.loop.steps.recognize_intent import should_recognize_intent
 from ctx_weft.core.models.task import NormalTaskSettings
 from ctx_weft.core.utils.estimate import (
+    estimate_assembled_tokens,
     estimate_content_tokens,
-    estimate_message_tokens,
     estimate_tokens,
     estimate_tool_calls_tokens,
 )
@@ -61,21 +61,6 @@ def _staged_memory(state, ctx) -> list:
     """当前 task 这一轮暂存、还没落盘的 memory 写入（没开窗 / 无 TaskManager → 空）。"""
     staged = getattr(getattr(ctx, "task_manager", None), "staged_memory", None)
     return staged(state.task.id) if staged is not None else []
-
-
-def _estimate_assembled_tokens(prompt, count: Callable[[str], int] | None = None) -> int:
-    """完整 prompt 的 compact 估算：system + 消息（含 tool_calls/图片）+ tools。
-
-    count：文本费率经 count 回调走 tokenizer（通常是 ``ctx.llm.tokenizer.count``，已校准）；
-    None 回退未校准启发式（纯单测/无 llm 场景）。
-    """
-    from ctx_weft.core.utils.estimate import estimate_tools_tokens
-
-    c = count or estimate_tokens
-    total = c(prompt.system or "")
-    total += sum(estimate_message_tokens(m, count) for m in prompt.messages)
-    total += estimate_tools_tokens(getattr(prompt, "tools", None), count)
-    return total
 
 
 class PrepareStep(Step):
@@ -129,7 +114,7 @@ class PrepareStep(Step):
 
         inputs, prompt = await _assemble()
         token_estimate = max(
-            token_estimate, _estimate_assembled_tokens(prompt, ctx.llm.tokenizer.count))
+            token_estimate, estimate_assembled_tokens(prompt, ctx.llm.tokenizer.count))
 
         # ── 5. Normal preparation can route to compact; post-compact preparation only rebuilds. ──
         if not after_compact and await self._should_compact(state, ctx, token_estimate):

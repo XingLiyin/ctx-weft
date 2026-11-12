@@ -50,6 +50,11 @@ class AgentRecallSource:
         from ctx_weft.core.utils.ids import generate_id
 
         extra = getattr(request, "extra", None) or {}
+        organized = extra.get("organize_records")
+        if organized is not None:
+            for idx, record in enumerate(organized):
+                yield record_to_history_block(record, source=self.name, idx=idx)
+            return
         excluded = set(extra.get("exclude_memory_ids", ()))
         fixed_ids = extra.get("observe_record_ids")
         if fixed_ids is not None:

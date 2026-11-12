@@ -44,6 +44,15 @@ class _FakeMem:
                          kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK),
         ]
 
+    async def organize(self, ctx, *, operation, record_ids, summary, **kwargs):
+        from dataclasses import replace
+        from ctx_weft.protocols import MemoryKind, MemoryOrganizeResult
+        assert operation == "fold_segment" and "a1" in record_ids
+        self.applied.append(("task", summary, 0))
+        replacement = replace(self._selected["a1"], id="summary", kind=MemoryKind.SUMMARY, content=summary)
+        return MemoryOrganizeResult(status="changed", superseded_ids=("a1",),
+                                    replacements=(replacement,), records_before=2, records_after=2)
+
     async def fold(self, supersede_ids, replacements, ctx):
         for ev in replacements:
             self.applied.append((ev.scope.value, ev.content, ev.metadata.get("keep_last", 0)))

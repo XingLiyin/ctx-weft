@@ -64,6 +64,8 @@ async def worker(path, order, size, cut, recovering=False):
     async with open_sqlite_event_store(path / "events.db") as store:
         async with open_sqlite_memory(path / "memory.db") as memory:
             rt, llm = make_child_runtime(store, memory, size, recovering)
+            from tests.runtime_helpers import install_mechanical_report_fixture
+            install_mechanical_report_fixture(lambda state: bool(state.task.parent_task_id))
             children = set()
             report_ready = asyncio.Event()
             finalized = asyncio.Event()
@@ -103,6 +105,14 @@ async def worker(path, order, size, cut, recovering=False):
                     os._exit(73)
                 return result
             memory.fold = fold
+            commit_organize = memory._commit_organize
+            async def organize_commit(ids, events, ctx):
+                result = await commit_organize(ids, events, ctx)
+                if result is not None and cut == "raw_folded" and ctx.task_id in children and ids and not events:
+                    os._exit(73)
+                return result
+            memory._commit_organize = organize_commit
+
             if not recovering:
                 original_finalize = FinalizeStep.execute
                 async def ordered_finalize(self, state, ctx):

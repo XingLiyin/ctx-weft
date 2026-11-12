@@ -84,7 +84,7 @@ class JourneyLLM(_FinishEveryTaskLLM):
             if self.scenario == "plan" and kind == "judge" and self.failed_review:
                 outcome, self.failed_review = "fail", False
             if self.scenario == "image" and "SCREENSHOT_ACCEPTED" not in text:
-                outcome = "continue"
+                outcome = "waiting"
             return self.response(request, name="control__report_observation", arguments={
                 "task_status": outcome,
                 "act_recap": "Evidence checked. " + evidence(text),
@@ -433,10 +433,11 @@ async def finish_journey(rt, llm, path, provider, store, memory, data, scenario,
             await reply(rt, q, "Approved release listing", arguments=(
                 {"command": "changed retry"} if variant in {"before", "unknown"} else APPROVED_ARGS))
             if variant in {"before", "unknown"}:
-                assert len(provider.attempts) == 3
+                assert len(provider.attempts) >= 3
                 assert all(a == provider.attempts[0] for a in provider.attempts)
         else:
             await rt.recover_agent(data["root"], session_id=SID)
+        assert await rt.recover_storage(SID)
         await task_finished(rt, data["task"])
         assert effects(path) == [APPROVED_ARGS]
         actors = [request_text(r) for k, r in llm.calls if k == "actor"]

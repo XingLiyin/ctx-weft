@@ -185,3 +185,10 @@ def normalize_legacy_tasks(records: Iterable[_Record]) -> list[_Record]:
             )
         )
     return projected
+
+
+def capsule_origin(record) -> str | None:
+    """Inherited agent rows belong to the receiving task's capsule."""
+    address = getattr(record, "address", None)
+    return record.metadata.get("origin_task_id") or (
+        address.task_id if address and record.metadata.get("inherited_from_agent_id") else None)

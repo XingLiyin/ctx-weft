@@ -45,7 +45,7 @@ task-specific visibility rules. `compile_history()` executes the same program
 without instructions, image downgrading or budget trimming, for inherited
 snapshots and compact token estimates.
 
-`legacy_task_memory.py` only normalizes old synthetic calls into structured facts;
+`core/models/task_memory.py` normalizes old synthetic calls into structured facts;
 the history template renders those facts. It is the independently removable
 compatibility layer. Current lifecycle metadata helpers remain with
 `loop/task_memory_fold.py`, and writers invoke the runtime label macro directly.

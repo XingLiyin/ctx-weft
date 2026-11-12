@@ -70,7 +70,7 @@ async def _fold_trailing_segment(mem: InMemoryMemoryProvider) -> None:
                                  timestamp=_ts(1), role="user"), pctx)
     await mem.ingest(MemoryEvent(type=T.LLM_RESPONSE, address=scope, content="上一轮回复",
                                  timestamp=_ts(2), role="assistant"), pctx)
-    from ctx_weft.core.loop.task_memory_fold import segment_fold
+    from tests.segment_fold_testkit import segment_fold
     await segment_fold(mem, scope, MemoryScope.TASK, "段摘要", pctx)
 
 
@@ -153,7 +153,7 @@ async def test_inject_user_reply_does_not_await_pending_observe(monkeypatch):
         order.append("fold")
 
     pending = asyncio.create_task(_slow_fold())
-    registry.register("recap-run", "t1", "observe", pending)
+    registry.register("recap-run", "t1", "observe", pending, agent_id="a1")
 
     session = Session(id="s1", tenant_id="default", user_prompt="hi")
     task = Task(id="t1", session_id="s1", status="SUSPENDED",

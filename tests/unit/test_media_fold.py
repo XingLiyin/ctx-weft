@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.core.media import demote_all, demote_for_budget
-from ctx_weft.core.media.fold import _rebuild
+from ctx_weft.core.media.fold import rebuild_demoted_record as _rebuild
 from ctx_weft.core.media.policy import demotable_ref, plan_demotions
 from ctx_weft.core.media.refs import decode_image_placeholder
 from ctx_weft.core.utils.content import content_to_text, image_part_count, image_tokens

@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, escalating_compact
+from tests.compaction_testkit import COLLAPSE_DELIM, escalating_compact, parse_structured_digest
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
 from ctx_weft.protocols import (
     MemoryAddress,
@@ -172,7 +172,7 @@ async def test_escalating_compact_passes_protect_types_and_user_prompts_survive(
     await _seed_events(mem)
 
     with patch(
-        "ctx_weft.core.loop.steps.compact.summarize_for_compact",
+        "ctx_weft.core.loop.steps.compact._summarize",
         new_callable=AsyncMock,
         return_value="段摘要",
     ):

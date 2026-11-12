@@ -27,10 +27,8 @@ pytestmark = pytest.mark.asyncio
 
 
 def _is_background_recap(request) -> bool:
-    """Both modes advertise one tool; only judging prompts require task_status."""
-    names = {t.name for t in request.tools}
-    text = "\n".join(str(m.content) for m in request.messages)
-    return "control__report_observation" in names and "`task_status`" not in text
+    from tests.runtime_helpers import is_recap_request
+    return is_recap_request(request)
 
 class _RouterLLM(MockLLMAdapter):
     """按 request.tools 路由；act 次序：root delegate → child finish → root finish。"""

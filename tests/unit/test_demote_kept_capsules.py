@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, UTC
 from types import SimpleNamespace
 import pytest
 
-from ctx_weft.core.loop.steps.compact import demote_kept_capsules
+from tests.compaction_testkit import demote_kept_capsules
 from ctx_weft.core.loop.task_memory_fold import task_record_kind
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import MemoryEvent, MemoryEventType as T, MemoryAddress, ProviderContext

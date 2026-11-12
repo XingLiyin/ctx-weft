@@ -22,7 +22,7 @@ async def test_registry_waits_until_the_pending_fold_completes():
     registry = ExecutionRegistry()
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
-    registry.register("run", "task", "observe", task)
+    registry.register("run", "task", "observe", task, agent_id="agent")
     waiter = asyncio.create_task(registry.wait("task"))
     await asyncio.sleep(0)
     assert not waiter.done()
@@ -36,7 +36,7 @@ async def test_registry_wait_is_a_noop_without_pending_work():
     await asyncio.wait_for(registry.wait("task"), timeout=1)
     done = asyncio.create_task(asyncio.sleep(0))
     await done
-    registry.register("run", "task", "observe", done)
+    registry.register("run", "task", "observe", done, agent_id="agent")
     await asyncio.wait_for(registry.wait("task"), timeout=1)
     assert registry.pending_run_id("task") is None
 
@@ -46,8 +46,8 @@ async def test_old_completion_does_not_clear_new_registration():
     release = asyncio.Event()
     old = asyncio.create_task(asyncio.sleep(0))
     new = asyncio.create_task(release.wait())
-    registry.register("old", "task", "observe", old)
-    registry.register("new", "task", "observe", new)
+    registry.register("old", "task", "observe", old, agent_id="agent")
+    registry.register("new", "task", "observe", new, agent_id="agent")
     await old
     await asyncio.sleep(0)
     assert registry.pending_run_id("task") == "new"
@@ -103,7 +103,7 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
 
     pending = asyncio.create_task(_slow_fold())
     runtime._step_executions[handle.session_id].register(
-        "previous-observe", handle.task_id, "observe", pending)
+        "previous-observe", handle.task_id, "observe", pending, agent_id=agent_id)
 
     llm_saw_fold_done.clear()
     await initialize_all(runtime)

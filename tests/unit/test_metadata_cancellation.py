@@ -48,8 +48,8 @@ async def test_stop_metadata_signals_all_live_runs_without_canceling_observe():
     report = asyncio.create_task(report_release.wait())
     for index, (token, task) in enumerate(zip(tokens, tasks)):
         registry.register(f"metadata-{index}", "same-task", "recognize_intent", task,
-                          stop_metadata=token.cancel)
-    registry.register("report", "same-task", "observe", report)
+                          agent_id="agent", stop_metadata=token.cancel)
+    registry.register("report", "same-task", "observe", report, agent_id="agent")
     registry.stop_metadata()
     await asyncio.gather(*tasks)
     assert not report.done()

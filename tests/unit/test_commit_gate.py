@@ -251,3 +251,44 @@ async def test_required_consumer_failure_propagates_and_observers_unnotified():
     assert observers == []                       # committed 通知未流出
     # 事件本身已提交（store 有）——提交与通知是两件事；恢复由持久日志收口
     assert len(await all_events(store, "s1")) == 1
+
+
+async def test_notification_can_reconcile_its_own_confirmed_delivery():
+    import asyncio
+
+    store = InMemoryEventStore()
+    bus = InProcessEventBus()
+    bus.attach_commit_gate(CommitGate(store))
+    notices, committed = [], []
+    async def reenter(event):
+        assert len(await store.read_range("s1")) == 1
+        await bus.confirm_pending_storage("s1")
+        notices.append(event.id)
+    bus.subscribe(None, reenter)
+    await asyncio.wait_for(bus.emit_batch([_ev(1)], on_committed=lambda: committed.append(True)), 1)
+    assert notices == ["evt_0001"] and committed == [True]
+    assert not bus.has_pending_storage("s1")
+
+
+async def test_concurrent_reconciliation_still_joins_notification():
+    import asyncio
+
+    store = InMemoryEventStore()
+    bus = InProcessEventBus()
+    bus.attach_commit_gate(CommitGate(store))
+    entered, release = asyncio.Event(), asyncio.Event()
+    notices = []
+    async def hold(event):
+        entered.set()
+        await release.wait()
+        notices.append(event.id)
+    bus.subscribe(None, hold)
+    emit = asyncio.create_task(bus.emit_batch([_ev(1)]))
+    await asyncio.wait_for(entered.wait(), 1)
+    recovery = asyncio.create_task(bus.confirm_pending_storage("s1"))
+    await asyncio.sleep(0)
+    assert not recovery.done()
+    release.set()
+    await asyncio.wait_for(asyncio.gather(emit, recovery), 1)
+    assert notices == ["evt_0001"]
+    assert not bus.has_pending_storage("s1")

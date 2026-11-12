@@ -7,7 +7,7 @@ import pytest
 
 from ctx_weft.core.control.reducers import snapshot_facts_from_event
 from ctx_weft.core.control.snapshot_writer import SnapshotWriter
-from ctx_weft.core.loop.steps.compact import escalating_compact
+from tests.compaction_testkit import escalating_compact
 from ctx_weft.core.loop.steps.observe import capture_context
 from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.events.store.sql import open_sqlite_event_store
@@ -178,7 +178,7 @@ async def test_inline_snapshot_callback_does_not_reenter_agent_lock(tmp_path):
 
 @pytest.mark.asyncio
 async def test_compact_model_await_does_not_hold_agent_lock(monkeypatch):
-    from ctx_weft.core.loop.steps import compact
+    from tests import compaction_testkit as compact
 
     runtime, memory = setup()
     state, ctx, _, event = await fail_write(runtime, memory, monkeypatch)
@@ -197,7 +197,7 @@ async def test_compact_model_await_does_not_hold_agent_lock(monkeypatch):
         called.append(True)
         return "summary"
 
-    monkeypatch.setattr(compact, "summarize_for_compact", summarize)
+    compact.patch_summary(monkeypatch, summarize)
     await asyncio.wait_for(escalating_compact(state, ctx, token_estimate=1000, force=True), 2)
     assert called and not any(runtime._assistant_pending.values())
     assert await memory.read_records([event.id], ctx.provider_ctx)

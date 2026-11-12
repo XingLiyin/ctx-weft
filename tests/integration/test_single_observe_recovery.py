@@ -93,7 +93,7 @@ async def test_original_producer_ends_or_is_cancelled(tmp_path, tmp_path_factory
                 MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
             own = [r for r in records if r.metadata.get("origin_task_id") == task.id]
             if scenario == "cancel":
-                assert any("[outcome=cancelled]" in str(r.content) for r in own)
+                assert any(r.metadata.get("finish_policy", {}).get("outcome") == "cancelled" for r in own)
                 assert not any("reviewed" in str(r.content) for r in own)
             else:
                 assert not own

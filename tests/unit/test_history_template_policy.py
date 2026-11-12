@@ -9,7 +9,7 @@ from jinja2 import ChoiceLoader, DictLoader
 from ctx_weft.core.assembler import prompts
 from ctx_weft.core.assembler.builder import PromptBuilder, compile_history, history_records
 from ctx_weft.core.assembler.sources._history import history_facts
-from ctx_weft.core.loop.steps.compact import _active_memory_tokens
+from tests.compaction_testkit import _active_memory_tokens
 from ctx_weft.core.runtime import _copy_memory_for_inherit
 from ctx_weft.protocols import MemoryAddress, MemoryScope, load_records
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

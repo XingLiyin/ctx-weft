@@ -40,7 +40,8 @@ async def content(store, memory):
     turns = await load_records(memory, MemoryAddress(session_id="child-session", agent_id=root),
                                   MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     finish = [r for r in turns if r.metadata.get("origin_task_id") == child.id]
-    normalize = lambda value: str(value).replace(child.id, "<child>")
+    assert child.parent_task_id in view.tasks
+    normalize = lambda value: str(value).replace(child.id, "<child>").replace(child.parent_task_id, "<parent>")
     return [[(r.role, normalize(r.content)) for r in records] for records in (raw, finish)]
 
 

@@ -80,10 +80,12 @@ async def test_cancel_session_cancels_all_run_tokens_and_drains_queue():
         def is_done(self):
             return False          # active drain in flight → _on_done reclaims after cancel completes
 
-        async def cancel_all(self, *, reason=""):
+        async def cancel_all(self, *, reason="", _admitted=False):
+            assert _admitted is True
             drained["called"] = True
 
-        async def cancel_session_agent_tasks(self, agent_id, reason, *, before_cancel):
+        async def cancel_session_agent_tasks(self, agent_id, reason, *, before_cancel, _admitted=False):
+            assert _admitted is True
             assert tokens.cancel.is_cancelled
             await before_cancel()
 

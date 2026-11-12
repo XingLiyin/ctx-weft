@@ -27,7 +27,7 @@ class _SpyEscalatingCompact:
 
 async def test_prepare_routes_to_compact_then_reassembles_without_retrigger(monkeypatch):
     spy = _SpyEscalatingCompact()
-    monkeypatch.setattr("ctx_weft.core.loop.steps.compact.escalating_compact", spy)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.compact._run_compact", spy)
 
     pushed = []
 

@@ -185,7 +185,7 @@ async def _put_dispatch_result(memory, parent_scope, task, content: str, ts, pro
     stale = [r.id for r in recs
              if (task_record_kind(r) == "result" or r.role == "tool")
              and (_is_frame_of(r, task) or task_record_group(r) == tool_call_id)]
-    from ctx_weft.core.loop.steps.observe import record_id
+    from ctx_weft.core.utils.ids import record_id
     result_id = record_id(operation_id, "dispatch_result", task.id, parent_scope)
     if result_id and result_id in stale:
         return
@@ -512,7 +512,7 @@ async def _synthesize_dispatch_pair(memory, scope, task, act_recap: str, task_su
     Background reports replace only a complete pair. No report is handed off
     through process-local state.
     """
-    from ctx_weft.core.loop.steps.observe import record_id
+    from ctx_weft.core.utils.ids import record_id
     from datetime import datetime
     base = datetime.fromisoformat(completed_at) if completed_at else now_utc()
     tool_call_id = record_id(operation_id, "finish_call", scope, task.id) or generate_id("tcall")
@@ -576,7 +576,7 @@ async def apply_task_close(
     mem_content 在这里现算（`task.outputs` + `task_summary or act_recap`），两个调用方
     因此不会各算一份、算歪一份。
     """
-    from ctx_weft.core.loop.steps.observe import record_id
+    from ctx_weft.core.utils.ids import record_id
     events: list[Any] = []
     if "BlackboardPublished:" in getattr(state, "extra", {}).get("observe_effects", []):
         return events

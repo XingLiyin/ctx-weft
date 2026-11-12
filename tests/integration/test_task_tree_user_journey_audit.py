@@ -96,6 +96,7 @@ async def test_cancel_tree_preserves_queued_work_and_child_agent_reuse(tmp_path,
                 rt.clear_storage_isolation(SID)
                 await rt.cancel_agent(h.agent_id)
             store.append_batch = original
+            assert await rt.recover_storage(SID)
             tree = [t for t in tm.all_tasks() if str(t.user_prompt).startswith("TREE")]
             await wait_until(lambda: all(t.status == "CANCELED" for t in tree))
             assert len(tree) == 3 and tm.get_task(other.task_id).status == "ACTIVE"

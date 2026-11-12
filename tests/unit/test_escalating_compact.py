@@ -1,10 +1,14 @@
+"""Exercise the actual stage policy and lifecycle events, without mocking phases."""
 
-from tests.model_testkit import model_snapshot
-# ctx-weft/tests/unit/test_escalating_compact.py
 from types import SimpleNamespace
+
 import pytest
 
-from ctx_weft.core.loop.steps import compact as cm
+from ctx_weft.protocols import MemoryScope, load_records
+from ctx_weft.protocols.events import EventType
+from tests import compaction_testkit as cm
+from tests.model_testkit import model_snapshot
+from tests.unit.test_compact_history_priority import capsule, setup
 
 pytestmark = pytest.mark.asyncio
 
@@ -13,54 +17,67 @@ def _state(ratio_trigger=0.8, ratio_target=0.6, limit=1000):
     agent = SimpleNamespace(
         id="a",
         loop_config=SimpleNamespace(
-            compact_keep_last=6, collapse_keep_last=3,
-            compact_token_ratio=ratio_trigger, compact_target_ratio=ratio_target),
-        loop_guard=SimpleNamespace(context_limit=limit))
-    return SimpleNamespace(resolved_model=model_snapshot(context_limit=limit),
-                           scope=SimpleNamespace(session_id="s1", agent_id="a", task_id="t1"), task=SimpleNamespace(id="t1"),
-                           agent=agent, session=SimpleNamespace(id="s1", tenant_id="tn"),
-                           extra={}, run_id="r1", sequence_counter=0)
+            compact_keep_last=6,
+            collapse_keep_last=3,
+            compact_token_ratio=ratio_trigger,
+            compact_target_ratio=ratio_target,
+        ),
+        loop_guard=SimpleNamespace(context_limit=limit),
+    )
+    return SimpleNamespace(
+        resolved_model=model_snapshot(context_limit=limit),
+        scope=SimpleNamespace(session_id="s1", agent_id="a", task_id="t1"),
+        task=SimpleNamespace(id="t1"),
+        agent=agent,
+        session=SimpleNamespace(id="s1", tenant_id="tn"),
+        extra={},
+        run_id="r1",
+        sequence_counter=0,
+    )
+
+
+async def _const(value):
+    return value
 
 
 async def test_stops_after_l1_when_under_target(monkeypatch):
-    calls = []
-    # L1 折后活跃 token 从 900 掉到 500（< target 600）→ 不进 L2/L3
-    seq = iter([900, 500])
-    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
-    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
-    monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(["c1"]))
-    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o, **kw: (calls.append("L1") or 5))
-    monkeypatch.setattr(cm, "fold_root_experience", lambda *a, **kw: pytest.fail("L2 must not run"))
-    monkeypatch.setattr(cm, "collapse_task_layer", lambda s, c, k, t: (calls.append("L3") or 0))
+    state, ctx, _ = await setup(monkeypatch)
+    for i in range(3):
+        await capsule(state, ctx, f"old{i}", i)
 
-    events = await cm.escalating_compact(_state(), SimpleNamespace(memory=None, provider_ctx=None),
-                                         token_estimate=900, trigger="compact")
-    assert calls == ["L1"]
-    assert any(e.payload.get("layer") == "agent" for e in events)
+    async def unexpected(*args, **kwargs):
+        pytest.fail("L1 already meets the target")
+
+    cm.patch_summary(monkeypatch, unexpected)
+    events = await cm.escalating_compact(state, ctx, token_estimate=58_100)
+    levels = [e.payload for e in events if e.type == EventType.MEMORY_COMPACTED]
+    assert [p["source"] for p in levels] == ["demote_lean"]
+    assert levels[0]["demoted_capsules"] == 1
+    body = await load_records(
+        ctx.memory, cm._agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx
+    )
+    assert "old0-body" not in {r.id for r in body}
+    assert "old1-body" in {r.id for r in body}
 
 
 async def test_escalates_l1_l2_l3(monkeypatch):
-    calls = []
-    seq = iter([900, 850, 820, 500])  # L1 后仍高、L2 后仍高、L3 后达标
-    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
-    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
-    monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
-    monkeypatch.setattr(cm, "fold_root_experience", lambda s, c, k, t, **kw: (calls.append("L2") or 3))
-    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o, **kw: (calls.append("L1") or 2))
-    monkeypatch.setattr(cm, "collapse_task_layer", lambda s, c, k, t: (calls.append("L3") or 4))
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const({"c1"}))
-    monkeypatch.setattr(cm, "_old_history_remaining", lambda s, c: _const(False))
-    # L3 现有可折性 guard：collapse_keep_last=3，须让 TASK 视图报 > 3 条材料，L3 才会跑
-    # （v2：guard 走 len(load_view)）。
-    memory = SimpleNamespace(load_view_ids=lambda *a, **kw: _const(list(range(10))),
-                             read_records=lambda ids, ctx: _const([object()] * len(ids)))
+    state, ctx, _ = await setup(monkeypatch, target=0.01)
+    for i in range(8):
+        await capsule(state, ctx, f"old{i}", i)
+    scopes = []
 
-    state = _state()
-    state.agent.loop_config.compact_keep_last = 0
-    await cm.escalating_compact(state, SimpleNamespace(memory=memory, provider_ctx=None),
-                                token_estimate=900, trigger="compact")
-    assert calls == ["L1", "L2", "L3"]
+    async def summary(state, ctx, *, scope="task", record_ids=None):
+        scopes.append(scope)
+        return "digest"
+
+    cm.patch_summary(monkeypatch, summary)
+    events = await cm.escalating_compact(state, ctx, token_estimate=90_000)
+    assert scopes == ["agent", "agent", "task"]
+    assert [e.payload["source"] for e in events if e.type == EventType.MEMORY_COMPACTED] == [
+        "demote_lean",
+        "root_experience",
+        "collapse",
+    ]
 
 
 async def test_invalid_window_rejected_before_compaction():
@@ -69,82 +86,60 @@ async def test_invalid_window_rejected_before_compaction():
 
 
 async def test_finished_event_aggregates(monkeypatch):
-    # L1 折 5 条、活跃 token 900→500（freed=400）→ 达标即停
-    seq = iter([900, 500])
-    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
-    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
-    monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(["c1"]))
-    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o, **kw: 5)
-
-    events = await cm.escalating_compact(
-        _state(), SimpleNamespace(memory=None, provider_ctx=None),
-        token_estimate=900, trigger="compact")
-
-    types = [e.type for e in events]
-    assert types[0] == "MemoryCompactStarted"
-    assert types[-1] == "MemoryCompactFinished"
-    fin = events[-1].payload
-    assert fin["total_superseded"] == 5
-    assert fin["freed_tokens"] == 400
-    assert fin["levels"] == ["demote_lean"]
-    assert fin["est_before"] == 900 and fin["target_tokens"] == 600
+    state, ctx, _ = await setup(monkeypatch)
+    await capsule(state, ctx, "old", 0)
+    events = await cm.escalating_compact(state, ctx, token_estimate=58_100)
+    levels = [e.payload for e in events if e.type == EventType.MEMORY_COMPACTED]
+    finished = events[-1].payload
+    assert finished["total_superseded"] == sum(p["superseded_count"] for p in levels)
+    assert finished["freed_tokens"] == sum(p["freed_tokens"] for p in levels) > 0
+    assert finished["levels"] == ["demote_lean"]
+    assert finished["est_after"] < finished["target_tokens"]
 
 
 async def test_no_started_no_finished_when_under_target():
-    # est 500 < target 600 → 顶部早退，无 Started/Finished
-    events = await cm.escalating_compact(
-        _state(), SimpleNamespace(memory=None, provider_ctx=None),
-        token_estimate=500, trigger="compact")
-    assert events == []
+    assert (
+        await cm.escalating_compact(
+            _state(), SimpleNamespace(memory=None, provider_ctx=None), token_estimate=500
+        )
+        == []
+    )
 
 
 async def test_finished_emitted_when_nothing_folded(monkeypatch):
-    # est 达标但各级 guard 全跳过 → 仍发 Started+Finished，total_superseded=0
-    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _const(900))
-    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(0))       # L1 guard fail
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(set())) # L2 no kept
-    memory = SimpleNamespace(load_view_ids=lambda *a, **kw: _const([]),
-                             read_records=lambda ids, ctx: _const([]))  # L3 no material
-
-    events = await cm.escalating_compact(
-        _state(), SimpleNamespace(memory=memory, provider_ctx=None),
-        token_estimate=900, trigger="compact")
-
-    assert [e.type for e in events] == ["MemoryCompactStarted", "MemoryCompactFinished"]
-    assert events[-1].payload["total_superseded"] == 0
+    state, ctx, _ = await setup(monkeypatch, target=0.01)
+    state.agent.loop_config.collapse_keep_last = 100
+    events = await cm.escalating_compact(state, ctx, token_estimate=90_000)
+    assert events[-1].type == EventType.MEMORY_COMPACT_FINISHED
     assert events[-1].payload["levels"] == []
+    assert events[-1].payload["total_superseded"] == 0
 
 
 async def test_started_emitted_live_via_bus(monkeypatch):
-    # 有 event_bus 时：Started 立即 live 发（进 bus），不出现在返回批次；Finished 仍在返回批次。
-    seq = iter([900, 500])
-    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _anext(seq))
-    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(10))
-    monkeypatch.setattr(cm, "summarize_for_compact", lambda s, c, *, scope="task": _const(f"sum-{scope}"))
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, keep: _const(["c1"]))
-    monkeypatch.setattr(cm, "demote_kept_capsules", lambda s, c, o, **kw: 5)
+    state, ctx, bus = await setup(monkeypatch, target=0.01)
+    await capsule(state, ctx, "old", 0)
 
-    emitted = []
-    class _Bus:
-        async def emit(self, ev):
-            emitted.append(ev)
-    ctx = SimpleNamespace(memory=None, provider_ctx=None, event_bus=_Bus())
+    async def summary(*args, **kwargs):
+        assert bus.events[0].type == EventType.MEMORY_COMPACT_STARTED
+        return "digest"
 
-    events = await cm.escalating_compact(_state(), ctx, token_estimate=900, trigger="compact")
-
-    # live-emitted Started reached the bus
-    assert [e.type for e in emitted] == ["MemoryCompactStarted"]
-    # returned batch has NO Started, but ends with Finished
-    returned_types = [e.type for e in events]
-    assert "MemoryCompactStarted" not in returned_types
-    assert returned_types[-1] == "MemoryCompactFinished"
+    cm.patch_summary(monkeypatch, summary)
+    events = await cm.escalating_compact(state, ctx, token_estimate=90_000)
+    assert not any(e.type == EventType.MEMORY_COMPACT_STARTED for e in events)
+    assert events[-1].type == EventType.MEMORY_COMPACT_FINISHED
 
 
-# 测试辅助：把常量/序列包装成 awaitable
-async def _const(v):
-    return v
+async def test_force_preserves_order_even_below_target(monkeypatch):
+    state, ctx, _ = await setup(monkeypatch)
+    await capsule(state, ctx, "old", 0)
 
+    async def summary(*args, **kwargs):
+        return "digest"
 
-async def _anext(it):
-    return next(it)
+    cm.patch_summary(monkeypatch, summary)
+    events = await cm.escalating_compact(state, ctx, token_estimate=1, force=True)
+    assert [e.payload["source"] for e in events if e.type == EventType.MEMORY_COMPACTED] == [
+        "demote_lean",
+        "root_experience",
+        "collapse",
+    ]

@@ -27,7 +27,7 @@ from ctx_weft.core.capabilities.control_tools import ControlMetaKey as K
 from ctx_weft.core.loop.driver import StepDriver
 from ctx_weft.core.loop.steps import observe as recap_mod
 from ctx_weft.core.loop.steps.observe import ObserveStep, Verdict
-from ctx_weft.core.loop.task_memory_fold import segment_fold
+from tests.segment_fold_testkit import segment_fold
 from ctx_weft.protocols import (
     ImagePart,
     MemoryAddress,
@@ -341,7 +341,7 @@ async def test_apply_compact_since_last_after_collapsed_up_still_folds():
     """L3 坍缩 UP 是「timestamp 回填（保留区之前）、seq 最高（后 ingest）」的记录。
     since_last 段界若按 seq 找最后一条 UP，会把段界推到所有 raw 之后 → 归档池空 →
     摘要照写、raw 一条不折。段界必须按渲染序（timestamp, seq_no）判定。"""
-    from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, collapse_task_layer
+    from tests.compaction_testkit import COLLAPSE_DELIM, collapse_task_layer
 
     mem = InMemoryMemoryProvider()
     seed = [

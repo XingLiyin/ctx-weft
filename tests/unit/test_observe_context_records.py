@@ -35,7 +35,7 @@ async def test_sqlite_input_survives_fold_and_reopen(tmp_path):
 
 
 async def test_old_recap_cannot_replace_a_later_fold_owner():
-    from ctx_weft.core.loop.task_memory_fold import segment_fold
+    from tests.segment_fold_testkit import segment_fold
     memory = InMemoryMemoryProvider()
     address = MemoryAddress(session_id="session", agent_id="agent", task_id="task")
     ctx = ProviderContext(session_id="session")

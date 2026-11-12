@@ -77,7 +77,10 @@ class InMemoryMemoryProvider(MemoryProvider):
                    if s.id in wanted and s.tenant == normalize_tenant(ctx.tenant_id)
                    and s.event.address.session_id == ctx.session_id]
         records.sort(key=lambda r: (as_utc(r.timestamp), r.metadata.get("seq_no", 0), positions[r.id]))
-        return normalize_view(records, include_unpaired_dispatch=True)
+        records = normalize_view(records, include_unpaired_dispatch=True)
+        from ctx_weft.providers.memory.organize import _cache_records
+        _cache_records(self, ctx, records)
+        return records
 
     def __init__(self) -> None:
         self._events: list[_StoredEvent] = []
@@ -145,6 +148,41 @@ class InMemoryMemoryProvider(MemoryProvider):
         )
         self._events.append(stored)
         return event_id
+
+    async def recall_for_organize(self, ctx, *, operation, keep_last=0):
+        from ctx_weft.providers.memory.organize import recall_for_organize
+        return await recall_for_organize(self, ctx, operation=operation, keep_last=keep_last)
+
+    async def organize(self, ctx, *, operation, record_ids=None, summary=None,
+                       keep_recent_images=2):
+        from ctx_weft.providers.memory.organize import organize
+        return await organize(self, ctx, operation=operation, record_ids=record_ids,
+                              summary=summary, keep_recent_images=keep_recent_images)
+
+    async def _commit_organize(self, expected_ids, replacements, ctx):
+        """Compare and replace active sources under the storage write lock."""
+        wanted = set(expected_ids)
+        async with self._lock:
+            active = {s.id for s in self._events if not s.is_superseded
+                      and s.tenant == normalize_tenant(ctx.tenant_id)
+                      and s.event.address.session_id == ctx.session_id}
+            if not wanted <= active:
+                return None
+            for s in self._events:
+                if s.id in wanted:
+                    s.is_superseded = True
+            ids = []
+            for event in replacements:
+                if event.id is not None and any(s.id == event.id for s in self._events):
+                    ids.append(event.id)
+                    continue
+                if event.id is None:
+                    self._next_id += 1
+                    event_id = f"mev_{self._next_id:08d}"
+                else:
+                    event_id = event.id
+                ids.append(self._ingest_locked(event, ctx, event_id))
+            return [self._to_record(s) for rid in ids for s in self._events if s.id == rid]
 
     async def fold(
         self,

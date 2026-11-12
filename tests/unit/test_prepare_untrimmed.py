@@ -12,16 +12,18 @@ import pytest
 from ctx_weft.core.assembler import ContextAssembler, ContextRequest
 from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver, make_event
-from ctx_weft.core.loop.steps.compact import CompactStep
+from ctx_weft.core.loop.driver import LoopContext, LoopState, StepDriver
 from ctx_weft.core.loop.llm_gateway import build_llm_request
-from ctx_weft.core.loop.steps.prepare import PrepareStep, _estimate_assembled_tokens
+from ctx_weft.core.loop.steps.compact import CompactStep
+from ctx_weft.core.loop.steps.compact import _CompactResult as CompactionResult
+from ctx_weft.core.loop.steps.compact import _LevelResult as LevelResult
+from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.models.errors import ContextOverflowError
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
+from ctx_weft.core.utils.estimate import estimate_assembled_tokens
 from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext
-from ctx_weft.protocols.events import EventType
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
 
@@ -64,14 +66,14 @@ async def test_compact_estimates_history_that_sending_would_discard(monkeypatch,
     initial = await assemble(state, ctx)
     bounded = await ctx.assembler.compile(initial, token_counter=len)
     threshold = state.resolved_model.effective_input_limit * 0.8
-    assert _estimate_assembled_tokens(bounded, len) < threshold
+    assert estimate_assembled_tokens(bounded, len) < threshold
     assert "OLD_HISTORY" not in str(bounded.messages)
     state.agent.loop_guard.context_tokens = baseline
     state.agent.loop_guard.context_message_count = 2
-    compact = AsyncMock(return_value=[])
+    compact = AsyncMock(side_effect=_noop_compaction)
     monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.resolve_and_bind", AsyncMock(return_value=[]))
     monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.commit_round", AsyncMock())
-    monkeypatch.setattr("ctx_weft.core.loop.steps.compact.escalating_compact", compact)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.compact._run_compact", compact)
 
     outcome = await PrepareStep().execute(state, ctx)
 
@@ -100,18 +102,18 @@ async def test_compact_estimates_history_that_sending_would_discard(monkeypatch,
 async def test_required_overflow_can_be_compacted_before_sending(monkeypatch):
     state, ctx = await harness(current_is_large=True)
 
-    async def compact(state, ctx, *, token_estimate, trigger, **kwargs):
+    async def compact(state, ctx, *, token_estimate, target_tokens, **kwargs):
         assert token_estimate > state.resolved_model.context_limit
         await ctx.memory.fold(["current", "previous"], [MemoryEvent(
             id="summary", kind=MemoryKind.SUMMARY, scope=MemoryScope.TASK, address=state.scope,
             role="user", content="COMPACTED summary", timestamp=datetime.now(UTC),
             metadata={"task_id": state.task.id})], ctx.provider_ctx)
-        return [make_event(state, EventType.MEMORY_COMPACTED)]
+        return CompactionResult(token_estimate, 10, target_tokens, (LevelResult("collapse", "task", 2, token_estimate - 10),), "target")
 
     monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.resolve_and_bind", AsyncMock(return_value=[]))
     monkeypatch.setattr("ctx_weft.core.loop.steps.prepare.commit_round", AsyncMock())
     compact_mock = AsyncMock(side_effect=compact)
-    monkeypatch.setattr("ctx_weft.core.loop.steps.compact.escalating_compact", compact_mock)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.compact._run_compact", compact_mock)
 
     outcome = await PrepareStep().execute(state, ctx)
 
@@ -200,3 +202,7 @@ async def test_untrimmed_compilation_restores_discarded_history():
     assert complete is not bounded
     assert complete.token_budget == 0
     assert "OLD_HISTORY" in str(complete.messages)
+
+
+async def _noop_compaction(state, ctx, *, token_estimate, target_tokens, **kwargs):
+    return CompactionResult(token_estimate, token_estimate, target_tokens)

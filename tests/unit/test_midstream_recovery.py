@@ -111,11 +111,11 @@ async def test_retries_from_clean_state_with_one_request_identity(chunks):
     assert types.index(EventType.LLM_RESPONSE_DISCARDED) < types.index(EventType.LLM_RETRY_TRIGGERED)
 
 
-async def test_exhaustion_also_revokes_the_last_partial_output():
+async def test_exhaustion_also_revokes_the_last_partial_output(caplog):
     client = Client([LLMChunk(kind="token", text="old")], fail_for=10)
     ctx = context(client)
     stream = stream_llm_resilient(ctx, state(), request())
-    with pytest.raises(LLMOutageError, match="exhausted after 3"):
+    with pytest.raises(LLMOutageError, match="^wire lost$") as error:
         async with stream:
             async for _ in stream:
                 stream.accept_current()
@@ -123,6 +123,10 @@ async def test_exhaustion_also_revokes_the_last_partial_output():
     discarded = [e for e in ctx.event_bus.events if e.type == EventType.LLM_RESPONSE_DISCARDED]
     assert [e.payload["will_retry"] for e in discarded] == [True, True, False]
     assert client.closed == [1, 2, 3]
+    assert client.calls == 3
+    assert isinstance(error.value.__cause__, LLMCallError)
+    assert error.value.outage and error.value.retriable
+    assert "retry budget exhausted after 3 attempt(s)" in caplog.text
 
 
 async def test_cancel_during_backoff_cannot_save_discarded_content(monkeypatch):
@@ -143,7 +147,7 @@ async def test_cancel_during_backoff_cannot_save_discarded_content(monkeypatch):
     assert client.calls == 1 and stream.partial_result().text == ""
 
 
-async def test_long_output_gets_one_nonrenewable_midstream_window(monkeypatch):
+async def test_long_output_gets_one_nonrenewable_midstream_window(monkeypatch, caplog):
     now = [0.0]
     monkeypatch.setattr(llm_gateway, "monotonic", lambda: now[0])
     client = Client([LLMChunk(kind="token", text="old")], fail_for=10,
@@ -151,11 +155,18 @@ async def test_long_output_gets_one_nonrenewable_midstream_window(monkeypatch):
     ctx = context(client, llm_self_heal_max_duration_sec=300,
                   llm_midstream_recovery_max_duration_sec=10)
     stream = stream_llm_resilient(ctx, state(), request())
-    with pytest.raises(LLMOutageError, match="exhausted after 2"):
+    with pytest.raises(LLMOutageError, match="^wire lost$") as error:
         async with stream:
             async for _ in stream:
                 stream.accept_current()
     assert client.calls == 2  # initial 300s passed; second failure does not renew the window
+    assert client.closed == [1, 2]
+    assert stream.partial_result().text == ""
+    discarded = [e for e in ctx.event_bus.events if e.type == EventType.LLM_RESPONSE_DISCARDED]
+    assert [e.payload["will_retry"] for e in discarded] == [True, False]
+    assert isinstance(error.value.__cause__, LLMCallError)
+    assert error.value.outage and error.value.retriable
+    assert "retry budget exhausted after 2 attempt(s)" in caplog.text
 
 
 async def test_discard_reports_observed_usage_without_a_finished_response():

@@ -3,7 +3,7 @@
 新数据里 dispatch 对已直接写成 AGENT_CONVERSATION_TURN（gateway 写 delegate assistant 回合、
 finalize 写 result tool 回合，与同单元 finish 对同 origin、同命运）。本模块只负责把**存量旧数据**
 里残留的 legacy `TASK_DISPATCH` / `TASK_DISPATCH_RESULT` 在**读侧**归一化成等价的 conversation
-turn，使召回（agent_recall）与折叠（fold_root_experience）只需面对单一表示。
+turn，使召回（agent_recall）与历史压缩只需面对单一表示。
 
 v2 P2a（2026-07-27）：自 core/loop/steps/legacy_dispatch.py 移入 protocols 层——
 统一归一化模块（memory_compat.normalize_view）委托本模块做 dispatch 配对，provider 侧

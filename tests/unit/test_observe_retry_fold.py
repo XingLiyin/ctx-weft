@@ -14,7 +14,7 @@ _BASE = datetime(2026, 7, 1, tzinfo=UTC)
 
 
 def _pctx():
-    return ProviderContext(session_id="s", tenant_id="tn")
+    return ProviderContext(session_id="s", tenant_id="tn", task_id="t1", agent_id="a")
 
 
 def _llm():

@@ -15,7 +15,6 @@ from __future__ import annotations
 import copy
 import dataclasses
 import hashlib
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -23,13 +22,17 @@ from ulid import ULID
 
 from ctx_weft.protocols import ToolCall
 
-__all__ = ["generate_id", "is_internal_call_id", "mint_call_id",
+__all__ = ["record_id", "generate_id", "is_internal_call_id", "mint_call_id",
            "mint_turn_call_ids", "MintedCall"]
 
 # 形态契约住在 protocols（它是对适配层的约束，不是 core 的实现细节）；这里转出，
 # 使 `from ...utils.ids import is_internal_call_id` 的既有调用方零改动。
 from ctx_weft.protocols.capability import (  # noqa: E402
-    INTERNAL_CALL_ID_MAX_LEN, INTERNAL_CALL_ID_RE, is_internal_call_id,
+    INTERNAL_CALL_ID_MAX_LEN,
+    is_internal_call_id,
+)
+from ctx_weft.protocols.capability import (
+    INTERNAL_CALL_ID_RE as INTERNAL_CALL_ID_RE,
 )
 
 # tc_ + seq36 + _ + ord36 + _ + 12 hex：两位 base36 段封顶长度，防极端入参撑爆 64。
@@ -43,6 +46,11 @@ def generate_id(prefix: str) -> str:
     Format: {prefix}_{ulid}, e.g. ses_01H8K9XPYJ7DRT2RY3JFXSF7M2
     """
     return f"{prefix}_{ULID()}"
+
+
+def record_id(operation, *parts):
+    """Stable memory-write identity shared by observation and compaction."""
+    return "mev_" + hashlib.sha256(repr((operation, parts)).encode()).hexdigest()[:48] if operation else None
 
 
 def _base36(n: int) -> str:

@@ -38,89 +38,13 @@ async def _compact_before_dispatch(state, ctx, *, prompt_tokens):
 _BASE_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-class _FakeMemory:
+from tests.unit.test_compact_step_inline import _FakeMemory as _OrganizeMemory
+from ctx_weft.protocols import ProviderContext
+
+class _FakeMemory(_OrganizeMemory):
     def __init__(self, task_count):
-        self._task_count = task_count
-        self.applied = []    # kept for backward-compat (no longer populated)
-        self.ingested = []   # collapsed USER_PROMPT events written by collapse_task_layer
-        self.superseded = []
-        self._selected = {}
-        self._replacements = {}
-
-    async def count_recent(self, scope, types, ctx):
-        return self._task_count
-
-    async def recall_recent(self, scope, types, limit, ctx):
-        # Return empty for agent-layer queries (no root residues in these unit tests)
-        if T.AGENT_CONVERSATION_TURN in types:
-            return []
-        # Return fake USER_PROMPT records (newest-first) for task-layer type queries
-        return list(reversed([
-            SimpleNamespace(
-                id=str(i), type=T.USER_PROMPT, content=f"msg {i}", role="user",
-                metadata={},
-                timestamp=_BASE_DT + timedelta(seconds=i),
-            )
-            for i in range(self._task_count)
-        ]))
-
-    async def recall_recent_by_agent(self, scope, types, limit, ctx):
-        return []
-
-    async def load_view_ids(self, address, scope, ctx, kinds=None, *, end_at=None):
-        records = await self._records(address, scope, ctx, kinds)
-        # Immutable ID reads must remain valid after another view is selected.
-        records = [r for r in records if r.id not in self.superseded]
-        records += [r for r in self._replacements.values()
-                    if r.scope == scope and r.id not in self.superseded]
-        self._selected.update((r.id, r) for r in records)
-        return [r.id for r in records]
-
-    async def read_records(self, ids, ctx):
-        return [self._selected[i] for i in ids]
-
-    async def _records(self, address, scope, ctx, kinds=None):
-        # v2：AGENT 视图（root residue 查询）→ 空；TASK 视图 → 升序 user 回合
-        from ctx_weft.protocols import MemoryScope
-        from ctx_weft.protocols.memory_compat import MemoryKind
-        if scope is MemoryScope.AGENT:
-            return []
-        return [
-            SimpleNamespace(
-                id=str(i), type=T.USER_PROMPT, content=f"msg {i}", role="user",
-                kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
-                address=MemoryAddress(session_id=address.session_id, agent_id=address.agent_id,
-                                      task_id=address.task_id or "t1"), metadata={},
-                timestamp=_BASE_DT + timedelta(seconds=i),
-            )
-            for i in range(self._task_count)
-        ]
-
-    async def apply_compact(self, scope, summary, keep_last, ctx, layer, protect_types=()):
-        # No longer called by _compact_scope; kept for interface completeness
-        self.applied.append((layer.value, summary))
-        return SimpleNamespace(events_before=10, events_after=keep_last,
-                               summary_event_id="s1")
-
-    async def supersede(self, ids, ctx):
-        self.superseded.extend(ids)
-
-    async def ingest(self, event, ctx):
-        self.ingested.append(event)
-        return event
-
-    async def fold(self, supersede_ids, replacements, ctx):
-        # v2 原子原语：遗忘 + 补偿（fake 拆记回 superseded/ingested 两账本）
-        self.superseded.extend(supersede_ids)
-        out = []
-        for ev in replacements:
-            self.ingested.append(ev)
-            from dataclasses import replace
-            record_id = f"mev_fold_{len(self.ingested)}"
-            self._replacements[record_id] = replace(ev, id=record_id)
-            self._selected[record_id] = self._replacements[record_id]
-            out.append(record_id)
-        return out
+        super().__init__({frozenset([T.USER_PROMPT]): task_count})
+        self.applied = []
 
 
 class _FakeAssembler:
@@ -168,13 +92,13 @@ def _state(*, ratio, context_limit=1000, context_tokens=0, keep_last=2, compact_
 
 def _ctx(memory):
     return SimpleNamespace(memory=memory, assembler=_FakeAssembler(), llm=_FakeLLM(),
-                           provider_ctx=SimpleNamespace(), task_manager=None)
+                           provider_ctx=ProviderContext(session_id="s1", task_id="t1", agent_id="agt1"), task_manager=None)
 
 
 async def test_disabled_when_ratio_zero():
     mem = _FakeMemory(task_count=50)  # plenty foldable, but feature off
     out = await _compact_before_dispatch(_state(ratio=0.0), _ctx(mem), prompt_tokens=999)
-    assert out == []
+    assert not any(e.type == "MemoryCompacted" for e in out)
     assert mem.ingested == []
     assert mem.superseded == []
 
@@ -183,7 +107,7 @@ async def test_skips_when_below_threshold():
     mem = _FakeMemory(task_count=50)
     # 500 / 1000 = 0.5 < ratio 0.6
     out = await _compact_before_dispatch(_state(ratio=0.6), _ctx(mem), prompt_tokens=500)
-    assert out == []
+    assert not any(e.type == "MemoryCompacted" for e in out)
     assert mem.ingested == []
     assert mem.superseded == []
 
@@ -231,19 +155,19 @@ async def test_invalid_window_rejected_before_dispatch():
 async def test_predispatch_uses_escalating_compact(monkeypatch):
     """端到端接线断言：门控通过后 maybe_compact_before_dispatch 委派 escalating_compact，
     并原样透传 token_estimate + trigger="pre_dispatch"（Task 6 已接线，本用例防回归）。"""
-    from ctx_weft.core.loop.steps import compact as cm
+    from tests import compaction_testkit as cm
 
     seen = {}
 
-    async def _fake_esc(state, ctx, *, token_estimate, trigger, **kwargs):
-        seen["trigger"] = trigger
+    async def _fake_esc(state, ctx, *, token_estimate, target_tokens, **kwargs):
+        from ctx_weft.core.loop.steps.compact import _CompactResult as CompactionResult
         seen["est"] = token_estimate
-        return []
+        return CompactionResult(token_estimate, token_estimate, target_tokens)
 
-    monkeypatch.setattr(cm, "escalating_compact", _fake_esc)
+    monkeypatch.setattr("ctx_weft.core.loop.steps.compact._run_compact", _fake_esc)
     mem = _FakeMemory(task_count=10)
     out = await _compact_before_dispatch(
         _state(ratio=0.5), _ctx(mem), prompt_tokens=800)
-    assert seen["trigger"] == "pre_dispatch"
+    assert out[-1].payload["trigger"] == "pre_dispatch"
     assert seen["est"] == 800
-    assert out == []
+    assert not any(e.type == "MemoryCompacted" for e in out)

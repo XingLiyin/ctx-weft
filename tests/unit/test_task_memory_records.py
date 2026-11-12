@@ -6,7 +6,7 @@ import pytest
 from ctx_weft.core.assembler import prompts
 from tests.task_memory_testkit import project_task_history, render_task_record
 from ctx_weft.core.loop.task_memory_fold import task_record_kind
-from ctx_weft.core.loop.steps.compact import _dispatch_finish_sets, _split_for_collapse
+from tests.compaction_testkit import _dispatch_finish_sets, _split_for_collapse
 from ctx_weft.core.loop.task_memory_fold import (
     build_finish_slots,
     find_finish_target,

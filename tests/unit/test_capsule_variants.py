@@ -11,7 +11,7 @@ from ctx_weft.core.assembler.sources._history import record_to_history_block
 from ctx_weft.core.assembler.sources.agent_recall import _staged_record
 from tests.task_memory_testkit import history_view
 from ctx_weft.core.loop.task_memory_fold import task_record_kind
-from ctx_weft.core.loop.steps.compact import demote_kept_capsules
+from tests.compaction_testkit import demote_kept_capsules
 from ctx_weft.core.loop.steps.finalize import _synthesize_dispatch_pair
 from ctx_weft.core.loop.task_memory_fold import (
     build_finish_slots,

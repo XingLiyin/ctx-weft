@@ -148,17 +148,18 @@ async def test_continue_then_waiting_preserves_only_the_current_wait():
 
 
 async def test_user_reply_during_continuation_application_does_not_duplicate_actor(monkeypatch):
-    from ctx_weft.core.loop import task_memory_fold
+    from ctx_weft.providers.memory import organize as memory_ops
 
     applying, release = asyncio.Event(), asyncio.Event()
-    original = task_memory_fold.segment_fold
+    original = memory_ops.organize
 
     async def held_fold(*args, **kwargs):
-        applying.set()
-        await release.wait()
+        if kwargs.get("operation") == "fold_segment":
+            applying.set()
+            await release.wait()
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(task_memory_fold, "segment_fold", held_fold)
+    monkeypatch.setattr(memory_ops, "organize", held_fold)
     rt, llm, handle = await start(["continue", "success"])
     await asyncio.wait_for(applying.wait(), 5)
     reply = asyncio.create_task(rt.send_message(handle.agent_id, "Additional information"))
@@ -174,17 +175,18 @@ async def test_user_reply_during_continuation_application_does_not_duplicate_act
 
 
 async def test_cancel_during_continuation_application_prevents_requeue(monkeypatch):
-    from ctx_weft.core.loop import task_memory_fold
+    from ctx_weft.providers.memory import organize as memory_ops
 
     applying, release = asyncio.Event(), asyncio.Event()
-    original = task_memory_fold.segment_fold
+    original = memory_ops.organize
 
     async def held_fold(*args, **kwargs):
-        applying.set()
-        await release.wait()
+        if kwargs.get("operation") == "fold_segment":
+            applying.set()
+            await release.wait()
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(task_memory_fold, "segment_fold", held_fold)
+    monkeypatch.setattr(memory_ops, "organize", held_fold)
     rt, llm, handle = await start(["continue"])
     await asyncio.wait_for(applying.wait(), 5)
     cancel = asyncio.create_task(rt.cancel_agent(handle.agent_id, reason="stop continuing"))

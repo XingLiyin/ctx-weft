@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from ctx_weft.core.utils.content import collect_blob_refs
-from ctx_weft.core.loop.task_memory_fold import SegmentFoldResult, segment_fold
+from tests.segment_fold_testkit import SegmentFoldResult, segment_fold
 from ctx_weft.core.media.refs import encode_image_placeholder
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
@@ -159,9 +159,11 @@ async def test_without_segment_end_at_a_late_user_turn_steals_the_boundary() -> 
     res = await segment_fold(m, _ADDR, MemoryScope.TASK, "段摘要", _ctx())
 
     contents = [c for _k, c in await _view(m)]
-    # A1/A2 一条没折，摘要还排到了所有记录的末尾——正是水位线要治的那个形态。
-    assert contents == ["UP1", "A1", "A2", "UP2-人中途开口", "段摘要"]
-    assert res.events_after == res.events_before + 1           # 只多了一条摘要
+    # With an explicit source and no execution after its last user, organize is
+    # a no-op; it must never append an unbound recap at the new user's tail.
+    assert contents == ["UP1", "A1", "A2", "UP2-人中途开口"]
+    assert res.events_after == res.events_before
+    assert not res.summary_event_id
 
 
 async def test_segment_end_at_keeps_the_boundary_at_launch_time() -> None:

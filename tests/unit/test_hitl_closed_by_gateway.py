@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,16 +116,82 @@ def _gateway_source(name: str) -> str:
     return inspect.getsource(getattr(CapabilityGateway, name))
 
 
-def test_record_result_closes_after_the_ingest():
-    """`_record_result` 里盖章必须在 `ingest_tool_result` **之后**。
+@pytest.fixture
+def gateway_result_context(monkeypatch):
+    """Exercise the real result path, memory writes and HITL closure together."""
+    from ctx_weft.core.capabilities.cache import CapabilityCache
+    from ctx_weft.core.loop.capability_gateway import CapabilityGateway
+    from ctx_weft.core.loop.driver import LoopContext
+    from ctx_weft.protocols import ProviderContext
+    from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 
-    源码顺序检查而非行为检查：这条出口要搭起真 provider + 真 memory 才跑得到，而要钉的只是
-    「哪一句在哪一句之后」。顺序反了就留下「日志说了结、对话里没结果」，那条决定再也不会被补。
-    """
-    src = _gateway_source("_record_result")
-    assert "close_for_tool_call" in src, "结果落库后没盖章——那些决定会永远留在清单里"
-    assert src.index("ingest_tool_result") < src.index("close_for_tool_call"), \
-        "盖章必须在 ingest 之后（见 EventType.HITL_CLOSED 的顺序纪律）"
+    svc, bus = _service(HITL_STAGE_AUTHZ, HITL_STAGE_TOOL, HITL_STAGE_RERUN)
+    memory = InMemoryMemoryProvider()
+    trace, written_ids = [], []
+    original_emit, original_ingest = bus.emit, memory.ingest
+
+    async def emit(event):
+        trace.append(event.type)
+        await original_emit(event)
+
+    async def ingest(event, ctx):
+        assert not _closed_ids(bus), "HITL was closed before its result reached memory"
+        record_id = await original_ingest(event, ctx)
+        written_ids.append(record_id)
+        trace.append("memory_written")
+        return record_id
+
+    monkeypatch.setattr(bus, "emit", emit)
+    monkeypatch.setattr(memory, "ingest", ingest)
+    state = SimpleNamespace(
+        session=SimpleNamespace(id=_SID, tenant_id="acme"),
+        task=SimpleNamespace(id="t1", parent_task_id=None), agent=SimpleNamespace(id="ag1"),
+        run_id="result-run", sequence_counter=0,
+    )
+    pctx = ProviderContext(session_id=_SID, tenant_id="acme")
+    ctx = LoopContext(assembler=None, llm=None, memory=memory, event_bus=bus,
+                      provider_ctx=pctx, hitl=svc)
+    gateway = CapabilityGateway(CapabilityCache(), [], memory, bus)
+
+    async def record_result(tool_name="probe__work", *, is_dispatch=False, is_silent=False):
+        return await gateway._record_result(
+            state, ctx, tool_name, "inv-result", {}, "actual result", False,
+            is_dispatch, is_silent, _TCID)
+
+    return SimpleNamespace(gateway=gateway, bus=bus, memory=memory, pctx=pctx,
+                           trace=trace, written_ids=written_ids, record_result=record_result)
+
+
+@pytest.mark.parametrize("fail_first_ingest", [False, True])
+async def test_record_result_closes_after_the_ingest(gateway_result_context, monkeypatch, fail_first_ingest):
+    result = gateway_result_context
+    if fail_first_ingest:
+        from ctx_weft.core.loop.capability_gateway import confirm_tool_results
+
+        original_ingest = result.memory.ingest
+        calls = 0
+
+        async def fail_once(event, ctx):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("result write failed")
+            return await original_ingest(event, ctx)
+
+        monkeypatch.setattr(result.memory, "ingest", fail_once)
+        with pytest.raises(OSError, match="result write failed"):
+            await result.record_result()
+        assert not _closed_ids(result.bus) and not result.written_ids
+        assert result.gateway._pending_results
+        await confirm_tool_results(result.gateway._pending_results, _SID)
+    else:
+        await result.record_result()
+    assert result.trace.index("memory_written") < result.trace.index(EventType.HITL_CLOSED)
+    assert len(_closed_ids(result.bus)) == 3
+    assert result.trace.count(EventType.CAPABILITY_FINISHED) == 1
+    assert not result.gateway._pending_results
+    records = await result.memory.read_records(result.written_ids, result.pctx)
+    assert [record.content for record in records] == ["actual result"]
 
 
 def test_error_exit_closes_too():
@@ -134,20 +201,20 @@ def test_error_exit_closes_too():
     assert src.index("ingest_tool_result") < src.index("close_for_tool_call")
 
 
-def test_closing_is_not_gated_on_dispatch_or_silent():
-    """盖章不跟着 `is_dispatch` / `is_silent` 分支走。
-
-    那两个分支管的是「写不写对话」，与「这条决定还要不要留着」无关——派发 / SILENT 工具同样
-    可能被门控过。挂在分支里面，它们的决定就永不销账。
-    """
-    src = _gateway_source("_record_result")
-    tail = src[src.index("close_for_tool_call"):]
-    head = src[:src.index("close_for_tool_call")]
-    # 盖章那句所在的 if 只判 ctx.hitl，不判 is_dispatch/is_silent
-    guard = head.rsplit("if ", 1)[1].split(":")[0]
-    assert "is_dispatch" not in guard and "is_silent" not in guard, \
-        f"盖章被 dispatch/silent 分支挡住了：if {guard}"
-    assert tail  # 形态完整
+@pytest.mark.parametrize("tool_name,is_dispatch,is_silent,writes_memory", [
+    ("control__delegate_task", True, False, False),
+    ("control__delegate_plan", True, False, True),
+    ("control__report_observation", False, True, False),
+])
+async def test_closing_is_not_gated_on_dispatch_or_silent(
+    gateway_result_context, tool_name, is_dispatch, is_silent, writes_memory,
+):
+    result = gateway_result_context
+    await result.record_result(tool_name, is_dispatch=is_dispatch, is_silent=is_silent)
+    assert len(_closed_ids(result.bus)) == 3
+    assert bool(result.written_ids) == writes_memory
+    if writes_memory:
+        assert result.trace.index("memory_written") < result.trace.index(EventType.HITL_CLOSED)
 
 
 # ── 取消 / 销毁路径 ───────────────────────────────────────────────────────────

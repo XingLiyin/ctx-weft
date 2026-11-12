@@ -138,6 +138,16 @@ async def worker(path, stage, fault, recovering=False):
                     await release.wait()
                 return result
             observe.prepare_foreground_observe = prepare
+            if stage == "observe":
+                from tests.runtime_helpers import install_mechanical_report_fixture
+                async def before_handoff(state, ctx):
+                    if str(state.task.user_prompt) == "TREE GRANDCHILD":
+                        entered.set()
+                        await release.wait()
+                install_mechanical_report_fixture(
+                    lambda state: str(state.task.user_prompt) == "TREE GRANDCHILD",
+                    before=before_handoff)
+
             await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(session_id="tree-session",
                 template_id="agent:tpl_echo", user_prompt="TREE ROOT",  unattended=True))
@@ -205,7 +215,8 @@ async def worker(path, stage, fault, recovering=False):
             llm.release_reports.set()
             async with asyncio.timeout(10):
                 while (any(t.status != "CANCELED" or not t.finalized for t in tm.all_tasks()
-                           if str(t.user_prompt).startswith("TREE")) or tm._background_asyncio_tasks):
+                           if str(t.user_prompt).startswith("TREE")) or tm._background_asyncio_tasks
+                       or tm._dispatch_is_live(grand) or grand in tm.running_task_ids()):
                     await asyncio.sleep(.01)
             if stage not in {"active", "observe"}:
                 assert not llm.grandchild_started.is_set() and llm.actors == actors_before

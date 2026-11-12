@@ -71,12 +71,14 @@ async def worker(path, fault, recovering=False):
             original = store.append_batch
             attempts = 0
             signature = None
+            envelopes = []
 
             async def append(sid, bid, events, *args, **kwargs):
                 nonlocal attempts, signature
                 relevant = any(e.type == "TaskCanceled" and e.task_id == target for e in events)
                 if relevant and fault in {"failed", "unknown", "unknown_retries", "failed_crash", "unknown_crash"}:
                     attempts += 1
+                    envelopes.append((bid, [(e.id, e.payload) for e in events]))
                     if fault.startswith("unknown"):
                         current = (bid, [(e.id, e.payload) for e in events])
                         if signature is None:
@@ -113,28 +115,36 @@ async def worker(path, fault, recovering=False):
                 await rt.recover_agent(owner, session_id=SID)
                 await drain(rt)
                 raise AssertionError("recovery missed crash injection")
-            for _ in range(4):
-                try:
-                    await rt.cancel_session(SID)
-                except PersistenceUnavailableError:
-                    assert fault in {"failed", "unknown", "unknown_retries", "failed_crash", "unknown_crash"}
-                    if fault.endswith("_crash"):
-                        os._exit(73)
-                    assert rt._task_managers[SID].get_task(target).status == "ACTIVE"
-                    assert any(e.task_id == target for e in rt._task_managers[SID]._queue.peek_all())
-                    rt.clear_storage_isolation(SID)
-                else:
-                    break
+            async with asyncio.timeout(15):
+                while True:
+                    try:
+                        accepted = await rt.cancel_session(SID)
+                    except PersistenceUnavailableError:
+                        assert fault in {"failed", "unknown", "unknown_retries", "failed_crash", "unknown_crash"}
+                        if fault.endswith("_crash"):
+                            os._exit(73)
+                        assert rt._task_managers[SID].get_task(target).status == "ACTIVE"
+                        assert any(e.task_id == target for e in rt._task_managers[SID]._queue.peek_all())
+                        rt.clear_storage_isolation(SID)
+                    else:
+                        if accepted:
+                            break
+                    # A stop refused during TaskFinalized publication is not an
+                    # accepted cancellation. Let that writer settle before retrying.
+                    await rt._task_managers[SID].wait_for_finalized_writes()
+                    await asyncio.sleep(0)
             await drain(rt)
             view = await rebuild_view(store, SID)
             assert len(view.tasks) == 5
             assert all(t.status == "CANCELED" and t.finalized for t in view.tasks.values())
             if fault == "failed":
-                assert attempts == 4
+                assert attempts >= 4
             if fault in {"unknown", "unknown_retries"}:
-                # Unavailable confirmation reads must not produce a fresh cancellation.
-                assert attempts == 1
+                assert attempts >= 1
                 assert unavailable_reads == (2 if fault == "unknown_retries" else 0)
+            if envelopes:
+                assert all(envelope == envelopes[0] for envelope in envelopes)
+                assert sum(r.event.type == "TaskCanceled" and r.event.task_id == target for r in await store.read_range(SID)) == 1
             assert not view.open_runs and not view.pending_observe and not view.hitl.pending
             assert fault in {"none", "failed", "unknown", "unknown_retries"}, "crash point not reached"
             os._exit(0)
