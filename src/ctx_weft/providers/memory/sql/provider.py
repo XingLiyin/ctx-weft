@@ -279,6 +279,43 @@ class SqlMemoryProvider(MemoryProvider):
                 return event.id
             return await self._ingest_in_tx(db, event, ctx)
 
+    async def recall_for_organize(self, ctx, *, operation, keep_last=0):
+        from ctx_weft.providers.memory.organize import recall_for_organize
+        return await recall_for_organize(self, ctx, operation=operation, keep_last=keep_last)
+
+    async def organize(self, ctx, *, operation, record_ids=None, summary=None,
+                       keep_recent_images=2):
+        from ctx_weft.providers.memory.organize import organize
+        return await organize(self, ctx, operation=operation, record_ids=record_ids,
+                              summary=summary, keep_recent_images=keep_recent_images)
+
+    async def _commit_organize(self, expected_ids, replacements, ctx):
+        """Conditional UPDATE and replacements share one database transaction."""
+        async with self._factory() as db, db.begin():
+            # A conditional UPDATE, rather than an unlocked SELECT followed by
+            # fold(), also detects a competing writer on the selected sources.
+            result = await db.execute(update(MemoryEventModel).where(
+                MemoryEventModel.id.in_(expected_ids),
+                MemoryEventModel.is_superseded.is_(False),
+                _tenant_expr(MemoryEventModel.tenant) == normalize_tenant(ctx.tenant_id),
+                MemoryEventModel.session_id == ctx.session_id,
+            ).values(is_superseded=True))
+            if result.rowcount != len(set(expected_ids)):
+                await db.rollback()
+                return None
+            ids = []
+            for event in replacements:
+                if event.id is not None and await self._id_exists(db, event.id):
+                    ids.append(event.id)
+                else:
+                    ids.append(await self._ingest_in_tx(db, event, ctx))
+            await db.flush()
+            rows = list((await db.execute(select(MemoryEventModel).where(
+                MemoryEventModel.id.in_(ids)))).scalars().all())
+            declared = await _declared_refs(db, rows)
+            by_id = {r.id: _row_to_record(r, declared.get(r.id)) for r in rows}
+            return [by_id[rid] for rid in ids]
+
     async def fold(
         self,
         supersede_ids: list[str],
@@ -413,8 +450,11 @@ class SqlMemoryProvider(MemoryProvider):
                 rows.extend(chunk)
                 declared.update(await _declared_refs(db, chunk))
         rows.sort(key=lambda row: (as_utc(row.timestamp), row.seq_no, positions[row.id]))
-        return normalize_view([_row_to_record(r, declared.get(r.id)) for r in rows],
-                              include_unpaired_dispatch=True)
+        records = normalize_view([_row_to_record(r, declared.get(r.id)) for r in rows],
+                                 include_unpaired_dispatch=True)
+        from ctx_weft.providers.memory.organize import _cache_records
+        _cache_records(self, ctx, records)
+        return records
 
     @staticmethod
     def _view_conditions(address, scope, ctx, kinds):

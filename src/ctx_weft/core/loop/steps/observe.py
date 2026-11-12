@@ -569,15 +569,14 @@ class ObserveStep(Step):
             )
             return
         # 与后台观察共用段作用域原子折叠，保护 user 回合与既有摘要。
-        from ctx_weft.core.loop.task_memory_fold import segment_fold
-        result = await segment_fold(
-            ctx.memory, state.scope, MemoryScope.TASK, summary, ctx.provider_ctx,
-            operation_id=state.extra.get("observe_id", ""),
+        result = await ctx.memory.organize(
+            ctx.provider_ctx, operation="fold_segment", summary=summary,
+            record_ids=await _segment_input_ids(state, ctx),
         )
         events.append(make_event(state, EventType.MEMORY_COMPACTED, payload={
-            "events_before": result.events_before,
-            "events_after": result.events_after,
-            "summary_event_id": result.summary_event_id,
+            "events_before": result.records_before,
+            "events_after": result.records_after,
+            "summary_event_id": (result.replacements[0].id if result.replacements else ""),
             "summary_length": len(summary),
             "layer": "task",
             "trigger": "observe_retry",
@@ -697,18 +696,15 @@ class ObserveStep(Step):
                     # `short_segment` 为真时跳到这里之外：**免折不免判**（2026-09-22）——
                     # 判定必须跑（短回合恰恰是提问最典型的形态），但短段的 recap 常比原文
                     # 还长，折它是净亏，段保 raw。
-                    from ctx_weft.core.loop.task_memory_fold import segment_fold
                     async with StepDriver.for_context(ctx).executions.task_guard(state.task.id, "finish_report"):
                         # Cancellation owns the final memory once its durable task
                         # transition wins. A rejected old verdict must not fold raw.
                         if (state.task.status != "CANCELED" and not (
                                 ctx.task_manager is not None and hasattr(ctx.task_manager, "is_task_tree_canceled")
                                 and ctx.task_manager.is_task_tree_canceled(state.task.id))):
-                            await segment_fold(
-                                ctx.memory, state.scope, MemoryScope.TASK, act_recap,
-                                ctx.provider_ctx, segment_end_at,
-                                operation_id=state.extra.get("observe_id", ""),
-                                context_record_ids=_execution(ctx).options.get("context_record_ids"),
+                            await ctx.memory.organize(
+                                ctx.provider_ctx, operation="fold_segment", summary=act_recap,
+                                record_ids=await _segment_input_ids(state, ctx),
                             )
                 return self._outcome(observation)
             except Exception:
@@ -878,19 +874,35 @@ async def submit_verdict(state: "LoopState", ctx: "LoopContext", meta: dict) -> 
     return bool(accepted) and verdict in (VERDICT_SUCCESS, VERDICT_FAIL)
 
 
+async def _segment_input_ids(state, ctx):
+    """Use frozen observe input; legacy synchronous callers retain a bounded read."""
+    from ctx_weft.protocols import MemoryKind
+
+    options = _execution(ctx).options
+    fixed = options.get("context_record_ids")
+    if fixed is not None:
+        return list(fixed)
+    end = options.get("segment_end_at")
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end)
+    return await ctx.memory.load_view_ids(
+        state.scope, MemoryScope.TASK, ctx.provider_ctx,
+        kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY, MemoryKind.TOOL_AUDIT],
+        end_at=end or _execution(ctx).started_at,
+    )
+
+
 async def _out_of_band_continue(state, ctx, meta):
     """Apply a durable continuation before another actor can consume its history."""
     completion = state.extra.get("observe_completion") or {}
     recap = (meta.get(K.OBSERVER_ACT_RECAP) or "").strip()
     if recap and not completion.get("short_segment") and not state.extra.get("observe_keep_raw"):
-        from ctx_weft.core.loop.task_memory_fold import segment_fold
         async with StepDriver.for_context(ctx).executions.task_guard(state.task.id, "finish_report"):
             if ctx.task_manager.is_task_tree_canceled(state.task.id):
                 return
-            await segment_fold(
-                ctx.memory, state.scope, MemoryScope.TASK, recap, ctx.provider_ctx,
-                _execution(ctx).started_at, operation_id=state.extra.get("observe_id", ""),
-                context_record_ids=_execution(ctx).options.get("context_record_ids"))
+            await ctx.memory.organize(
+                ctx.provider_ctx, operation="fold_segment", summary=recap,
+                record_ids=await _segment_input_ids(state, ctx))
     if ctx.task_manager.is_task_tree_canceled(state.task.id):
         return
     await _close_park_bubble(state, ctx, message="")
@@ -1164,11 +1176,6 @@ async def applied(state, ctx, *, reason=""):
     await ctx.event_bus.emit(make_event(state, EventType.OBSERVE_APPLIED, {
         "task_id": state.task.id, "observe_id": state.extra["observe_id"],
         **({"reason": reason} if reason else {})}))
-
-
-def record_id(operation, *parts):
-    from hashlib import sha256
-    return "mev_" + sha256(repr((operation, parts)).encode()).hexdigest()[:48] if operation else None
 
 
 async def capture_context(state, ctx, options):

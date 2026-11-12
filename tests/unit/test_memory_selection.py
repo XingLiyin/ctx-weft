@@ -129,7 +129,7 @@ async def test_sql_read_chunks_normalize_legacy_pairs_together(tmp_path, monkeyp
 
 async def test_capture_defers_loading_and_observe_reuses_records(memory, monkeypatch):
     await memory.ingest(turn("original"), CTX)
-    state = NS(session=NS(id="s"), task=NS(id="t", outputs="original"),
+    state = NS(scope=ADDRESS, session=NS(id="s"), task=NS(id="t", outputs="original"),
                agent=NS(id="a"), extra={})
     options = {"segment_end_at": (BASE + timedelta(seconds=1)).isoformat()}
     ctx = NS(memory=memory, provider_ctx=CTX, execution=NS(options=options))

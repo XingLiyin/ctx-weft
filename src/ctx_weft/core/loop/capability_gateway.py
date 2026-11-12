@@ -336,7 +336,7 @@ async def ingest_tool_result(
             # ``blob_refs``：内容里若有**占位形态**的图（从事件补写时就是这一形态），
             # 它携带的 ref 必须显式声明——GC 的 mark 判据只看结构化字段、刻意绝不解析
             # 占位文案。不声明的话占位活着、字节却会在下一轮回收里被当孤儿删掉，模型
-            # `media:get_image` 取回来的是「图片不可用」。同 `compact.collapse_task_layer`。
+            # `media:get_image` 取回来的是「图片不可用」。同 `providers.memory.organize`。
             blob_refs=list(blob_refs or []),
         ),
         provider_ctx,

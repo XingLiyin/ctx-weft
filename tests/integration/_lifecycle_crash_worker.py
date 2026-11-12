@@ -95,6 +95,9 @@ async def worker(directory, mode, cut, recovering=False):
     async with open_sqlite_event_store(directory / "events.db") as store:
         async with open_sqlite_memory(directory / "memory.db") as memory:
             rt, llm = make_lifecycle_runtime(store, memory, mode)
+            if mode.startswith(("handoff_", "exhausted_")):
+                from tests.runtime_helpers import install_mechanical_report_fixture
+                install_mechanical_report_fixture()
             original = store.append_batch
             root_task_id = None
             observation_completed = False
@@ -224,6 +227,16 @@ async def worker(directory, mode, cut, recovering=False):
                 return result
 
             memory.fold = crash_after_fold
+            original_organize_commit = memory._commit_organize
+            async def crash_after_organize_commit(ids, events, ctx):
+                result = await original_organize_commit(ids, events, ctx)
+                if result is not None and cut == "raw_folded" and ids and not events:
+                    os._exit(73)
+                if result is not None and cut == "segment_fold" and any(
+                        event.kind == MemoryKind.SUMMARY for event in events):
+                    os._exit(73)
+                return result
+            memory._commit_organize = crash_after_organize_commit
 
             async def crash_after_memory_write(event, ctx):
                 result = await original_ingest(event, ctx)

@@ -6,7 +6,7 @@
 """
 import pytest
 from datetime import datetime, timedelta, UTC
-from ctx_weft.core.loop.task_memory_fold import segment_fold
+from tests.segment_fold_testkit import segment_fold
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
 from ctx_weft.protocols import (
     MemoryAddress, MemoryEvent, MemoryEventType, MemoryScope, MemoryAddress,

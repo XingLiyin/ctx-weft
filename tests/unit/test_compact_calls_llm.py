@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps import compact as compact_mod
+from tests import compaction_testkit as compact_mod
 from ctx_weft.protocols import LLMChunk, LLMOutageError
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
@@ -41,7 +41,7 @@ async def test_summarize_for_compact_returns_llm_text(monkeypatch):
     async def _ok(ctx, state, request, **kwargs):
         for t in ["sum", "mary"]:
             yield LLMChunk(kind="token", text=t)
-    monkeypatch.setattr(compact_mod, "stream_llm_resilient", _ok)
+    monkeypatch.setattr(compact_mod.compact_step, "stream_llm_resilient", _ok)
     state, ctx = _state_ctx()
     out = await compact_mod.summarize_for_compact(state, ctx)
     # spec: compact-fidelity——返回解析后的 digest：散文输出（无五小节）整文落库 + degraded。
@@ -53,7 +53,7 @@ async def test_summarize_for_compact_propagates_outage(monkeypatch):
     async def _raise(ctx, state, request, **kwargs):
         raise LLMOutageError("self-heal exhausted")
         yield  # pragma: no cover  (make this an async generator)
-    monkeypatch.setattr(compact_mod, "stream_llm_resilient", _raise)
+    monkeypatch.setattr(compact_mod.compact_step, "stream_llm_resilient", _raise)
     state, ctx = _state_ctx()
     with pytest.raises(LLMOutageError):
         await compact_mod.summarize_for_compact(state, ctx)

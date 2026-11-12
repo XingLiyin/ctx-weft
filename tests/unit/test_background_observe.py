@@ -614,7 +614,7 @@ async def test_segment_fold_failure_keeps_raw_and_does_not_raise(
     async def boom(*args, **kwargs):
         raise RuntimeError("fold backend down")
 
-    monkeypatch.setattr("ctx_weft.core.loop.task_memory_fold.segment_fold", boom)
+    monkeypatch.setattr("ctx_weft.providers.memory.organize.organize", boom)
 
     with caplog.at_level(logging.ERROR, logger="ctx_weft.core.loop.steps.observe"):
         t = StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "plain_text"})

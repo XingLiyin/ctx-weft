@@ -44,6 +44,16 @@ async def worker(path, stage, fault, mode):
 
             _SessionTaskRunner.execute = execute
             observe.prepare_foreground_observe = prepare
+            if stage == "observe":
+                from tests.runtime_helpers import install_mechanical_report_fixture
+                async def before_handoff(state, ctx):
+                    if str(state.task.user_prompt) == "TREE GRANDCHILD":
+                        entered.set()
+                        await release.wait()
+                install_mechanical_report_fixture(
+                    lambda state: str(state.task.user_prompt) == "TREE GRANDCHILD",
+                    before=before_handoff)
+
             await initialize_all(rt)
             handle = await rt.start_session(SessionStartParams.create(session_id="tree-session",
                 template_id="agent:tpl_echo", user_prompt="TREE ROOT",  unattended=True))
@@ -143,6 +153,7 @@ async def worker(path, stage, fault, mode):
             assert await store.committed_head("tree-session") == head
             assert terminals.count(grand.id) == 1
             # A new standalone task on the same surviving agent must really execute.
+            assert await rt.recover_storage("tree-session")
             next_task = await rt.dispatch_task("tree-session", "UNRELATED RUN FOLLOWUP",
                 agent_id=grand.assigned_agent_id, settings={"use_subagent": False}, unattended=True)
             async with asyncio.timeout(10):

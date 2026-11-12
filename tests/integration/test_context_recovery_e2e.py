@@ -23,8 +23,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ctx_weft.core.loop.driver import CONTEXT_RECOVERY_COUNT_KEY
-from ctx_weft.core.loop.steps import compact as cm
-from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, ParsedDigest
+from tests import compaction_testkit as cm
+from tests.compaction_testkit import COLLAPSE_DELIM, ParsedDigest
 from ctx_weft.core.loop.task_memory_fold import build_finish_slots
 from ctx_weft.protocols import (
     AgentTemplate,
@@ -164,7 +164,7 @@ def _wire(monkeypatch, *, digest=_DIGEST, responses=None, inflate_on=frozenset({
     if digest is not None:
         async def _fake_summ(state, ctx, *, scope="task"):
             return ParsedDigest(text=digest, degraded=False, sections={})
-        monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
+        cm.patch_summary(monkeypatch, _fake_summ)
     # 后台 observe 与本文件无关，挡掉以免多消耗 mock 响应。
     patch_observe_start(monkeypatch, lambda state, ctx, *, boundary: None)
 

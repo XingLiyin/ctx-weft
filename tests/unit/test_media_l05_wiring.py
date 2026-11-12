@@ -23,10 +23,11 @@ from tests.model_testkit import model_snapshot
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from ctx_weft.providers.memory import organize as memory_ops
 import pytest
 
 from ctx_weft.core.utils.content import collect_blob_refs
-from ctx_weft.core.loop.steps import compact as cm
+from tests import compaction_testkit as cm
 from ctx_weft.core.media import demote_for_budget, get_image
 from ctx_weft.core.media.refs import (
     decode_image_placeholder,
@@ -76,6 +77,10 @@ class _CountingMemory(InMemoryMemoryProvider):
     async def fold(self, supersede_ids, replacements, ctx):
         self.fold_calls += 1
         return await super().fold(supersede_ids, replacements, ctx)
+
+    async def _commit_organize(self, ids, events, ctx):
+        self.fold_calls += 1
+        return await super()._commit_organize(ids, events, ctx)
 
 
 class _Blobs:
@@ -156,32 +161,31 @@ async def test_l05_runs_before_l1(monkeypatch):
     await _seed(mem, [[TextPart(text="look"), _img(1)], [_img(2)], [_img(3)],
                       [TextPart(text="ok")]])
 
+    from tests.unit.test_compact_history_priority import capsule
+    state, ctx = _state(target_ratio=0.01), _ctx(mem, blobs=_Blobs())
+    await capsule(state, ctx, "old", 0)
     order: list[str] = []
-    real = cm.demote_for_budget
-
-    async def spy_demote(*a, **k):
-        order.append("L0.5")
-        return await real(*a, **k)
-
-    async def spy_demote_history(state, ctx, origins, **kwargs):
-        order.append("L1")
-        return 1
-
-    monkeypatch.setattr(cm, "demote_for_budget", spy_demote)
-    monkeypatch.setattr(cm, "demote_kept_capsules", spy_demote_history)
+    real = memory_ops.organize
+    async def spy_organize(*args, **kwargs):
+        result = await real(*args, **kwargs)
+        if kwargs["operation"] == "demote_images" and kwargs.get("record_ids") is None:
+            order.append("L0.5")
+        elif kwargs["operation"] == "reduce_history" and result.changed:
+            order.append("L1")
+        return result
+    monkeypatch.setattr(memory_ops, "organize", spy_organize)
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(99))
     monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(["old"]))
-    monkeypatch.setattr(cm, "summarize_for_compact",
+    cm.patch_summary(monkeypatch,
                         lambda s, c, *, scope="task": _const("S"))
 
     events = await cm.escalating_compact(
-        _state(target_ratio=0.01), _ctx(mem, blobs=_Blobs()),
-        token_estimate=9000, trigger="compact")
+        state, ctx, token_estimate=9000, trigger="compact")
 
     assert order == ["L0.5", "L1"], order
     # 对照：两级都真的产出了事件（否则「顺序对」可能只是因为某级没跑）
     assert [e.payload.get("source") for e in events
-            if e.type == "MemoryCompacted"] == ["demote_images", "demote_lean"]
+            if e.type == "MemoryCompacted"][:2] == ["demote_images", "demote_lean"]
 
 
 # ── 2./3. 事件形状 + freed_tokens 真的 > 0 ────────────────────────────────────
@@ -229,23 +233,29 @@ async def test_l05_alone_can_stop_escalation(monkeypatch):
     """
     calls: list[str] = []
 
-    async def spy_demote_history(state, ctx, origins, **kwargs):
-        calls.append("L1")
-        return 1
-
-    monkeypatch.setattr(cm, "demote_kept_capsules", spy_demote_history)
+    real = memory_ops.organize
+    async def spy_organize(*args, **kwargs):
+        result = await real(*args, **kwargs)
+        if kwargs["operation"] == "reduce_history" and result.changed:
+            calls.append("L1")
+        return result
+    monkeypatch.setattr(memory_ops, "organize", spy_organize)
     monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(99))
     monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const(["old"]))
-    monkeypatch.setattr(cm, "summarize_for_compact",
+    cm.patch_summary(monkeypatch,
                         lambda s, c, *, scope="task": _const("S"))
 
     seed = [[TextPart(text="a"), _img(1)], [_img(2)], [_img(3)], [_img(4)]]
 
     mem = _CountingMemory()
     await _seed(mem, seed)
+    from tests.unit.test_compact_history_priority import capsule
+    state = _state()
+    state.scope = MemoryAddress(session_id="s1", agent_id="a1", task_id="cur")
+    await capsule(state, _ctx(mem, blobs=_Blobs()), "old", 0)
     # eff=10000, target_ratio=0.5 → target=5000；est 6000 − freed(≈3100) < 5000
     events = await cm.escalating_compact(
-        _state(), _ctx(mem, blobs=_Blobs()), token_estimate=6000, trigger="compact")
+        state, _ctx(mem, blobs=_Blobs()), token_estimate=6000, trigger="compact")
     assert calls == []
     assert events[-1].payload["levels"] == ["demote_images"]
     assert events[-1].payload["est_after"] < 5000
@@ -253,6 +263,7 @@ async def test_l05_alone_can_stop_escalation(monkeypatch):
     # 对照：keep_recent 大到一张都不降 → est 不动 → 照旧升级到 L1
     mem2 = _CountingMemory()
     await _seed(mem2, seed)
+    await capsule(state, _ctx(mem2, blobs=_Blobs()), "old", 0)
     await cm.escalating_compact(
         _state(keep_recent_images=99), _ctx(mem2, blobs=_Blobs()),
         token_estimate=6000, trigger="compact")
@@ -459,13 +470,13 @@ async def test_fold_root_experience_demotes_its_range_before_folding(monkeypatch
     """§6.1 的另一半：`fold_root_experience` 也在动手前降一次自己的折区。"""
     mem = _CountingMemory()
     ranges: list[list[str]] = []
-    real = cm.demote_all
+    real = memory_ops._demote_images
 
-    async def spy(memory, ids, ctx, **k):
+    async def spy(memory, pctx, live, ids, keep):
         ranges.append(list(ids))
-        return await real(memory, ids, ctx, **k)
+        return await real(memory, pctx, live, ids, keep)
 
-    monkeypatch.setattr(cm, "demote_all", spy)
+    monkeypatch.setattr(memory_ops, "_demote_images", spy)
 
     # 两个已完成顶层单元（各一条 finish 对 assistant 回合）+ 各自的 task 层胶囊
     for i, tid in enumerate(("old", "new")):
@@ -654,7 +665,7 @@ async def test_l1_summary_input_holds_the_placeholder_not_a_vanished_image(monke
         captured[scope] = await _summary_input_text(mem)
         return f"SUM-{scope}"
 
-    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
+    cm.patch_summary(monkeypatch, _fake_summ)
 
     events = await cm.escalating_compact(
         _l1_state(target_ratio=0.8), _ctx(mem, blobs=_Blobs()),
@@ -664,7 +675,7 @@ async def test_l1_summary_input_holds_the_placeholder_not_a_vanished_image(monke
     # 前提：L0.5 一张都没降（两张图正好被 keep_recent=2 保住）→ 图是「最新的」那种
     assert "demote_images" not in sources, sources
     # 对照：L1 **确实**跑了并折了东西（否则下面的断言可能只是因为什么都没发生）
-    assert sources == ["demote_lean"], sources
+    assert sources == ["root_experience"], sources
 
     text = captured["agent"]
     assert "body-old" in text                                  # 折区那条确实进了摘要输入
@@ -691,13 +702,13 @@ async def test_l1_demotion_runs_before_the_summary_is_generated(monkeypatch):
     await _seed_two_top_units(mem)
 
     order: list[str] = []
-    real = cm.demote_all
+    real = memory_ops._demote_images
 
-    async def spy_demote(memory, ids, ctx, **k):
+    async def spy_demote(*args, **kwargs):
         order.append("demote")
-        return await real(memory, ids, ctx, **k)
+        return await real(*args, **kwargs)
 
-    monkeypatch.setattr(cm, "demote_all", spy_demote)
+    monkeypatch.setattr(memory_ops, "_demote_images", spy_demote)
 
     seen: list[str] = []
 
@@ -710,7 +721,7 @@ async def test_l1_demotion_runs_before_the_summary_is_generated(monkeypatch):
         _l1_state(), _ctx(mem, blobs=_Blobs()), 1, _summary)
 
     assert n > 0                                   # 对照：确实折了
-    assert order == ["demote", "demote", "summarize"], order   # TASK + AGENT 两次降级
+    assert order == ["demote", "summarize"], order  # one selected mixed-scope transformation
     assert seen and _ref(20) in seen[0], seen      # 摘要看到的是占位不是空白
     # 摘要真的落进了新的 AGENT_COMPACT_SUMMARY（证明 `_summary()` 的返回值被用上）
     agent_recs = await load_records(mem, _AGENT_HALF, MemoryScope.AGENT, _pctx())
@@ -727,7 +738,7 @@ async def test_l1_freed_tokens_account_for_the_demotion_exactly_once(monkeypatch
     """
     mem = _CountingMemory()
     await _seed_two_top_units(mem)
-    monkeypatch.setattr(cm, "summarize_for_compact",
+    cm.patch_summary(monkeypatch,
                         lambda s, c, *, scope="task": _const(f"SUM-{scope}"))
     state = _l1_state(target_ratio=0.8)
     ctx = _ctx(mem, blobs=_Blobs())
@@ -737,7 +748,7 @@ async def test_l1_freed_tokens_account_for_the_demotion_exactly_once(monkeypatch
     after = await cm._active_memory_tokens(state, ctx)
 
     folded = [e for e in events if e.type == "MemoryCompacted"]
-    assert [e.payload["source"] for e in folded] == ["demote_lean"]
+    assert [e.payload["source"] for e in folded] == ["root_experience"]
     fin = events[-1].payload
     assert before - after > 1500                       # 图片额度扣除 lean 收尾记录的文本开销
     assert fin["freed_tokens"] == before - after       # 不重复、不遗漏

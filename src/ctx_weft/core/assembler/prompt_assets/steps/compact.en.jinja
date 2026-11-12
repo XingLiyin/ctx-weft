@@ -9,7 +9,7 @@
 ---
 
 {% if ctx.scope == "agent" %}Create a digest of this agent's completed-task history, including delegated sub-tasks and earlier digests. Exclude execution details of the current still-running task.
-{% else %}Create a digest of the ENTIRE task execution so far, from the original request through the current stopping point, including earlier digests.
+{% else %}Create a digest of the selected earlier task history, including the original request and earlier digests. Preserve its established results and unfinished work; the recent retained conversation will follow this digest.
 {% endif %}Apply the summary principles above. Submit plain text in this response: call no tools, add no preamble, and begin with `## Goal`. Do not output source boundary markers such as `{{ progress_heading }}` or describe the covered range or compaction process. Use the following five-section format, each heading on its own line:
 ## Goal — {% if ctx.scope == "agent" %}the overall goal of this body of work.{% else %}the task's current goal.{% endif %}
 ## Constraints — constraints and hard limits (write "none" if none).

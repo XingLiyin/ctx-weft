@@ -114,7 +114,10 @@ async def _eval_one(llm, sample: dict) -> dict:
     degraded_rounds = 0
     digest_text = ""
     for _ in range(ROUNDS):
-        digest = await cm.summarize_for_compact(state, ctx, scope="task")
+        records = await ctx.memory.recall_for_organize(ctx.provider_ctx, operation="fold_current")
+        text = await cm._summarize(state, ctx, scope="task", records=records)
+        from ctx_weft.providers.memory.organize import parse_structured_digest
+        digest = parse_structured_digest(text)
         degraded_rounds += int(digest.degraded)
         digest_text = digest.text
     body = digest_text

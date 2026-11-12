@@ -1,6 +1,6 @@
 {# One history presentation program shared by prompts, inheritance and estimates. #}
-{% macro row(prompt, item, shared, group, task=none, wrap=false, finish_marker=false) -%}
-{% set options = dict(ref=item.ref, priority=item.priority, required=item.current_prompt,
+{% macro row(prompt, item, shared, group, task=none, wrap=false, finish_marker=false, preserve=false) -%}
+{% set options = dict(ref=item.ref, priority=item.priority, required=item.current_prompt or preserve,
                       group=group, timestamp=item.timestamp) %}
 {% if item.summary_kind and item.scope == "task" %}
   {% set label = dict(kind="recap", task_id=item.record.address.task_id or item.task_id,
@@ -20,7 +20,7 @@
 {% do prompt.message(item.message, **options) %}
 {%- endmacro %}
 
-{% macro emit(prompt, history, task_history, history_trees, state, shared, decorate=true) -%}
+{% macro emit(prompt, history, task_history, history_trees, state, shared, decorate=true, expand=false) -%}
 {% set views = {} %}
 {% for key, task in task_history.items() %}
   {% set source = task.source %}
@@ -42,7 +42,7 @@
 {% for item in history %}
   {% set choice = namespace(show=true, wrap=false, finish_marker=false, group=item.group) %}
   {% set task = item.task %}
-  {% if task %}
+  {% if task and not expand %}
     {% set view = views[task.key] %}
     {% if not expanded[item.tree.key] %}
       {% set choice.show = item.ref == item.tree.root.closing.ref %}
@@ -62,7 +62,7 @@
     {% if expanded[item.tree.key] %}{% set choice.group = item.tree.group %}{% endif %}
   {% endif %}
   {% if choice.show and (item.message.content or item.message.tool_calls or item.legacy) %}
-    {% do row(prompt, item, shared, choice.group, task, choice.wrap, choice.finish_marker) %}
+    {% do row(prompt, item, shared, choice.group, task, choice.wrap, choice.finish_marker, preserve=expand) %}
     {% if decorate %}
       {% do prompt.before(item.ref, shared.history_before(item), priority=item.priority,
           required=item.current_prompt, group=choice.group) %}

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from ctx_weft.core.loop.steps.compact import CompactStep
-from ctx_weft.protocols import MemoryAddress
+from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryKind, MemoryScope
 from ctx_weft.protocols import MemoryEventType as T
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
@@ -16,100 +16,35 @@ from tests.assembler_testkit import compiled_test_inputs, scripted_inputs
 _BASE_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-class _FakeMemory:
+from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider
+from ctx_weft.protocols import ProviderContext
+
+
+class _FakeMemory(InMemoryMemoryProvider):
+    """Use the real organize implementation; record actual committed changes."""
     def __init__(self, counts):
-        self._counts = counts  # {frozenset(types): n}
-        self.applied = []    # kept for backward-compat (no longer populated)
-        self.ingested = []   # collapsed USER_PROMPT events written by collapse_task_layer
+        super().__init__()
+        self._counts = counts
+        self._seeded = False
+        self.ingested = []
         self.superseded = []
-        self._selected = {}
-        self._replacements = {}
 
-    async def count_recent(self, scope, types, ctx):
-        return self._counts.get(frozenset(types), 0)
+    async def load_view_ids(self, address, scope, ctx, kinds=None, **kwargs):
+        if not self._seeded:
+            self._seeded = True
+            n = max((v for k, v in self._counts.items() if T.AGENT_CONVERSATION_TURN not in k), default=0)
+            for i in range(n):
+                await super().ingest(MemoryEvent(id=f"seed-{i}", kind=MemoryKind.CONVERSATION_TURN,
+                    scope=MemoryScope.TASK, address=MemoryAddress(session_id="s1", agent_id="agt1", task_id="t1"),
+                    content=f"msg {i}", role="user", timestamp=_BASE_DT + timedelta(seconds=i)), ctx)
+        return await super().load_view_ids(address, scope, ctx, kinds, **kwargs)
 
-    async def recall_recent(self, scope, types, limit, ctx):
-        # Return empty for agent-layer queries (no root residues in these unit tests)
-        if T.AGENT_CONVERSATION_TURN in types:
-            return []
-        # For task-layer queries: find the max count among sets intersecting the requested types
-        max_n = max(
-            (v for k, v in self._counts.items() if k & frozenset(types)),
-            default=0,
-        )
-        if max_n == 0:
-            return []
-        # Return fake USER_PROMPT records newest-first (as InMemoryMemoryProvider does)
-        return list(reversed([
-            SimpleNamespace(
-                id=str(i), type=T.USER_PROMPT, content=f"msg {i}", role="user",
-                metadata={},
-                timestamp=_BASE_DT + timedelta(seconds=i),
-            )
-            for i in range(max_n)
-        ]))
-
-    async def recall_recent_by_agent(self, scope, types, limit, ctx):
-        return []  # no cross-task records by default
-
-    async def load_view_ids(self, address, scope, ctx, kinds=None, *, end_at=None):
-        records = await self._records(address, scope, ctx, kinds)
-        # Immutable ID reads must remain valid after another view is selected.
-        records = [r for r in records if r.id not in self.superseded]
-        records += [r for r in self._replacements.values()
-                    if r.scope == scope and r.id not in self.superseded]
-        self._selected.update((r.id, r) for r in records)
-        return [r.id for r in records]
-
-    async def read_records(self, ids, ctx):
-        return [self._selected[i] for i in ids]
-
-    async def _records(self, address, scope, ctx, kinds=None):
-        # v2：AGENT 视图（root residue 查询）→ 空；TASK 视图 → counts 推升序 user 回合
-        from ctx_weft.protocols import MemoryScope
-        from ctx_weft.protocols.memory_compat import MemoryKind
-        if scope is MemoryScope.AGENT:
-            return []
-        max_n = max(
-            (v for k, v in self._counts.items() if T.AGENT_CONVERSATION_TURN not in k),
-            default=0,
-        )
-        return [
-            SimpleNamespace(
-                id=str(i), type=T.USER_PROMPT, content=f"msg {i}", role="user",
-                kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
-                address=MemoryAddress(session_id=address.session_id, agent_id=address.agent_id,
-                                      task_id=address.task_id or "t1"), metadata={},
-                timestamp=_BASE_DT + timedelta(seconds=i),
-            )
-            for i in range(max_n)
-        ]
-
-    async def apply_compact(self, scope, summary, keep_last, ctx, layer, protect_types=()):
-        # No longer called by _compact_scope; kept for interface completeness
-        self.applied.append((layer.value, summary))
-        return SimpleNamespace(events_before=10, events_after=keep_last,
-                               summary_event_id="s1")
-
-    async def supersede(self, ids, ctx):
-        self.superseded.extend(ids)
-
-    async def ingest(self, event, ctx):
-        self.ingested.append(event)
-        return event
-
-    async def fold(self, supersede_ids, replacements, ctx):
-        # v2 原子原语：遗忘 + 补偿（fake 拆记回 superseded/ingested 两账本）
-        self.superseded.extend(supersede_ids)
-        out = []
-        for ev in replacements:
-            self.ingested.append(ev)
-            from dataclasses import replace
-            record_id = f"mev_fold_{len(self.ingested)}"
-            self._replacements[record_id] = replace(ev, id=record_id)
-            self._selected[record_id] = self._replacements[record_id]
-            out.append(record_id)
-        return out
+    async def _commit_organize(self, ids, events, ctx):
+        added = await super()._commit_organize(ids, events, ctx)
+        if added is not None:
+            self.superseded.extend(ids)
+            self.ingested.extend(events)
+        return added
 
 
 class _FakeAssembler:
@@ -153,7 +88,7 @@ def _state(context_tokens=1000):
 
 def _ctx(memory):
     return SimpleNamespace(memory=memory, assembler=_FakeAssembler(), llm=_FakeLLM(),
-                           provider_ctx=SimpleNamespace(), task_manager=None)
+                           provider_ctx=ProviderContext(session_id="s1", agent_id="agt1", task_id="t1"), task_manager=None)
 
 
 async def test_compact_folds_overbudget_layers_with_one_summary():
@@ -184,7 +119,7 @@ async def test_compact_noop_when_nothing_foldable():
 
 
 async def test_summarize_for_compact_returns_llm_text():
-    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+    from tests.compaction_testkit import summarize_for_compact
     out = await summarize_for_compact(_state(), _ctx(_FakeMemory({})))
     # spec: compact-fidelity——返回 ParsedDigest；散文输出整文落库 + degraded。
     assert out.text == "SUMMARY" and out.degraded is True

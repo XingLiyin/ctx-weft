@@ -197,6 +197,7 @@ class ActStep(Step):
             #    与其 tool 结果聚成同生共死单元再整单元丢弃（`budget._coalesce_tool_pairs`），
             #    永不产孤儿；且紧接着就是 compact，折的正是这批新料。
             tool_results = await _execute_tool_calls(state, ctx, turn_record.tool_calls)
+            await _record_hidden_call_completion(state, ctx, turn_record.tool_calls)
             for tr in tool_results:
                 appended_messages.append(LLMMessage(
                     role="tool", content=tr["result"], tool_call_id=tr["tool_call_id"],
@@ -625,6 +626,9 @@ def _assistant_memory_event(
             metadata={
                 "turn": turn_num,
                 "tool_call_count": len(tool_calls),
+                # Memory can protect unfinished calls, including dispatch/silent
+                # calls omitted from the model-visible tool protocol.
+                "execution_call_ids": [tc.id for tc in tool_calls],
                 "tool_calls": non_dispatch_tool_dicts,
                 "usage": dataclasses.asdict(usage),
             },
@@ -669,6 +673,28 @@ def _predispatch_compact_options(
     return {"trigger": "pre_dispatch", "token_estimate": tokens,
             "force": False, "after": "prepare"}
 
+
+
+async def _record_hidden_call_completion(state, ctx, tool_calls):
+    """Durable, non-rendered completion for calls absent from task tool messages."""
+    from ctx_weft.core.loop.capability_gateway import DISPATCH_TOOLS, SILENT_TOOLS
+    from ctx_weft.core.loop.driver import ingest_or_stage
+    from ctx_weft.core.utils.ids import record_id
+
+    for call in tool_calls:
+        if call.name not in DISPATCH_TOOLS | SILENT_TOOLS:
+            continue
+        await ingest_or_stage(
+            ctx.memory,
+            MemoryEvent(
+                id=record_id("execution_completed", call.id), kind=MemoryKind.TOOL_AUDIT,
+                scope=MemoryScope.TASK, address=state.scope, content="",
+                role="assistant", timestamp=now_utc(),
+                metadata={"tool_call_id": call.id, "execution_completed": True},
+            ),
+            ctx.provider_ctx, task_manager=getattr(ctx, "task_manager", None),
+            task_id=state.task.id,
+        )
 
 
 async def _execute_tool_calls(

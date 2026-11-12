@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps.compact import _count_root_residues, fold_root_experience
+from tests.compaction_testkit import _count_root_residues, fold_root_experience
 from ctx_weft.core.loop.steps.finalize import finalize_task_memory
 from ctx_weft.core.models.task import NormalTaskSettings, Task
 from ctx_weft.protocols import (

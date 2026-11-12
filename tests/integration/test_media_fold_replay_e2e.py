@@ -288,6 +288,14 @@ class _WireCapturingAnthropicLLM(_PlaceholderReadingLLM, AnthropicMultimodalAdap
         self.captured_payloads.append(payload)
         return self._emit(*self._decide(payload))
 
+    @property
+    def context_limit(self):
+        return 6000
+
+    @property
+    def output_reserve(self):
+        return 0
+
 
 class _WireCapturingOpenAILLM(_PlaceholderReadingLLM, OpenAICompatibleMultimodalAdapter):
     """真 `OpenAICompatibleAdapter._build_payload` / `_serialize_messages`，不走网络。"""
@@ -300,6 +308,14 @@ class _WireCapturingOpenAILLM(_PlaceholderReadingLLM, OpenAICompatibleMultimodal
         payload = self._build_payload(request)
         self.captured_payloads.append(payload)
         return self._emit(*self._decide(payload))
+
+    @property
+    def context_limit(self):
+        return 6000
+
+    @property
+    def output_reserve(self):
+        return 0
 
 
 # ── 会话跑手 ──────────────────────────────────────────────────────────────────
@@ -374,6 +390,12 @@ class _FoldSnapshottingMemory(InMemoryMemoryProvider):
             self.snapshots.append(
                 await load_records(self, self._task_address, MemoryScope.TASK, ctx))
         return await super().fold(supersede_ids, replacements, ctx)
+
+    async def _commit_organize(self, supersede_ids, replacements, ctx):
+        if self._task_address is not None:
+            self.snapshots.append(
+                await load_records(self, self._task_address, MemoryScope.TASK, ctx))
+        return await super()._commit_organize(supersede_ids, replacements, ctx)
 
 
 def _view_before_close_fold(memory) -> list:

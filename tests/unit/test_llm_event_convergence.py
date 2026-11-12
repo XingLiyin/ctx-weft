@@ -261,7 +261,7 @@ def _make_compact_ctx(event_bus, *, llm=None):
 async def test_gateway_emits_stream_events_for_compact_origin_and_pairs_with_response_finished():
     """origin==LOOP_COMPACT 放行 4 个流式事件；summarize_for_compact 补发的
     LLM_RESPONSE_FINISHED 与它们共享同一个 request_id（同 act.py 那条回归的镜像用例）。"""
-    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+    from tests.compaction_testkit import summarize_for_compact
 
     bus = _RecordingBus()
     state = _make_compact_state()
@@ -381,7 +381,7 @@ async def test_compact_events_carry_resolved_model_not_mock_sentinel():
     test_compact_sends_resolved_model_to_llm_client_not_mock_sentinel，直接检查发给
     LLM client 的 request.model。本测试保留是因为它验证的东西本身仍然成立、仍然值得
     有回归保护，只是不再声称自己是本次改动的验收测试。"""
-    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+    from tests.compaction_testkit import summarize_for_compact
 
     bus = _RecordingBus()
     state = _make_compact_state()
@@ -415,7 +415,7 @@ async def test_compact_sends_resolved_model_to_llm_client_not_mock_sentinel():
     `runtime.py:1809` 的 `agent.runtime={"llm_model": rm.model}` 桥接，一直是对的，
     测不出 inline 路径这个 bug。
     """
-    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+    from tests.compaction_testkit import summarize_for_compact
 
     state = _make_compact_state()
     state.agent.runtime = {}  # 正常任务执行下 agent.runtime 就是这样——不含 llm_model
@@ -437,7 +437,7 @@ async def test_compact_stays_silent_on_response_finished_under_wrong_origin():
     summarize_for_compact 自己的收尾门禁（origin==LOOP_COMPACT）是另一回事、独立保留：
     万一在错误 origin 下被调用，不该补发一条没有配对 REQUEST_STARTED 语境的孤儿
     LLM_RESPONSE_FINISHED（比不发更糟，见该函数文档字符串）。"""
-    from ctx_weft.core.loop.steps.compact import summarize_for_compact
+    from tests.compaction_testkit import summarize_for_compact
 
     bus = _RecordingBus()
     state = _make_compact_state(origin=EventOrigin.LOOP_OBSERVE)

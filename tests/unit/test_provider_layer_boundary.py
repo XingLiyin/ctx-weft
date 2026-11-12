@@ -26,6 +26,13 @@ _SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "ctx_weft"
 _ALLOWED_CORE_SUBPACKAGES = {
     "ctx_weft.core.utils",          # ids / content / event / estimate —— 纯函数
     "ctx_weft.core.capabilities.schema",  # 工具签名抽取，provider 声明工具时要用
+    # Memory organize owns the policy. These exact shared modules only decode
+    # record formats, render assets, or rebuild reversible image representations;
+    # they do not access loop state, Agent events, LLMs, or budgets.
+    "ctx_weft.core.assembler.legacy_task_memory",
+    "ctx_weft.core.assembler.prompts",
+    "ctx_weft.core.media.fold",
+    "ctx_weft.core.media.policy",
 }
 
 

@@ -80,6 +80,7 @@ class ExecutionRegistry:
     tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     latest: dict[tuple[str, str], str] = field(default_factory=dict)
     observe_runs: dict[str, str] = field(default_factory=dict)
+    observe_agents: dict[str, str] = field(default_factory=dict)
     recovering_observe_tasks: set[str] = field(default_factory=set)
     metadata_stops: dict[str, tuple[str, Callable[[], None]]] = field(default_factory=dict)
     metadata_commits: dict[str, list[Event]] = field(default_factory=dict)
@@ -104,10 +105,13 @@ class ExecutionRegistry:
             event.set()
 
     def register(self, run_id: str, task_id: str, step: str, task: asyncio.Task,
-                 *, stop_metadata: Callable[[], None] | None = None, observe_id: str = "") -> None:
+                 *, agent_id: str, stop_metadata: Callable[[], None] | None = None,
+                 observe_id: str = "") -> None:
         key = (task_id, step)
         self.tasks[run_id] = task
         self.latest[key] = run_id
+        if step == "observe":
+            self.observe_agents[run_id] = agent_id
         if observe_id:
             self.observe_runs[observe_id] = run_id
         if stop_metadata is not None:
@@ -115,6 +119,7 @@ class ExecutionRegistry:
 
         def complete(done):
             self.tasks.pop(run_id, None)
+            self.observe_agents.pop(run_id, None)
             self.metadata_stops.pop(run_id, None)
             if self.latest.get(key) == run_id:
                 self.latest.pop(key, None)
@@ -169,6 +174,19 @@ class ExecutionRegistry:
         run_id = self.pending_run_id(task_id, step)
         if run_id is not None:
             await asyncio.shield(self.tasks[run_id])
+
+    def pending_agent_observes(self, agent_id: str) -> tuple[asyncio.Task, ...]:
+        """Include older runs even after a task's latest observation has ended."""
+        return tuple(self.tasks[rid] for rid, owner in self.observe_agents.items()
+                     if owner == agent_id and rid in self.tasks and not self.tasks[rid].done())
+
+    async def wait_agent_observes(self, agent_id: str) -> bool:
+        """Drain this agent's observations without cancelling their producers."""
+        waited = False
+        while pending := self.pending_agent_observes(agent_id):
+            waited = True
+            await asyncio.gather(*(asyncio.shield(task) for task in pending))
+        return waited
 
     @asynccontextmanager
     async def task_guard(self, task_id: str, step: str):
@@ -628,6 +646,7 @@ class StepDriver:
             cancel_token = local_ctx.cancel_token
         task = asyncio.create_task(self._run_background(step, snapshot, local_ctx))
         self.executions.register(snapshot.run_id, state.task.id, name, task,
+            agent_id=state.agent.id,
             observe_id=(options or {}).get("observe_id", "") if name == "observe" else "",
             stop_metadata=(cancel_token.cancel
                            if name == "recognize_intent" and cancel_token is not None else None))

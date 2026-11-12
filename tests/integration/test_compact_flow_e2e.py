@@ -13,8 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.capabilities.control_tools import ControlCapabilityProvider
-from ctx_weft.core.loop.steps import compact as cm
-from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM
+from tests import compaction_testkit as cm
+from tests.compaction_testkit import COLLAPSE_DELIM
 from ctx_weft.core.models.session import Session
 from ctx_weft.core.models.task import Task
 from ctx_weft.core.orchestrator.lifecycle.agent_manager import AgentLifecycleManager
@@ -225,7 +225,7 @@ async def test_multiround_retry_accumulates_then_l3_collapses_e2e(monkeypatch):
     旧行为（段摘要替换 / L3 守卫只数 raw）下 L3 永不触发 → 无 COLLAPSE_DELIM → 本测试失败。"""
     async def _fake_summ(state, ctx, *, scope="task"):
         return "坍缩执行摘要"
-    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
+    cm.patch_summary(monkeypatch, _fake_summ)
 
     resolver = InlineAgentTemplateProvider()
     tpl = _act_only_template()
@@ -309,7 +309,7 @@ async def test_escalating_compact_shrinks_real_memory(monkeypatch):
     活跃记忆 token 下降；summarize_for_compact 打桩免真实 LLM。"""
     async def _fake_summ(state, ctx, *, scope="task"):
         return f"[summary-{scope}]"
-    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
+    cm.patch_summary(monkeypatch, _fake_summ)
 
     mem = InMemoryMemoryProvider()
     scope = MemoryAddress(session_id="s", task_id="root", agent_id="a")

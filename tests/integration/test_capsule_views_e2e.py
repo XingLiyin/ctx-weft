@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft import SessionStartParams
-from ctx_weft.core.loop.steps.compact import demote_kept_capsules
+from tests.compaction_testkit import demote_kept_capsules
 from ctx_weft.protocols import MemoryAddress, ProviderContext
 from ctx_weft.providers.llm.adapters.mock import MockResponse
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

@@ -96,22 +96,19 @@ async def test_staged_records_sort_after_everything_already_in_memory() -> None:
     # 只看**会被渲染**的那些：审计记录不进 prompt、不参与 composer 的归并排序。
     view = await load_records(mem, scope, MemoryScope.TASK, pctx,
                                kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.SUMMARY])
-    # 装配一次，触发叠加路径给暂存记录补序号
-    from types import SimpleNamespace
-
-    from ctx_weft.core.assembler.assembler import ContextRequest
+    # Recall selects lazy IDs; sequence assignment belongs to compilation.
+    from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextAssembler
+    from ctx_weft.core.assembler.builder import _history_facts
     from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
-    from ctx_weft.core.utils.estimate import estimate_tokens
+    from tests.assembler_testkit import prompt_request
 
-    deps = SimpleNamespace(memory=mem, provider_ctx=pctx)
-    request = SimpleNamespace(
-        scope=scope, token_counter=estimate_tokens, task=SimpleNamespace(id=q1.task_id),
-        extra={"staged_memory": staged})
-    blocks = [b async for b in AgentRecallSource().fetch(request, deps)]
-    # 按记录 id 精确挑出暂存那些块：暂存里还有一条 TOOL_AUDIT，它不进 prompt、不产块。
+    assembler = ContextAssembler([AgentRecallSource()], AssemblerDeps(mem, [], pctx))
+    inputs = await assembler.assemble(prompt_request(
+        task_id=q1.task_id, scope=scope, extra={"staged_memory": staged}))
+    await assembler.compile(inputs)
+    facts, _ = _history_facts(inputs)
     staged_ids = {e.id for e in staged}
-    staged_seq = [b.metadata["sequence"] for b in blocks
-                  if b.value.id in staged_ids]
+    staged_seq = [row["sequence"] for row in facts if row["record_id"] in staged_ids]
     assert staged_seq, "暂存的对话记录必须被叠加进历史"
     memory_seq = [r.metadata.get("seq_no", 0) for r in view if r.metadata]
     assert min(staged_seq) > max(memory_seq or [0]), (

@@ -75,7 +75,8 @@ def make_runtime(**kwargs) -> CtxWeftRuntime:
     provider = kwargs.pop("agent_provider")
     providers = kwargs.pop("providers", None) or ProviderRegistry()
     providers.register_capability(provider)
-    return CtxWeftRuntime(providers=providers, **kwargs)
+    from tests.runtime_helpers import track_review_intent
+    return track_review_intent(CtxWeftRuntime(providers=providers, **kwargs))
 
 
 def make_echo_template() -> AgentTemplate:

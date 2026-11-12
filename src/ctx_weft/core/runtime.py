@@ -3175,7 +3175,7 @@ class CtxWeftRuntime:
                 else:
                     launched = asyncio.create_task(self._resume_observe_finalization(state, loop_ctx, info))
                 loop_ctx.steps.executions.register(state.run_id, task.id, "observe", launched,
-                    observe_id=info.get("observe_id", ""))
+                    agent_id=agent_id, observe_id=info.get("observe_id", ""))
                 task_manager.track_background(launched)
             else:
                 launched = await loop_ctx.steps.start_durable(

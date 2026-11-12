@@ -86,7 +86,7 @@ async def test_stop_after_fifty_turns_at_observe_fold(tmp_path, monkeypatch, bac
         entered, release, interrupted = [asyncio.Event() for _ in range(3)]
         held = False
         stop_acks, canceled_views = [], []
-        original_fold = memory.fold
+        original_fold = memory._commit_organize
 
         async def stop(agent_id):
             ack = await (rt.pause_agent(agent_id) if action == "pause" else rt.cancel_agent(agent_id))
@@ -129,7 +129,7 @@ async def test_stop_after_fifty_turns_at_observe_fold(tmp_path, monkeypatch, bac
                 interrupted.set()
                 raise
 
-        monkeypatch.setattr(memory, "fold", fold)
+        monkeypatch.setattr(memory, "_commit_organize", fold)
         if phase == "after_return":
             original_retry = ObserveStep._fold_retry_segment
 

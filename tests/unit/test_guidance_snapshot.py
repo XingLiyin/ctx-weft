@@ -81,7 +81,7 @@ async def test_plan_renders_user_message_content_before_metadata_is_filled():
 
 @pytest.mark.asyncio
 async def test_prepare_collects_through_assembler_and_consumes_hint_after_reassembly(monkeypatch):
-    import ctx_weft.core.loop.steps.compact as compact
+    from tests import compaction_testkit as compact
     import ctx_weft.core.loop.steps.prepare as prepare
 
     task = Task(

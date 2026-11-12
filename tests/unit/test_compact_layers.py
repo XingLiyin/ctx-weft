@@ -13,7 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from ctx_weft.core.loop.driver import LoopContext, LoopState
-from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, CompactStep
+from ctx_weft.core.loop.steps.compact import CompactStep
+from tests.compaction_testkit import COLLAPSE_DELIM
 from ctx_weft.core.loop.steps.finalize import FinalizeStep
 from ctx_weft.core.models.task import Task
 from ctx_weft.protocols import MemoryAddress, MemoryEvent, MemoryEventType, ProviderContext
@@ -48,7 +49,7 @@ def _scope() -> MemoryAddress:
 
 
 def _pctx() -> ProviderContext:
-    return ProviderContext(session_id="s1", tenant_id="default")
+    return ProviderContext(session_id="s1", tenant_id="default", agent_id="ag1", task_id="T_target")
 
 
 def _ev(type_, content, t, role=None) -> MemoryEvent:

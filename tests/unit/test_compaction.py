@@ -12,12 +12,8 @@ import pytest
 
 from ctx_weft.core.assembler.assembler import AssembledPrompt
 from ctx_weft.core.loop.driver import LoopState
-from ctx_weft.core.loop.steps.compact import (
-    COLLAPSE_DELIM,
-    CompactStep,
-    _count_root_residues,
-    fold_root_experience,
-)
+from ctx_weft.core.loop.steps.compact import CompactStep
+from tests.compaction_testkit import COLLAPSE_DELIM, _count_root_residues, fold_root_experience
 from ctx_weft.core.loop.steps.prepare import PrepareStep
 from ctx_weft.core.models.agent import Agent
 from ctx_weft.core.models.session import Session
@@ -34,7 +30,7 @@ _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _ctx() -> ProviderContext:
-    return ProviderContext(session_id="s1", tenant_id="default")
+    return ProviderContext(session_id="s1", tenant_id="default", task_id="t1", agent_id="ag1")
 
 
 def _sc(task_id="t1", agent_id="ag1") -> MemoryAddress:
@@ -490,11 +486,7 @@ async def test_predispatch_gate_blocks_below_threshold() -> None:
 def test_original_section_splits_on_legacy_and_current_delims() -> None:
     """坍缩分隔标记改成英文后，存量库里带旧中文标记的 USER_PROMPT 仍须能切出「原始消息」节
     ——切不出就会把「原文 + 旧摘要」整体当原文，再坍缩时无界增长。"""
-    from ctx_weft.core.loop.steps.compact import (
-        COLLAPSE_DELIM,
-        LEGACY_COLLAPSE_DELIMS,
-        _original_section,
-    )
+    from tests.compaction_testkit import COLLAPSE_DELIM, LEGACY_COLLAPSE_DELIMS, _original_section
     for delim in (COLLAPSE_DELIM, *LEGACY_COLLAPSE_DELIMS):
         assert _original_section(f"原始消息{delim}执行摘要正文") == "原始消息", \
             f"未按分隔标记 {delim!r} 切出原文节"

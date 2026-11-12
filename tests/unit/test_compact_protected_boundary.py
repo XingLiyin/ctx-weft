@@ -1,30 +1,53 @@
-"""Compaction retains the earliest protected record or pending tool call."""
+"""Collapse boundaries follow durable tool facts, without external ID lists."""
 
 from types import SimpleNamespace
-
 import pytest
-
-from ctx_weft.core.loop.steps.compact import _split_for_collapse
 from ctx_weft.protocols import MemoryKind, MemoryScope
+from tests.compaction_testkit import _split_for_collapse
 
 
-@pytest.mark.parametrize(("record_ids", "call_ids", "expected_cut"), [
-    (set(), set(), 4),
-    ({"missing"}, {"missing"}, 4),
-    ({"r1"}, set(), 1),
-    (set(), {"c2"}, 2),
-    ({"r3"}, {"c1", "c2"}, 1),
-    ({"r5"}, {"c5"}, 4),
-])
-def test_protected_records_only_move_the_collapse_boundary_earlier(record_ids, call_ids, expected_cut):
-    records = [SimpleNamespace(
-        id=f"r{i}", kind=MemoryKind.CONVERSATION_TURN, scope=MemoryScope.TASK,
-        role="assistant", metadata={"tool_calls": [{"id": f"c{i}"}]},
-    ) for i in range(6)]
-
-    fold, keep = _split_for_collapse(
-        records, 2, protected_record_ids=record_ids, protected_call_ids=call_ids,
-    )
-
+@pytest.mark.parametrize(
+    ("pending_index", "expected_cut"),
+    [
+        (None, 4),
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (5, 4),
+    ],
+)
+def test_unfinished_call_moves_boundary_from_record_facts(pending_index, expected_cut):
+    records = [
+        SimpleNamespace(
+            id=f"r{i}",
+            kind=MemoryKind.CONVERSATION_TURN,
+            scope=MemoryScope.TASK,
+            role="assistant",
+            metadata={},
+        )
+        for i in range(6)
+    ]
+    if pending_index is not None:
+        records[pending_index].metadata = {"execution_call_ids": ["pending"]}
+    fold, kept = _split_for_collapse(records, 2)
     assert fold == records[:expected_cut]
-    assert keep == records[expected_cut:]
+    assert kept == records[expected_cut:]
+
+
+def test_completed_tool_round_stays_together_across_recent_window():
+    records = [
+        SimpleNamespace(
+            id=f"r{i}",
+            kind=MemoryKind.CONVERSATION_TURN,
+            scope=MemoryScope.TASK,
+            role="assistant",
+            metadata={},
+        )
+        for i in range(4)
+    ]
+    records[1].metadata = {"tool_calls": [{"id": "done"}]}
+    records[2].role = "tool"
+    records[2].metadata = {"tool_call_id": "done"}
+    fold, kept = _split_for_collapse(records, 2)
+    assert fold == records[:1]
+    assert kept == records[1:]

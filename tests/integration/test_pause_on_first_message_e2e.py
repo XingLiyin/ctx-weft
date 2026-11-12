@@ -142,14 +142,15 @@ async def test_pause_on_the_very_first_message_parks_and_stays_usable() -> None:
     assert rt._agent_lifecycle_manager.record_of(aid).status == "waiting_human"
     assert tm.get_task(root_task_id).status == "AWAITING_HUMAN"
 
-    # ④ 旁路**没有**起飞——它的起飞点在 act 的提交点，而这一轮压根没到提交点。
-    #
-    # 这是对的：`recognize_intent` 只该为**真的发生过**的那一轮花一次 LLM 调用。
-    # 代价是标题晚一轮，**不是永远没有**——见 ⑥：判据是「root task 且无 title」，
-    # 这一轮夭折之后 title 仍是空的，下一轮照样判定成立、照样在那一轮的提交点起飞。
-    assert llm.sidecar_calls == 0, "这一轮没到提交点，旁路不该已经烧掉一次 LLM 调用"
-    types = [e.type for e in await all_events(rt.event_store, sid)]
-    assert EventType.RECOGNIZE_INTENT_STARTED not in types
+    # Root has no provisional round. Metadata may start before the first actor
+    # chunk, but only for this already-committed task and at most once per run.
+    rows = await all_events(rt.event_store, sid)
+    starts = [e for e in rows if e.type == EventType.RECOGNIZE_INTENT_STARTED]
+    assert len(starts) <= 1
+    assert all(e.task_id == root_task_id for e in starts)
+    assert sum(e.type == EventType.TASK_STARTED and e.task_id == root_task_id for e in rows) == 1
+    task_started = next(i for i, e in enumerate(rows) if e.type == EventType.TASK_STARTED and e.task_id == root_task_id)
+    assert all(i > task_started for i, e in enumerate(rows) if e in starts)
 
     # ⑤ 回答那个气泡：会话继续
     llm.stalling = False

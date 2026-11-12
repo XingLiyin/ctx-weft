@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps.compact import COLLAPSE_DELIM, collapse_task_layer
+from tests.compaction_testkit import COLLAPSE_DELIM, collapse_task_layer
 from ctx_weft.providers.llm.tokenizer import HeuristicTokenizer
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider as InMemoryBlackboard
 from ctx_weft.protocols import (
@@ -89,7 +89,7 @@ async def test_recollapse_keeps_original_bounded():
 async def test_escalating_compact_l3_uses_collapse_keep_last(monkeypatch):
     """迁移自旧 _compact_scope 用例（双阈值并行折已废）：只有 task 层可折（无 agent 层派发对）
     → L1/L2 天然跳过（无 root residue / 无 kept origin），落到 L3 用 collapse_keep_last(2)。"""
-    from ctx_weft.core.loop.steps import compact as cm
+    from tests import compaction_testkit as cm
 
     calls = []
     kept_arg = {}
@@ -98,15 +98,14 @@ async def test_escalating_compact_l3_uses_collapse_keep_last(monkeypatch):
         calls.append(scope)
         return f"summary-{scope}"
 
-    async def _fake_collapse(state, ctx, keep_last, summary_text):
-        kept_arg["keep_last"] = keep_last
-        # escalating_compact 交来的是「取摘要的函数」（惰性：真 collapse 在确定要折之后才求值）。
-        # 替身照真实实现去求值，本用例钉的「L3 产出一次 task 摘要」才有意义。
-        await cm._resolve_digest(summary_text)
-        return 3
-
-    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)
-    monkeypatch.setattr(cm, "collapse_task_layer", _fake_collapse)
+    from ctx_weft.providers.memory import organize as memory_ops
+    original_recall = memory_ops.recall_for_organize
+    async def recall(memory, pctx, *, operation, keep_last=0):
+        if operation == "fold_current":
+            kept_arg["keep_last"] = keep_last
+        return await original_recall(memory, pctx, operation=operation, keep_last=keep_last)
+    cm.patch_summary(monkeypatch, _fake_summ)
+    monkeypatch.setattr(memory_ops, "recall_for_organize", recall)
 
     mem = InMemoryBlackboard()
     scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")
@@ -137,11 +136,11 @@ async def test_escalating_l3_fires_on_segment_only_accumulation(monkeypatch):
     """回归 Fix 2：retry 累积后 task 层只有 USER_PROMPT + 段摘要（无 raw）。L3 守卫须用
     _TASK_LAYER_TYPES 计数（含 TASK_COMPACT_SUMMARY）才会触发；旧守卫用 TASK_COMPACT_TYPES
     只数到 1 条 USER_PROMPT → L3 永不触发 → 累积段摘要坍缩不了。"""
-    from ctx_weft.core.loop.steps import compact as cm
+    from tests import compaction_testkit as cm
 
     async def _fake_summ(state, ctx, *, scope="task"):
         return "坍缩摘要"
-    monkeypatch.setattr(cm, "summarize_for_compact", _fake_summ)  # 免真实 LLM；collapse 用真的
+    cm.patch_summary(monkeypatch, _fake_summ)  # 免真实 LLM；collapse 用真的
 
     mem = InMemoryBlackboard()
     scope = MemoryAddress(session_id="s", task_id="t1", agent_id="a")

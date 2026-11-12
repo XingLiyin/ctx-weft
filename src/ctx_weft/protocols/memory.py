@@ -299,7 +299,7 @@ class Subscription:
     priority: int = 5
 
 
-# v2 P4b-2：CompactResult 随 apply_compact 消亡（框架侧对应物 SegmentFoldResult）。
+# Organize reports memory changes; agent-specific budget results stay in the loop.
 
 
 @dataclass
@@ -314,6 +314,31 @@ class MemoryProviderInfo:
 
 
 # ── Protocol ──────────────────────────────────────────────────────────────────
+
+
+OrganizeOperation = Literal[
+    "demote_images", "reduce_history", "fold_history", "fold_current", "fold_segment"
+]
+
+
+@dataclass(frozen=True)
+class MemoryOrganizeResult:
+    """A memory change, with no agent budget or execution dependencies."""
+
+    status: Literal["changed", "exhausted", "deferred"] = "exhausted"
+    superseded_ids: tuple[str, ...] = ()
+    replacements: tuple[MemoryRecord, ...] = ()
+    records_before: int = 0
+    records_after: int = 0
+    demoted_images: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.superseded_ids or self.replacements)
+
+
+class MemoryOrganizeDeferred(RuntimeError):
+    """The requested source cannot currently be selected safely."""
 
 
 @runtime_checkable
@@ -370,6 +395,32 @@ class MemoryProvider(Protocol):
         内容、不重复写入、不推进任何计数器。None → provider 自行生成。
         """
         ...
+
+    async def recall_for_organize(
+        self, ctx: ProviderContext, *,
+        operation: Literal["fold_history", "fold_current"], keep_last: int = 0,
+    ) -> list[MemoryRecord]:
+        """Read the exact immutable summary material; never generate a summary.
+
+        keep_last preserves recent completed units for history and recent visible
+        records for current memory. Complete structures may retain more records.
+        Empty means exhausted; temporary protection raises MemoryOrganizeDeferred.
+        """
+        raise NotImplementedError("memory provider must support organize recall")
+
+    async def organize(
+        self, ctx: ProviderContext, *, operation: OrganizeOperation,
+        record_ids: list[str] | tuple[str, ...] | None = None,
+        summary: str | None = None, keep_recent_images: int = 2,
+    ) -> MemoryOrganizeResult:
+        """Perform one memory transformation within the supplied record boundary.
+
+        Fold operations require fixed input IDs and a nonempty supplied summary.
+        reduce_history reuses existing content; demote_images preserves reversible
+        references and the requested number of recent images. Neither calls an LLM.
+        No operation advances to another operation or decides an agent's budget.
+        """
+        raise NotImplementedError("memory provider must support organize")
 
     @abstractmethod
     async def fold(

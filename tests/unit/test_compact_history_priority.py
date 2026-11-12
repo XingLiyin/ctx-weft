@@ -9,7 +9,7 @@ import pytest
 
 from ctx_weft.core.assembler.builder import compile_history
 from ctx_weft.core.loop.driver import StepDriver
-from ctx_weft.core.loop.steps import compact as cm
+from tests import compaction_testkit as cm
 from ctx_weft.core.loop.steps.act import ActStep
 from ctx_weft.core.loop.steps.compact import CompactStep
 from ctx_weft.core.loop.steps.finalize import _ensure_dispatch_frame
@@ -153,8 +153,8 @@ async def test_l2_selection_excludes_rich_history_and_current_task(monkeypatch):
     assert await cm.demote_kept_capsules(state, ctx, {"lean"}) > 0
     selected = []
 
-    async def summarize():
-        rows = await ctx.memory.read_records(list(cm._history_summary_ids.get()), ctx.provider_ctx)
+    async def summarize(plan):
+        rows = await ctx.memory.read_records(list(plan.summary_ids), ctx.provider_ctx)
         selected.extend(rows)
         return "lean history digest"
 
@@ -178,10 +178,10 @@ async def test_completed_branches_of_live_task_tree_are_compacted_first(monkeypa
         await capsule(state, ctx, state.scope.task_id, 9, parent=parent)
     scopes = []
 
-    async def summarize(current, local_ctx, *, scope="task"):
+    async def summarize(current, local_ctx, *, scope="task", record_ids=()):
         scopes.append(scope)
         if scope == "agent":
-            rows = await ctx.memory.read_records(list(cm._history_summary_ids.get()), ctx.provider_ctx)
+            rows = await ctx.memory.read_records(list(record_ids), ctx.provider_ctx)
             assert all(r.scope == MemoryScope.AGENT for r in rows)
             assert not any(cm.capsule_origin(r) == parent for r in rows)
             assert all(r.kind == MemoryKind.SUMMARY or
@@ -191,7 +191,7 @@ async def test_completed_branches_of_live_task_tree_are_compacted_first(monkeypa
             assert not any(r.id.startswith("old") for r in body)
         return "digest"
 
-    monkeypatch.setattr(cm, "summarize_for_compact", summarize)
+    cm.patch_summary(monkeypatch, summarize)
     events = await cm.escalating_compact(state, ctx, token_estimate=90_000)
     assert scopes == ["agent", "agent", "task"]
     assert [e.payload["source"] for e in events if e.type == EventType.MEMORY_COMPACTED] == [
@@ -216,10 +216,10 @@ async def test_condensed_history_is_summarized_before_current_task(monkeypatch, 
                 timestamp=BASE + timedelta(seconds=index)), ctx.provider_ctx)
     scopes = []
 
-    async def summarize(current, local_ctx, *, scope="task"):
+    async def summarize(current, local_ctx, *, scope="task", record_ids=()):
         scopes.append(scope)
         if scope == "agent":
-            rows = await ctx.memory.read_records(list(cm._history_summary_ids.get()), ctx.provider_ctx)
+            rows = await ctx.memory.read_records(list(record_ids), ctx.provider_ctx)
             assert len(rows) == old_count
             assert all(r.scope == MemoryScope.AGENT for r in rows)
         else:
@@ -227,7 +227,7 @@ async def test_condensed_history_is_summarized_before_current_task(monkeypatch, 
             assert [r.content for r in turns] == ["combined history digest"]
         return "combined history digest" if scope == "agent" else "current digest"
 
-    monkeypatch.setattr(cm, "summarize_for_compact", summarize)
+    cm.patch_summary(monkeypatch, summarize)
     events = await cm.escalating_compact(state, ctx, token_estimate=90_000)
     assert scopes == ["agent", "task"]
     assert [e.payload["source"] for e in events if e.type == EventType.MEMORY_COMPACTED] == [
@@ -244,7 +244,7 @@ async def test_l2_stops_before_current_task_when_history_digest_meets_target(mon
         scopes.append(scope)
         return "digest"
 
-    monkeypatch.setattr(cm, "summarize_for_compact", summarize)
+    cm.patch_summary(monkeypatch, summarize)
     events = await cm.escalating_compact(state, ctx, token_estimate=58_001)
     assert scopes == ["agent"]
     assert [e.payload["source"] for e in events if e.type == EventType.MEMORY_COMPACTED] == ["root_experience"]
@@ -267,11 +267,11 @@ async def test_late_lean_replacement_during_l2_blocks_current_compaction(monkeyp
                 "LATE RECAP", "LATE RESULT", "success", "old", operation_id="late-l2")
         return "snapshot digest"
 
-    monkeypatch.setattr(cm, "summarize_for_compact", summarize)
+    cm.patch_summary(monkeypatch, summarize)
     await asyncio.wait_for(cm.escalating_compact(state, ctx, token_estimate=90_000), timeout=2)
     assert scopes == ["agent"]
     assert not await cm._old_history_remaining(state, ctx)
-    assert state.extra[cm._DEFERRED_HISTORY_KEY]
+    assert "_compact_deferred_history" not in state.extra
     turns = await load_records(ctx.memory, cm._agent_half(state.scope), MemoryScope.AGENT, ctx.provider_ctx)
     assert any("LATE RESULT" in str(r.content) for r in turns)
     current = await load_records(ctx.memory, state.scope, MemoryScope.TASK, ctx.provider_ctx)
@@ -372,11 +372,13 @@ async def test_missing_summary_is_regenerated_before_current_task(monkeypatch):
                 ctx.memory, cm._agent_half(state.scope), MemoryScope.TASK, ctx.provider_ctx))
         return "fresh digest"
 
-    monkeypatch.setattr(cm, "summarize_for_compact", summarize)
+    cm.patch_summary(monkeypatch, summarize)
     events = await cm.escalating_compact(state, ctx, token_estimate=90_000)
-    assert scopes == ["agent", "agent", "task"]
+    # L1 now only reuses existing summaries. Missing reports are summarized in
+    # L2 once, before any current-task summary, rather than repaired by an L1 LLM.
+    assert scopes == ["agent", "task"]
     assert [e.payload["source"] for e in events if e.type == EventType.MEMORY_COMPACTED] == [
-        "demote_lean", "root_experience", "collapse"]
+        "root_experience", "collapse"]
 
 
 async def test_late_observer_replacement_keeps_one_digest_and_folds_only_selected_ids(monkeypatch):
@@ -385,8 +387,8 @@ async def test_late_observer_replacement_keeps_one_digest_and_folds_only_selecte
     await capsule(state, ctx, "newer", 1)
     calls = []
 
-    async def summarize():
-        selected = cm._history_summary_ids.get()
+    async def summarize(plan):
+        selected = plan.summary_ids
         rows = await ctx.memory.read_records(list(selected), ctx.provider_ctx)
         calls.append(rows)
         async def observer_write():
@@ -432,7 +434,7 @@ async def test_new_history_during_digest_is_retained_and_blocks_current_compacti
             ctx.provider_ctx)
         return "snapshot digest"
 
-    monkeypatch.setattr(cm, "summarize_for_compact", summarize)
+    cm.patch_summary(monkeypatch, summarize)
     await cm.escalating_compact(state, ctx, token_estimate=90_000)
     assert len(calls) == 1
     current = await load_records(ctx.memory, state.scope, MemoryScope.TASK, ctx.provider_ctx)
@@ -443,8 +445,10 @@ async def test_new_history_during_digest_is_retained_and_blocks_current_compacti
     assert [r.content for r in old] == ["new evidence"]
     turns = await load_records(ctx.memory, cm._agent_half(state.scope),
                                MemoryScope.AGENT, ctx.provider_ctx)
-    summary = next(r for r in turns if cm.capsule_origin(r) == "old")
-    assert summary.metadata["finish_policy"]["capsule_state"] == "lean"
+    summary = next(r for r in turns if "old" in r.metadata.get("residual_task_ids", []))
+    # Missing-summary work now belongs to fold_history (L2), which emits a
+    # rolling summary while preserving ownership of late residual evidence.
+    assert summary.kind == MemoryKind.SUMMARY
     assert "snapshot digest" in summary.content
     assert await cm._old_history_remaining(state, ctx)
     assert "old" in await cm._kept_origin_ids(state, ctx, old_count + 1)
@@ -454,6 +458,6 @@ async def test_new_history_during_digest_is_retained_and_blocks_current_compacti
         return "later evidence digest"
 
     # A subsequent snapshot can consume the residual without needing its old closure.
-    monkeypatch.setattr(cm, "summarize_for_compact", summarize_later)
+    cm.patch_summary(monkeypatch, summarize_later)
     assert await cm.fold_root_experience(state, ctx, 0, lambda: summarize_later(state, ctx, scope="agent")) > 0
     assert not await cm._old_history_remaining(state, ctx)

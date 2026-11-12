@@ -314,3 +314,48 @@ async def test_open_is_replyable_only_after_confirmation_and_before_notification
     assert not svc.registry.list_pending("s1") and not answered
     await svc.confirm_opens("s1")
     assert len(answered) == 1 and attempts[0] == attempts[1]
+
+
+@pytest.mark.parametrize("receipt_lost", [False, True])
+@pytest.mark.parametrize("recover", [False, True])
+async def test_immediate_resolution_retries_retained_callback(receipt_lost, recover):
+    from copy import deepcopy
+    from ctx_weft.core.events.commit_gate import CommitGate
+    from ctx_weft.protocols.events import PersistenceUnavailableError
+    from ctx_weft.providers.events import InMemoryEventStore
+    from ctx_weft.providers.events.bus.in_process.bus import InProcessEventBus
+
+    store = InMemoryEventStore()
+    append = store.append_batch
+    attempts = []
+    async def fault(sid, bid, events):
+        if any(e.type == EventType.HITL_RESOLVED for e in events):
+            attempts.append((bid, deepcopy(events)))
+            if len(attempts) <= 2:
+                if receipt_lost:
+                    await append(sid, bid, events)
+                raise OSError("resolution receipt unavailable")
+        return await append(sid, bid, events)
+    store.append_batch = fault
+    bus = InProcessEventBus()
+    bus.attach_commit_gate(CommitGate(store))
+    svc = _service(bus)
+    req = await svc.open(_ask(), session_id="s1", task_id="t1",
+                         stage=STAGE_AUTHZ, unattended=False)
+    slot = FakeSlot()
+    svc.registry.attach_slot(req.id, slot)
+    for message in ("original", "must not replace the original"):
+        with pytest.raises(PersistenceUnavailableError):
+            await svc.resolve(HitlReply(hitl_id=req.id, agent_id="", outcome="accepted", message=message))
+        assert not req.resolved and slot.delivered is None
+    if recover:
+        await bus.confirm_pending_storage("s1")
+        await svc.confirm_resolutions("s1")
+    else:
+        await svc.resolve(HitlReply(hitl_id=req.id, agent_id="", outcome="rejected", message="different"))
+    assert req.resolved and slot.delivered.message == "original"
+    assert slot.delivered.outcome == "accepted"
+    assert all(attempt == attempts[0] for attempt in attempts)
+    rows = await store.read_range("s1")
+    assert sum(r.event.type == EventType.HITL_RESOLVED for r in rows) == 1
+    assert not svc._pending_resolutions and not bus.has_pending_storage("s1")

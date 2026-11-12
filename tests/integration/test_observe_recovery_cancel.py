@@ -39,7 +39,7 @@ async def test_cancel_saved_foreground_decision_via_public_recovery(tmp_path, mo
             rt = _runtime(llm, memory, store)
             await initialize_all(rt)
             entered, release, interrupted = [asyncio.Event() for _ in range(3)]
-            original_fold = memory.fold
+            original_fold = memory._commit_organize
             recovery_runs = set()
             acks = []
 
@@ -65,7 +65,7 @@ async def test_cancel_saved_foreground_decision_via_public_recovery(tmp_path, mo
                     if phase == "before_disposition":
                         acks.append(await rt.cancel_agent(agent_id))
 
-            monkeypatch.setattr(memory, "fold", fold)
+            monkeypatch.setattr(memory, "_commit_organize", fold)
             rt.event_bus.subscribe(None, at_run_boundary)
             tm = None
             try:

@@ -799,3 +799,56 @@ def history_records(records, *, locale="en"):
     return [replace(sources[ref]["record"], content=message.content, role=message.role,
                     timestamp=sources[ref]["timestamp"])
             for ref, message in zip(result.metadata["history_refs"], result.messages, strict=True)]
+
+
+def history_token_costs(records, *, token_counter, task_id="", known=None):
+    """Return rendered history cost and reusable per-tree costs, without I/O.
+
+    The memo is explicit input/output owned by the caller. Its keys contain only
+    immutable record IDs; obsolete groups are dropped on every call.
+    """
+    from ctx_weft.core.assembler.sources._history import history_facts
+    from ctx_weft.core.assembler.legacy_task_memory import capsule_origin
+    from ctx_weft.protocols import MemoryScope
+    known = known or {}
+    rows, facts = history_facts(records, task_id=task_id)
+    parents, keys, calls = {}, {}, {}
+
+    def find(key):
+        parents.setdefault(key, key)
+        root = key
+        while parents[root] != root:
+            root = parents[root]
+        while parents[key] != key:
+            following = parents[key]
+            parents[key] = root
+            key = following
+        return root
+
+    def join(left, right):
+        parents[find(left)] = find(right)
+
+    for row in records:
+        origin = row.address.task_id if row.scope == MemoryScope.TASK else capsule_origin(row)
+        key = ("task", origin) if origin else ("record", row.id)
+        keys[row.id] = key
+        find(key)
+    for task in facts["task_history"].values():
+        join(("task", task["id"]), ("task", task["tree_key"][-1]))
+    for row in rows:
+        key = keys[row["record_id"]]
+        ids = [c.get("id") for c in row["message"].tool_calls]
+        ids += [row["message"].tool_call_id, row["marker"].get("group_id")]
+        for call_id in filter(None, ids):
+            if call_id in calls:
+                join(key, calls[call_id])
+            calls[call_id] = key
+    groups = defaultdict(list)
+    for row in records:
+        groups[find(keys[row.id])].append(row)
+    costs = {}
+    for group in groups.values():
+        key = tuple(r.id for r in group)
+        costs[key] = known[key] if key in known else compile_history(
+            group, token_counter=token_counter, task_id=task_id).token_count - token_counter("")
+    return sum(costs.values()) + token_counter(""), costs

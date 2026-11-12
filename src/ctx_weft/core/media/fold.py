@@ -71,7 +71,7 @@ def _media_type(part: Any) -> str:
     return str(getattr(part, "media_type", "") or "")
 
 
-def _rebuild(rec: Any, indices: Sequence[int], scope: MemoryScope) -> MemoryEvent | None:
+def rebuild_demoted_record(rec: Any, indices: Sequence[int], scope: MemoryScope) -> MemoryEvent | None:
     """按 record 造补偿事件；``indices`` 指定的 part 换成占位。不可重建时返回 ``None``。
 
     字段逐一照抄（timestamp 保住位置、role/topic/metadata 保住语义），只有 ``id`` 留空
@@ -136,7 +136,7 @@ async def _execute(memory: Any, records: Sequence[Any], plan: DemotionPlan,
     for batch in plan.batches:
         events: list[MemoryEvent] = []
         for rid in batch:
-            ev = _rebuild(by_id[rid], plan.demote_indices.get(rid, ()), scope)
+            ev = rebuild_demoted_record(by_id[rid], plan.demote_indices.get(rid, ()), scope)
             if ev is None:
                 events = []
                 break

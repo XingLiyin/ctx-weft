@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps.compact import _count_root_residues, fold_root_experience
+from tests.compaction_testkit import _count_root_residues, fold_root_experience
 from ctx_weft.protocols import MemoryEvent, MemoryEventType, MemoryAddress, ProviderContext
 from ctx_weft.protocols.template import LoopConfig
 from ctx_weft.providers.memory.in_memory import InMemoryMemoryProvider

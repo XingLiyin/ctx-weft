@@ -24,15 +24,26 @@ async def memory_result(store, memory):
                                  kinds=[MemoryKind.CONVERSATION_TURN, MemoryKind.TOOL_AUDIT])
     finish = await load_records(memory, MemoryAddress(session_id="crash-session", agent_id=root), MemoryScope.AGENT, ctx, kinds=[MemoryKind.CONVERSATION_TURN])
     finish = [r for r in finish if r.metadata.get("origin_task_id") == task.id]
-    calls = [call["id"] for r in finish for call in r.metadata.get("tool_calls", [])]
-    tools = [r.metadata["tool_call_id"] for r in finish if r.role == "tool"]
-    assert len(calls) == 1 and tools == calls
+    from ctx_weft.core.loop.task_memory_fold import task_record_group, task_record_kind
+    assert sum(task_record_kind(r) == "recap" for r in finish) == 1
+    assert sum(task_record_kind(r) == "finish" for r in finish) == 1
+    assert len({task_record_group(r) for r in finish}) == 1
     assert all(r.metadata.get("finish_policy") for r in finish)
-    assert any("reviewed" in str(r.content) for r in finish if r.role == "tool")
+    assert any("reviewed" in str(r.content) for r in finish if task_record_kind(r) == "finish")
     assert not any("no process recap" in str(r.content) for r in finish)
+    sources = {r.metadata["finish_policy"]["final_reply_record_id"] for r in finish
+               if r.metadata["finish_policy"].get("final_reply_record_id")}
+    source_records = await memory.read_records(list(sources), ctx)
+    assert {r.id for r in source_records} == sources
+    for record in source_records:
+        assert record.role == "assistant" and record.address.task_id == task.id
+        assert str(record.content) == task.outputs
+    def policy(record):
+        return {k: ("<final_reply>" if k == "final_reply_record_id" else v)
+                for k, v in record.metadata.get("finish_policy", {}).items() if k != "observe_id"}
     def canonical(records):
         return [(r.kind, r.role, str(r.content).replace(task.id, "<task>"),
-                 r.metadata.get("final_reply", False), {k: v for k, v in r.metadata.get("finish_policy", {}).items() if k != "observe_id"}) for r in records]
+                 r.metadata.get("final_reply", False), policy(r)) for r in records]
     return {"raw": canonical(raw), "finish": canonical(finish), "outputs": task.outputs}
 
 

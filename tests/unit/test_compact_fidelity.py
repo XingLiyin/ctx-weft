@@ -15,18 +15,15 @@ from tests.model_testkit import model_snapshot
 
 from types import SimpleNamespace
 
+from ctx_weft.core.loop.steps import compact as summary_mod
+
 import pytest
 
 from ctx_weft.core.assembler.assembler import AssemblerDeps, ContextAssembler
 from ctx_weft.core.assembler.sources.agent_recall import AgentRecallSource
 from ctx_weft.core.assembler.sources.task_spec import TaskSpecSource
-from ctx_weft.core.loop.steps import compact as cm
-from ctx_weft.core.loop.steps.compact import (
-    DIGEST_SECTIONS,
-    REQUIRED_DIGEST_SECTIONS,
-    parse_structured_digest,
-    summarize_for_compact,
-)
+from tests import compaction_testkit as cm
+from tests.compaction_testkit import DIGEST_SECTIONS, REQUIRED_DIGEST_SECTIONS, parse_structured_digest, summarize_for_compact
 from ctx_weft.core.models.agent import Agent, LoopGuard
 from ctx_weft.core.utils.ids import generate_id
 from ctx_weft.protocols import (
@@ -167,7 +164,7 @@ async def test_request_layer_task_cue_carries_contract(monkeypatch):
     async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
-    monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
+    monkeypatch.setattr(summary_mod, "stream_llm_resilient", _stream)
     state, ctx, mem, scope = _state_ctx(llm)
     await summarize_for_compact(state, ctx, scope="task")
     _assert_cue_contract(_cue_of(llm))
@@ -180,7 +177,7 @@ async def test_request_layer_agent_cue_carries_contract(monkeypatch):
     async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
-    monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
+    monkeypatch.setattr(summary_mod, "stream_llm_resilient", _stream)
     state, ctx, mem, scope = _state_ctx(llm)
     await summarize_for_compact(state, ctx, scope="agent")
     _assert_cue_contract(_cue_of(llm))
@@ -232,7 +229,7 @@ async def test_pipeline_materials_reach_compact_request(monkeypatch):
     async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
-    monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
+    monkeypatch.setattr(summary_mod, "stream_llm_resilient", _stream)
     state, ctx, mem, scope = _state_ctx(llm)
     await _ingest_task_material(mem, scope, ctx.provider_ctx,
                                 converged_tool_line=_CONVERGED_LINE)
@@ -252,7 +249,7 @@ async def test_pipeline_digest_lands_verbatim_with_markers(monkeypatch):
     async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
-    monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
+    monkeypatch.setattr(summary_mod, "stream_llm_resilient", _stream)
     state, ctx, mem, scope = _state_ctx(llm)
     await _ingest_task_material(mem, scope, ctx.provider_ctx)
     digest = await summarize_for_compact(state, ctx, scope="task")
@@ -276,7 +273,7 @@ async def test_pipeline_degraded_prose_still_completes(monkeypatch):
     async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
-    monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
+    monkeypatch.setattr(summary_mod, "stream_llm_resilient", _stream)
     state, ctx, mem, scope = _state_ctx(llm)
     await _ingest_task_material(mem, scope, ctx.provider_ctx)
     digest = await summarize_for_compact(state, ctx, scope="task")
@@ -299,7 +296,7 @@ async def test_evidence_reference_readback_roundtrip(monkeypatch):
     async def _stream(ctx, state, request, **kwargs):
         async for c in llm.complete(request):
             yield c
-    monkeypatch.setattr(cm, "stream_llm_resilient", _stream)
+    monkeypatch.setattr(summary_mod, "stream_llm_resilient", _stream)
     state, ctx, mem, scope = _state_ctx(llm)
     await _ingest_task_material(mem, scope, ctx.provider_ctx,
                                 converged_tool_line=_CONVERGED_LINE)

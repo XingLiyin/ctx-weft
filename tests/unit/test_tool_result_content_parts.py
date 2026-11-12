@@ -349,7 +349,7 @@ async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_stat
     AttributeError，而该异常被 `_run_recap` 整段吞掉（只 log），于是
     **段摘要静默丢失、段保 raw**。所以断言必须钉在「segment_fold 真的被调用且拿到文本」，
     而不是「没抛异常」——后者在吞异常的函数里恒成立。"""
-    import ctx_weft.core.loop.task_memory_fold as sf
+    from ctx_weft.providers.memory import organize as sf
 
     state, ctx = fake_state_ctx
     res, _, _ = await _run(_Prov("  recap text  ", [_img()],
@@ -368,11 +368,12 @@ async def test_reader_background_observe_recap_does_not_crash_on_parts(fake_stat
 
     folded: list = []
 
-    async def _spy_fold(memory, scope, mscope, summary, pctx, *a, **k):
-        folded.append(summary)
+    async def _spy_fold(memory, pctx, *, operation, summary=None, **kwargs):
+        if operation == "fold_segment":
+            folded.append(summary)
 
     monkeypatch.setattr("ctx_weft.core.loop.steps.observe.ObserveStep._run_react", _fake_react)
-    monkeypatch.setattr(sf, "segment_fold", _spy_fold)
+    monkeypatch.setattr(sf, "organize", _spy_fold)
 
     await StepDriver.for_context(ctx).start("observe", state, ctx, options={"boundary": "interrupt"})
 

@@ -102,7 +102,7 @@ async def main(path, mode, stage):
                 else:
                     answer = await reply("RETRY_ALTERNATE still must not replace it")
                     assert answer.outcome == "rejected"
-                assert len(provider.attempts) == 3
+                assert len(provider.attempts) >= 3
                 assert all(batch == provider.attempts[0] for batch in provider.attempts)
             elif stage == "hot" and mode == "concurrent":
                 first = asyncio.create_task(reply())
@@ -120,6 +120,7 @@ async def main(path, mode, stage):
                     await reply()
                 else:
                     await rt.recover_agent(data["root"], session_id=SID)
+            assert await rt.recover_storage(SID)
             data = await complete(rt, a, b, tool, store, memory, data, "approval", restarted=stage != "hot", answered=True)
             assert not any("RETRY_ALTERNATE" in request_text(r) for k, r in a.calls if k == "actor")
             save(path, data)

@@ -20,15 +20,20 @@ async def test_older_observe_stays_live_after_latest_report_finishes():
     release = asyncio.Event()
     older = asyncio.create_task(release.wait())
     latest = asyncio.create_task(asyncio.sleep(0))
-    registry.register("old-run", "task", "observe", older, observe_id="old-observe")
-    registry.register("latest-run", "task", "observe", latest, observe_id="latest-observe")
+    registry.register("old-run", "task", "observe", older, agent_id="agent", observe_id="old-observe")
+    registry.register("latest-run", "task", "observe", latest, agent_id="agent", observe_id="latest-observe")
     await latest
     assert registry.pending_run_id("task") is None
     assert registry.observe_is_live("old-observe")
     assert not registry.observe_is_live("latest-observe")
+    waiter = asyncio.create_task(registry.wait_agent_observes("agent"))
+    await asyncio.sleep(0)
+    assert not waiter.done()
     release.set()
     await older
+    assert await waiter
     assert not registry.observe_is_live("old-observe")
+    assert not registry.observe_agents
 
 
 async def test_durable_observe_intent_precedes_enqueue_and_survives_commit_failure(fake_state_ctx):
@@ -259,7 +264,7 @@ async def test_registry_waiter_cancellation_does_not_cancel_work():
     registry = ExecutionRegistry()
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
-    registry.register("run", "task", "observe", task)
+    registry.register("run", "task", "observe", task, agent_id="agent")
     waiter = asyncio.create_task(registry.wait("task"))
     await asyncio.sleep(0)
     waiter.cancel()
@@ -389,7 +394,7 @@ async def test_guard_survives_cancelled_waiter_and_cleans_up():
 async def test_registries_isolate_sessions_even_with_equal_task_ids():
     first, second = ExecutionRegistry(), ExecutionRegistry()
     task = asyncio.create_task(asyncio.sleep(0))
-    first.register("run", "task", "observe", task)
+    first.register("run", "task", "observe", task, agent_id="agent")
     assert second.pending_run_id("task") is None
     async with first.task_guard("task", "observe"):
         async with second.task_guard("task", "observe"):

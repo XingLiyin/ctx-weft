@@ -66,7 +66,7 @@ async def test_accepted_session_cancel_survives_later_finalized_write_and_recove
         await initialize_all(rt)
         meta_finished, release_meta, meta_notified = [asyncio.Event() for _ in range(3)]
         fold_entered, release_fold, finalized, release_finalized = [asyncio.Event() for _ in range(4)]
-        append, original_fold = rt.event_store.append_batch, memory.fold
+        append, original_fold = rt.event_store.append_batch, memory._commit_organize
 
         async def held_append(sid, bid, events, *args, **kwargs):
             if any(e.type == EventType.RUN_FINISHED and e.origin == "loop.recognize_intent" for e in events):
@@ -92,7 +92,7 @@ async def test_accepted_session_cancel_survives_later_finalized_write_and_recove
                 meta_notified.set()
 
         monkeypatch.setattr(rt.event_store, "append_batch", held_append)
-        monkeypatch.setattr(memory, "fold", held_fold)
+        monkeypatch.setattr(memory, "_commit_organize", held_fold)
         subscription = rt.event_bus.subscribe(None, notice, required=True, provisional=True)
         handle = await rt.start_session(SessionStartParams.create(template_id="agent:tpl_echo",
             user_prompt="Complete the work across as many turns as needed"))

@@ -263,7 +263,7 @@ async def test_old_observer_cannot_fold_a_reply_missing_from_its_pinned_input(mo
 
 @pytest.mark.asyncio
 async def test_compact_repairs_before_its_first_memory_read_and_stops_on_failure(monkeypatch):
-    from ctx_weft.core.loop.steps.compact import escalating_compact
+    from tests.compaction_testkit import escalating_compact
 
     runtime, memory = setup()
     state, ctx, _, event = await fail_write(runtime, memory, monkeypatch)
@@ -295,7 +295,7 @@ async def test_compact_repairs_before_its_first_memory_read_and_stops_on_failure
 
 @pytest.mark.asyncio
 async def test_actual_compact_summary_includes_repaired_reply(monkeypatch):
-    from ctx_weft.core.loop.steps import compact
+    from tests import compaction_testkit as compact
     from ctx_weft.protocols import load_records
 
     runtime, memory = setup()
@@ -312,7 +312,7 @@ async def test_actual_compact_summary_includes_repaired_reply(monkeypatch):
         seen.append(True)
         return "summary including answer"
 
-    monkeypatch.setattr(compact, "summarize_for_compact", summary)
+    compact.patch_summary(monkeypatch, summary)
     await compact.escalating_compact(state, ctx, token_estimate=1000, force=True)
     assert seen
     active = await memory.load_view_ids(state.scope, MemoryScope.TASK, ctx.provider_ctx)

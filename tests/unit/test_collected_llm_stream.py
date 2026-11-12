@@ -12,7 +12,7 @@ import pytest
 
 from ctx_weft.core.loop.llm_stream import CollectedLLMStream
 from ctx_weft.core.loop.steps.act import _run_llm_turn
-from ctx_weft.core.loop.steps.compact import summarize_for_compact
+from tests.compaction_testkit import summarize_for_compact
 from ctx_weft.core.loop.steps.observe import ObserveStep
 from ctx_weft.core.loop.steps.recognize_intent import RecognizeIntentStep
 from ctx_weft.protocols import EventType, LLMChunk, LLMMessage, LLMRequest

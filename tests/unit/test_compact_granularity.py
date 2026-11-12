@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ctx_weft.core.loop.steps import compact as cm
+from tests import compaction_testkit as cm
 from ctx_weft.protocols import (
     MemoryAddress, MemoryEvent, MemoryKind, MemoryScope, ProviderContext,
     load_records,
@@ -177,35 +177,26 @@ async def test_l3_single_round_is_left_alone_without_spending_a_summary():
 
 
 async def test_escalating_passes_l3_summary_lazily(monkeypatch):
-    """`escalating_compact` 交给 L3 的是**取摘要的函数**，不是先算好的文本（同 L1 的做法）。
-
-    先算好有两个代价：按回合切后 L3 可能 no-op，摘要白算；以及折区图片降级发生在
-    `collapse_task_layer` 内部，先算摘要会让摘要输入里仍是真图（L1 为此专门改过顺序）。
-    """
-    summarized: list[str] = []
-    captured: list = []
-    monkeypatch.setattr(cm, "summarize_for_compact",
-                        lambda s, c, *, scope="task": (summarized.append(scope) or _const("d")))
-    monkeypatch.setattr(cm, "_count_root_residues", lambda s, c: _const(0))
-    monkeypatch.setattr(cm, "_kept_origin_ids", lambda s, c, k: _const([]))
-    monkeypatch.setattr(cm, "_active_memory_tokens", lambda s, c: _const(900))
-
-    async def _fake_collapse(state, ctx, keep, summary):
-        captured.append(summary)
-        return 0
-    monkeypatch.setattr(cm, "collapse_task_layer", _fake_collapse)
-
+    """No current-task plan means no summary call, even in forced compaction."""
+    from ctx_weft.providers.memory import organize as planning
+    captured = []
+    original = planning._current_selection
+    def select(*args, **kwargs):
+        plan = original(*args, **kwargs)
+        captured.append(plan)
+        return plan
+    async def unexpected(*args, **kwargs):
+        pytest.fail("The sole parallel round must be retained intact")
+    monkeypatch.setattr(planning, "_current_selection", select)
+    cm.patch_summary(monkeypatch, unexpected)
     mem = InMemoryMemoryProvider()
-    s = _Seeder(mem)
-    await s.user("x")
-    for i in range(4):
-        await s.round(f"r{i}", f"c{i}")
-
-    await cm.escalating_compact(_escalating_state(limit=1000, target=0.5), _ctx(mem),
-                                token_estimate=900, force=True)
-
-    assert len(captured) == 1 and callable(captured[0]), captured
-    assert summarized == [], "L3 放弃折叠时摘要不该已经被算过"
+    seed = _Seeder(mem)
+    await seed.user("x")
+    await seed.round("parallel", "a", "b")
+    state = _escalating_state(limit=1000, target=0.5)
+    state.agent.loop_config.collapse_keep_last = 3
+    await cm.escalating_compact(state, _ctx(mem), token_estimate=900, force=True)
+    assert captured == [None]
 
 
 # ── L1：从最老的胶囊开始逐颗降级 ───────────────────────────────────────────────

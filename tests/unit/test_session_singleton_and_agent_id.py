@@ -142,6 +142,7 @@ def _live_owner(rt, ran: list[str]) -> TaskManager:
 async def test_resume_on_a_live_owner_requeues_in_place_without_rebuilding(monkeypatch):
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                       agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     rebuilds: list[int] = []
     import ctx_weft.core.control.reducers as _reducers
     _orig = _reducers.rebuild_view
@@ -173,12 +174,14 @@ async def test_cold_answer_for_a_task_the_live_owner_does_not_hold_is_refused():
     TM 去兜（另建正是单例要消灭的东西）。"""
     rt = make_runtime(llm=MockLLMAdapter(responses=[]),
                       agent_provider=InlineAgentTemplateProvider())
+    rt.providers.register_memory(InMemoryMemoryProvider())
     tm = _live_owner(rt, [])
 
     with pytest.raises(RuntimeError, match="does not own task"):
         await initialize_all(rt)
         await rt.recover_agent("agt", resumed_task_id="tsk_unknown")
     assert rt._task_managers["ses_1"] is tm
+    assert not tm.recovery_pending, "拒绝未知 task 后不能遗留会话级派发屏障"
 
 
 # ── start_session ─────────────────────────────────────────────────────────────
