@@ -94,6 +94,9 @@ async def test_observe_pause_closes_stream_and_replaces_prompt(tmp_path, short, 
             assert opened.event.payload["observe_request"]["boundary"] == "interrupt"
             anchor = old_request.event.payload["reply_anchor"]
             handoff = opened.event.payload["observe_request"]
+            assert old_request.event.payload["actor_run_id"] == old_request.event.run_id
+            assert handoff["actor_run_id"] == old_request.event.run_id
+            assert opened.event.run_id is None
             assert handoff["reply_anchor"] == anchor
             assert handoff["replaces_observe_id"] == old_id
             assert "fork_checkpoint" not in applied.event.payload

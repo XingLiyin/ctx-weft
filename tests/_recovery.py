@@ -14,3 +14,14 @@ async def recover_fixture_session(runtime, agent_id, *, session_id=None, keep_al
 async def load_pending_fixture(runtime, session_id):
     await runtime.rebuild_session(session_id, strict=True)
     return len(await runtime.list_pending_hitl(session_id=session_id))
+
+
+async def query_committed_fixture_tasks(runtime, session_id):
+    """Check known fixture task identities even after a snapshot prunes hot tasks."""
+    cursor, tasks = None, []
+    while True:
+        page = await runtime.list_task_ids(session_id, cursor=cursor)
+        tasks.extend([await runtime.get_task(session_id, tid) for tid in page.ids])
+        if page.next_cursor is None:
+            return tasks
+        cursor = page.next_cursor

@@ -24,10 +24,11 @@ if TYPE_CHECKING:
     from ctx_weft.protocols import ContentPart
 
 from ctx_weft.core.assembler import ContextAssembler
-from ctx_weft.core.control.reducers import read_task_view, rebuild_view, reduce_events
+from ctx_weft.core.control.reducers import read_task_view, rebuild_view
+from ctx_weft.core.control.types import ObserveWaitBaseline, TaskSettlementWait
 from ctx_weft.core.models.config import RuntimeConfig
 from ctx_weft.protocols.runtime import PromptDiagnostic, QueryResult, RuntimeClosedError, RuntimeShutdownError, SessionDetail, ShutdownReport, SessionInitializationResult, SessionForkResult
-from ctx_weft.protocols.task import TaskDetail
+from ctx_weft.protocols.task import TaskDetail, TaskIdPage
 from ctx_weft.core.assembler.assembler import AssemblerDeps
 from ctx_weft.core.assembler.prompts import runtime_prompt
 from ctx_weft.core.assembler.sources import (
@@ -382,6 +383,7 @@ class TurnHandle:
         subscription = self.event_bus.subscribe(None, receive)
         terminal_seen = False
         seen_recaps = set()
+        wait = TaskSettlementWait()
         try:
             async with asyncio.timeout(timeout):
                 while True:
@@ -393,7 +395,7 @@ class TurnHandle:
                             else:
                                 raise PersistenceUnavailableError(reason)
                     if self._is_finished is not None and await self._is_finished(
-                            self.session_id, self.task_id):
+                            self.session_id, self.task_id, wait=wait):
                         # A commit can fail during the awaited state query.
                         # Durable terminal rows alone do not clear unknown receipts.
                         if self._storage_health is not None and self._storage_health(self.session_id):
@@ -756,6 +758,9 @@ class CtxWeftRuntime:
         # Cold owners are loaded without a queue. Recovery work starts only after
         # the caller has delivered its input; this is not an agent/task status.
         self._prepared_recoveries: dict[str, tuple[TaskManager, int, dict]] = {}
+        # Complete committed Observe prefixes from cold load, containing only
+        # active metadata. Waiters copy their task's entries and own their cursor.
+        self._observe_wait_baselines: dict[str, ObserveWaitBaseline] = {}
         # 会话成员登记表。生命周期事实属于 task / agent；会话展示状态由宿主聚合。
         self._session_registry = SessionRegistry(
             agent_lifecycle_manager=self._agent_lifecycle_manager,
@@ -1484,13 +1489,10 @@ class CtxWeftRuntime:
     # ── Agent 级取消（Task 19）───────────────────────────────────────────────
 
     async def _read_persisted_task(self, session_id, task_id):
-        # rebuild_view uses a valid snapshot plus its event delta, including a commit
+        # Read the target's persisted snapshot and delta, including a commit
         # whose receipt was lost before EventBus could notify its subscribers.
         head = await self.event_store.committed_head(session_id)
-        task = (await rebuild_view(self.event_store, session_id, through_position=head)).tasks.get(task_id)
-        if task is None or not task.details_complete:
-            task = (await self._historical_task_view(session_id, through_position=head)).tasks.get(task_id)
-        return task
+        return await read_task_view(self.event_store, session_id, task_id, through_position=head)
 
     async def _confirm_task_settled(self, task):
         agent_id = task.assigned_agent_id or task.creator_agent_id
@@ -2284,6 +2286,8 @@ class CtxWeftRuntime:
         task_manager.set_session(session)
 
         self._register_and_drain(session, task_manager)
+        if not params.resume:
+            self._observe_wait_baselines[session.id] = ObserveWaitBaseline(0, {})
         return handle
 
     # ── Internal helpers ─────────────────────────────────────────────────────
@@ -2664,6 +2668,7 @@ class CtxWeftRuntime:
         self._capability_cache.forget_session(session_id)
         self._loaded_sessions.discard(session_id)
         self._prepared_recoveries.pop(session_id, None)
+        self._observe_wait_baselines.pop(session_id, None)
         for key in list(self._memory_seed_ready):
             if key[0] == session_id:
                 self._memory_seed_ready.pop(key, None)
@@ -2717,7 +2722,8 @@ class CtxWeftRuntime:
                 await self._ensure_memory_seed(seed_view.sessions[session_id])
         if self._session_is_loaded(session_id):
             return len(self._agent_lifecycle_manager.agent_ids_of_session(session_id))
-        view = await rebuild_view(self.event_store, session_id)
+        head = await self.event_store.committed_head(session_id)
+        view = await rebuild_view(self.event_store, session_id, through_position=head)
         if session_id not in view.sessions:
             if strict:
                 raise SessionNotFound(session_id)
@@ -2741,7 +2747,8 @@ class CtxWeftRuntime:
         try:
             await self._load_hitl_view(session_id, view)
             n, actual_tenant = await self._load_agents_view(session_id, view, tenant_id=tenant_id)
-            await self._load_task_manager_view(session_id, view, tenant_id=actual_tenant)
+            await self._load_task_manager_view(session_id, view, tenant_id=actual_tenant,
+                                               through_position=head)
             return n
         except BaseException as exc:
             self._evict_session_memory(session_id)
@@ -2751,7 +2758,8 @@ class CtxWeftRuntime:
             logger.exception("rebuild_session: incomplete load rolled back (%s)", session_id)
             return 0
 
-    async def _load_task_manager_view(self, session_id: str, view, *, tenant_id: str) -> None:
+    async def _load_task_manager_view(self, session_id: str, view, *, tenant_id: str,
+                                      through_position: int | None = None) -> None:
         """Construct and publish a fully loaded owner, with no execution queue."""
         from ctx_weft.core.control.converters import (
             session_from_projection, task_from_projection,
@@ -2765,11 +2773,13 @@ class CtxWeftRuntime:
         missing_recaps = {tid for tid in recap_task_ids
                           if tid not in view.tasks or not view.tasks[tid].details_complete}
         if missing_recaps:
-            history = await self._historical_task_view(session_id)
+            head = (await self.event_store.committed_head(session_id)
+                    if through_position is None else through_position)
             for tid in missing_recaps:
-                if tid not in history.tasks:
+                task = await read_task_view(self.event_store, session_id, tid, through_position=head)
+                if task is None:
                     raise TaskNotFound(f"missing task for pending recap: {tid}")
-                view.tasks[tid] = history.tasks[tid]
+                view.tasks[tid] = task
         all_tasks = [task_from_projection(tp) for tp in view.tasks.values()]
         await self._restore_task_prompts(all_tasks, session_id, session.tenant_id)
         resumable = [t for t in all_tasks if t.status not in TERMINAL_TASK_STATUSES]
@@ -2801,6 +2811,10 @@ class CtxWeftRuntime:
         # Retain only deferred recovery work, not the replayed session view.
         self._prepared_recoveries[session_id] = (
             task_manager, view.tasks_total, dict(view.pending_observe))
+        if through_position is not None:
+            from ctx_weft.core.control.task_settlement import observe_wait_baseline
+
+            self._observe_wait_baselines[session_id] = observe_wait_baseline(view.pending_observe, through_position)
 
     async def _activate_prepared_tasks_locked(
         self, tm: "TaskManager", *, skip_hitl_id: str = "",
@@ -3210,50 +3224,75 @@ class CtxWeftRuntime:
                 hydrated = downgrade_images_to_text(content)
             task.user_prompt = hydrated
 
-    async def _restore_observe_outputs(self, session_id, task, recovery_info):
-        """Rebuild the actor's output at the original scheduling event, before retrying observe.
-
-        Use log order and the intent's foreground run, so later replies, previous
-        attempts and observer responses cannot become the recovered answer.
-        """
+    async def _restore_observe_outputs(self, session_id, task, recovery_info, *, request=None):
+        """Restore the original actor run at its request cut, never the session transcript."""
+        from ctx_weft.core.control.reducers import read_observe_request
         from ctx_weft.core.loop.steps.act import TurnRecord, _synthesize_final_outputs
         from ctx_weft.protocols import ToolCall
+        from ctx_weft.protocols.events import EventReadProjection
+        from types import SimpleNamespace
 
         observe_id = recovery_info.get("observe_id")
         if not observe_id:
-            return {}  # Legacy recap events have no durable scheduling intent.
-        from ctx_weft.core.control.reducers import OBSERVE_REQUEST_EVENT_TYPES
-        rows = await self.event_store.read_range(session_id, include_types=(
-            EventType.LLM_RESPONSE_FINISHED, *OBSERVE_REQUEST_EVENT_TYPES))
-        responses = []
+            return {}
+        if request is None:
+            request, _ = await read_observe_request(
+                self.event_store, session_id, task.id, observe_id,
+                through_position=await self.event_store.committed_head(session_id),
+                request_event_id=recovery_info.get("request_event_id", ""))
+        original = await read_task_view(
+            self.event_store, session_id, task.id, through_position=request.position)
+        if original is not None:
+            task.title, task.description = original.title, original.description
+            task.user_prompt = original.user_prompt
+            await self._restore_task_prompts([task], session_id, task.tenant_id)
+        request_payload = (request.event.payload.get("observe_request", {})
+                           if request.event.type == EventType.HITL_OPENED else request.event.payload)
+        actor_run_id = (recovery_info.get("actor_run_id") or request_payload.get("actor_run_id")
+                        or request.event.run_id)
+        fields = (("turn",), ("content",), ("tool_calls",), ("finish_reason",))
+        projection = EventReadProjection({EventType.LLM_RESPONSE_FINISHED: fields})
+        through = request.position - 1
+        legacy = []
+        if not actor_run_id:
+            # Only this task's response envelopes are needed to identify an old
+            # request's run. Do not fetch any response bodies until it is known.
+            rows = await self.event_store.read_range(
+                session_id, through_position=through,
+                include_types=(EventType.LLM_RESPONSE_FINISHED,), related_task_id=task.id,
+                projection=EventReadProjection({EventType.LLM_RESPONSE_FINISHED: (("finish_reason",),)}))
+            legacy = [row.event for row in rows if row.event.origin == EventOrigin.LOOP_ACT
+                      and row.event.payload.get("finish_reason") not in {"paused", "cancelled"}]
+            if legacy:
+                actor_run_id = legacy[-1].run_id
+        rows = []
+        if actor_run_id:
+            rows = await self.event_store.read_range(
+                session_id, through_position=through, run_id=actor_run_id,
+                include_types=(EventType.LLM_RESPONSE_FINISHED,), related_task_id=task.id,
+                projection=projection)
+        else:
+            # Very old responses may also lack run_id. Batch their known IDs,
+            # keeping below older SQLite parameter limits and preserving position.
+            identities = tuple(event.id for event in legacy if event.run_id == actor_run_id)
+            for offset in range(0, len(identities), 500):
+                rows.extend(await self.event_store.read_range(
+                    session_id, through_position=through, event_ids=identities[offset:offset + 500],
+                    projection=projection))
+        transcript = []
         for row in rows:
-            ev = row.event
-            intent = (ev.payload.get("observe_request", {})
-                      if ev.type == EventType.HITL_OPENED else ev.payload)
-            if ev.type != EventType.LLM_RESPONSE_FINISHED:
-                if intent.get("observe_id") == observe_id:
-                    original = (await self._historical_task_view(
-                        session_id, through_position=row.position)).tasks.get(task.id)
-                    if original is not None:
-                        task.title, task.description = original.title, original.description
-                        task.user_prompt = original.user_prompt
-                        await self._restore_task_prompts([task], session_id, task.tenant_id)
-                    actor_run_id = ev.run_id or (responses[-1].run_id if responses else None)
-                    transcript = [TurnRecord(
-                        turn=response.payload.get("turn", 0), messages_sent=[],
-                        assistant_text=response.payload.get("content", ""),
-                        tool_calls=[ToolCall(**call)
-                                    for call in response.payload.get("tool_calls", [])],
-                    ) for response in responses if response.run_id == actor_run_id]
-                    from types import SimpleNamespace
-                    state = SimpleNamespace(task=task, extra={})
-                    _synthesize_final_outputs(state, transcript)
-                    state.extra["restored_transcript"] = transcript
-                    return state.extra
-            elif (ev.task_id == task.id and ev.origin == EventOrigin.LOOP_ACT
-                  and ev.payload.get("finish_reason") not in {"paused", "cancelled"}):
-                responses.append(ev)
-        raise RuntimeError(f"Missing observe scheduling intent: {observe_id}")
+            event, payload = row.event, row.event.payload
+            if (event.task_id == task.id and event.origin == EventOrigin.LOOP_ACT
+                    and event.run_id == actor_run_id
+                    and payload.get("finish_reason") not in {"paused", "cancelled"}):
+                transcript.append(TurnRecord(turn=payload.get("turn", 0), messages_sent=[],
+                    assistant_text=payload.get("content", ""),
+                    tool_calls=[ToolCall(**call) for call in payload.get("tool_calls", [])]))
+        state = SimpleNamespace(task=task, extra={})
+        _synthesize_final_outputs(state, transcript)
+        state.extra["restored_transcript"] = transcript
+        state.extra["actor_run_id"] = actor_run_id
+        return state.extra
 
     async def _relaunch_observe(
         self, *, session: Session,
@@ -3282,7 +3321,14 @@ class CtxWeftRuntime:
             # Legacy Started-only recaps have no scheduling event; their task
             # terminal event already carries outputs.
             if recovery_info and recovery_info.get("task_id"):
-                recap_extra = await self._restore_observe_outputs(session.id, context_task, recovery_info)
+                from ctx_weft.core.control.reducers import read_observe_request
+                request, payload = await read_observe_request(
+                    self.event_store, session.id, task.id, recovery_info["observe_id"],
+                    through_position=await self.event_store.committed_head(session.id),
+                    request_event_id=recovery_info.get("request_event_id", ""))
+                recovery_info = {**payload, **recovery_info, "request_event_id": request.event.id}
+                recap_extra = await self._restore_observe_outputs(
+                    session.id, context_task, recovery_info, request=request)
             recap_extra["observe_context_task"] = context_task
             lm = self._agent_lifecycle_manager
             # 水合，不新建：这是重跑一个已存在 agent 打断的段 recap。register_session
@@ -3318,15 +3364,6 @@ class CtxWeftRuntime:
             # A restarted observer has no preceding PrepareStep to bind its tools.
             from ctx_weft.core.loop.steps._capabilities import resolve_and_bind
             state.extra["bound_capabilities"] = await resolve_and_bind(state, loop_ctx)
-            if recovery_info and "context_record_ids" not in recovery_info:
-                from ctx_weft.core.control.reducers import OBSERVE_REQUEST_EVENT_TYPES
-                rows = await self.event_store.read_range(session.id, include_types=OBSERVE_REQUEST_EVENT_TYPES)
-                for row in rows:
-                    payload = (row.event.payload.get("observe_request", {})
-                               if row.event.type == EventType.HITL_OPENED else row.event.payload)
-                    if payload.get("observe_id") == recovery_info.get("observe_id") and "context_record_ids" in payload:
-                        recovery_info = {**recovery_info, "context_record_ids": payload["context_record_ids"]}
-                        break
             info = dict(recovery_info or {})
             mechanical = bool(info.get("verdict"))
             settled = info.get("settled") or info.get("abandoned") or task.status == "CANCELED"
@@ -3804,19 +3841,6 @@ class CtxWeftRuntime:
             raise SessionNotFound(session_id)
         return view, head
 
-    async def _historical_task_view(self, session_id, *, through_position=None):
-        # TaskReviewing can create a successor under the predecessor's task_id.
-        # Replay task facts across the partition, independently of pruned snapshots.
-        from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
-        head = (await self.event_store.committed_head(session_id)
-                if through_position is None else through_position)
-        types = tuple({EventType.TASK_CREATED, EventType.TASK_FINALIZED,
-                       EventType.RECOGNIZE_INTENT_TOOL_CALL, EventType.OBSERVE_REQUESTED,
-                       EventType.HITL_OPENED, *TASK_STATUS_BY_EVENT})
-        rows = await self.event_store.read_range(
-            session_id, through_position=head, include_types=types)
-        return reduce_events([row.event for row in rows], session_id)
-
     async def inspect_prompt(
         self, session_id: str, event_id: str, *, trim: bool = True,
     ) -> QueryResult[PromptDiagnostic]:
@@ -3876,7 +3900,8 @@ class CtxWeftRuntime:
             if task is not None and task.details_complete:
                 return self._query_result(task_detail(task), "memory", True)
             head = await self.event_store.committed_head(session_id)
-            task = await read_task_view(self.event_store, session_id, task_id, through_position=head)
+            task = await read_task_view(self.event_store, session_id, task_id, through_position=head,
+                                        include_observe_count=False)
             if task is None:
                 created = await self.event_store.read_last_of_type(session_id, EventType.SESSION_CREATED)
                 if tm is None and (created is None or created.position > head):
@@ -3884,27 +3909,35 @@ class CtxWeftRuntime:
                 raise TaskNotFound(task_id)
             return self._query_result(task_detail(task), "events", False, head)
 
-    async def list_tasks(
+    async def list_loaded_tasks(
         self, session_id: str, *, agent_id: str | None = None,
         statuses: list[str] | None = None, limit: int = 100,
     ) -> list[QueryResult[TaskDetail]]:
+        """List complete tasks already held by the session's TaskManager, without I/O."""
         if limit <= 0:
             raise ValueError("limit must be positive")
         async with self._session_guard(session_id):
-            _, head = await self._query_view(session_id)
-            view = await self._historical_task_view(session_id, through_position=head)
-            results = {tid: self._query_result(task_detail(t), "events", False, head)
-                       for tid, t in view.tasks.items()}
-            if session_id in self._task_managers:
-                for task in self._task_managers[session_id].all_tasks():
-                    if task.details_complete:
-                        results[task.id] = self._query_result(task_detail(task), "memory", True)
-            items = [r for r in results.values()
-                     if (agent_id is None or r.data.assigned_agent_id == agent_id)
-                     and (statuses is None or r.data.status in statuses)]
+            tm = self._task_managers.get(session_id)
+            items = [self._query_result(task_detail(task), "memory", True)
+                     for task in (tm.all_tasks() if tm is not None else ())
+                     if task.details_complete
+                     and (agent_id is None or task.assigned_agent_id == agent_id)
+                     and (statuses is None or task.status in statuses)]
             items.sort(key=lambda r: (r.data.created_at.isoformat() if r.data.created_at else "",
                                       r.data.task_id), reverse=True)
             return items[:limit]
+
+    async def list_task_ids(self, session_id: str, *, cursor: str | None = None,
+                            limit: int = 100) -> TaskIdPage:
+        """Page committed task IDs in creation order without loading execution state.
+
+        A cursor freezes directory membership; get_task independently reads latest
+        details. list_loaded_tasks remains the separate memory-only query.
+        """
+        from ctx_weft.core.control.task_directory import read_task_id_page
+
+        async with self._session_guard(session_id):
+            return await read_task_id_page(self.event_store, session_id, cursor=cursor, limit=limit)
 
     async def get_agent(
         self, agent_id: str, *, session_id: str | None = None,
@@ -5668,13 +5701,11 @@ class CtxWeftRuntime:
             interrupted_tools=self._storage_interrupted_tools,
         )
 
-    async def _task_is_settled(self, session_id: str, task_id: str) -> bool:
+    async def _task_is_settled(self, session_id: str, task_id: str, *,
+                               wait: TaskSettlementWait | None = None) -> bool:
         tm = self._task_managers.get(session_id)
         task = tm.get_task(task_id) if tm is not None else None
-        if task is None:
-            view = await self._historical_task_view(session_id)
-            task = view.tasks.get(task_id)
-        if task is None or task.status not in TERMINAL_TASK_STATUSES:
+        if task is not None and task.status not in TERMINAL_TASK_STATUSES:
             return False
         prepared = self._prepared_recoveries.get(session_id)
         if prepared is not None and any(
@@ -5682,11 +5713,21 @@ class CtxWeftRuntime:
             return False
         if self._pending_observe_run_id(session_id, task_id) is not None:
             return False
-        # An empty execution registry also describes cold or failed-to-relaunch
-        # recaps. Only durable Done discharges the recovery obligation.
-        view = await rebuild_view(self.event_store, session_id)
-        return not any(info.get("task_id", key) == task_id
-                       for key, info in view.pending_observe.items())
+        # Empty execution/recovery registries do not prove durable Applied.
+        # Reuse the waiter's committed prefix, never replay old Observe history
+        # on every wakeup (including a failed coroutine that lost registration).
+        from ctx_weft.core.control.task_settlement import advance_task_settlement, load_task_settlement_baseline
+        wait = wait if wait is not None else TaskSettlementWait()
+        head = await self.event_store.committed_head(session_id)
+        if wait.progress is None:
+            wait.progress = await load_task_settlement_baseline(
+                self.event_store, session_id, task_id, through_position=head,
+                baseline=self._observe_wait_baselines.get(session_id),
+                loaded_task_status=task.status if task is not None else None)
+        else:
+            wait.progress = await advance_task_settlement(self.event_store, wait.progress, through_position=head)
+        return (wait.progress.task_status in TERMINAL_TASK_STATUSES and not wait.progress.pending_observe
+                and (task is None or task.status in TERMINAL_TASK_STATUSES))
 
     def _pending_observe_run_id(self, session_id: str, task_id: str) -> str | None:
         registry = self._step_executions.get(session_id)

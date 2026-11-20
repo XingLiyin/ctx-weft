@@ -244,6 +244,8 @@ recap 请求的 HitlOpened 原子提交。气泡提交确认后才可回复；�
 热恢复先确认停止 run 的原始起止事件，再按已提交交接事实补齐等待状态、槽位释放和 recap。
 未完成判决的冷恢复由 TaskManager 持有前台槽位和 dispatch，注册真实暂停/取消令牌；
 已接受的判决只恢复收尾。root、跨 agent 和同 agent 子任务的暂停均安排 report-only recap。
+Observe 请求显式保存原 `actor_run_id`，包括 HitlOpened 内嵌请求；HITL 外层仍是任务范围封套。
+恢复和再次暂停沿用原 actor 身份，不把新启动的观察 run 当作原执行；旧请求缺字段时才反查回复元数据。
 observe 请求通过 `context_record_ids` 固定输入记录；memory 的 `read_records` 按原 ID
 读取含 superseded 的记录，并保持租户/会话隔离。装配、短段门与折叠共用这份范围；
 后续收尾已经接管的段不再追加旧摘要。旧快照遗漏引用时，从原请求事件补齐。
@@ -316,7 +318,9 @@ MemoryRecord 的 kind / scope / role 和关联 ID 是事实模型；渲染标题
 | --- | --- |
 | 构造 | 同步公共接线；不枚举、初始化或装填历史 |
 | `initialize(session_id)` | 快照 + 增量校准崩溃事实；不装填执行对象，不启动模型/任务 |
-| `get_session/get_task/list_tasks/get_agent/list_agents/list_pending_hitl` | 异步 QueryResult 查询；内存优先、事件回退，不触发初始化或执行 |
+| `get_session/get_task/get_agent/list_agents/list_pending_hitl` | 异步 QueryResult 查询；内存优先、事件回退，不触发初始化或执行 |
+| `list_loaded_tasks` | 只查询 TaskManager 中详情完整的热任务；不读取事件/快照，不装填冷任务 |
+| `list_task_ids` | 从已提交创建身份枚举任务 ID，按首次 position 去重后游标分页；冷、热一致，不读取正文 |
 | `rebuild_session` | 已有会话唯一装填入口，装填 Session / Agent / HITL / TaskManager；不 drain |
 | `recover_session` | 在已校准、装填基础上恢复已有工作；输入先装入，再激活 deferred recovery |
 | `forget_session` | 仅在 quiescent 时逐出运行缓存，保留历史和初始化标记 |
@@ -331,6 +335,35 @@ MemoryRecord 的 kind / scope / role 和关联 ID 是事实模型；渲染标题
 
 纯查询返回可独立修改的副本；未装填历史任务可从日志补读。无 session_id 的列表只列已装填对象；冷 Agent/HITL 访问必须明确会话 scope。
 
+单任务补读复用 `read_task_view`：快照只取目标任务及 Observe 计数元数据，增量按
+`related_task_id` 读取该任务的事实。装填 TaskManager 直接使用已重建的 tasks；只有
+待恢复 Observe 引用但视图缺失的任务才单独补读，不枚举全会话历史任务。
+公开 TaskDetail 查询不需要执行侧 Observe 计数，因此只读取目标任务快照切片和任务事实，
+不携带其他任务的 pending_observe 元数据。TaskDetail 同时提供 user_prompt 和 settings_type，
+宿主不必为显示原始输入或识别旧辅助任务重放创建事件。
+任务目录由 core 选择 TaskCreated.task.id（旧封套 task_id 回退）及 TaskReviewing 的
+successor.task.id。存储通用 read_distinct_values 只选字符串，按首次 position 聚合后再
+应用游标和 limit；不把事件正文读回 Python 后切页，不新增持久任务索引。游标绑定会话、
+版本和固定 head，不受 owner 逐出或重启影响。目录固定成员；get_task 默认查询最新详情。
+Observe 恢复先按原 request_event_id 定位请求；旧快照缺该字段时按 observe_id 精确匹配
+独立请求或 HitlOpened 内嵌请求。请求的持久 position 固定恢复切面，模型回复只读目标任务
+原 actor_run_id 在该切面之前的内容。旧请求缺 run ID 时仅取该任务的回复元数据定位；
+回复也缺 run ID 时按已知事件 ID 分批补正文，每批最多 500 条，结果仍按 position 排序；
+不会逐条查库。pending_observe 保存可选请求/actor 身份，旧数据无需迁移。
+`TurnHandle.wait_for_finish` 每次等待独立保留目标任务的最小状态、未 Applied 的 Observe
+集合和已覆盖的 position，完成、取消或超时后释放。冷装填保留同一 head 下已有的
+pending_observe 元数据基线，与待启动恢复队列分离，启动/退出协程不代表 Applied。
+`core/control/task_settlement.py` 的初始化入口比较恢复基线与最新兼容快照的 cut，
+在本次固定 head 内选较新者，旧内存基线不能遮住新快照；重新等待时也重新选择。
+无有效基线才首次补读该任务的历史元数据，随后只读
+目标任务 `(cursor, committed_head]` 内的增量。head 不变时不重读事件。快照裁掉的冷任务
+只补查一次状态元数据，不读 prompt/outputs，也不装填任务。增量折叠与游标一并发布，
+初始化补齐任务状态后才交付完整进度，增量推进返回新进度，runtime 不修改 reducer 内部视图。
+读取失败不推进；未知提交仍先确认原 batch，同一任务的所有待办都销账后才算收尾完成。
+Observe 等待任务处置从原请求位置开始，
+每次只读上次已检查 position 之后的目标任务状态，排除 crash_recovery 校准事件。
+通知只唤醒，完成判据仍来自持久事件与既有 reducer，不新增持久任务索引。
+
 `TurnHandle.wait_for_finish` 等任务终态及相关收尾完成，人工等待不算完成。关闭超时和持久化失败通过公开报告/异常表达，外部资源必须在执行真正静止后才能释放。
 
 ## 11. 事件、提交与快照
@@ -338,7 +371,7 @@ MemoryRecord 的 kind / scope / role 和关联 ID 是事实模型；渲染标题
 - 当前事件与瞬态集合定义在 `protocols/events.py`。required 策略下先由 CommitGate 确认持久化，再 fanout；best_effort 是显式策略，不能因存储失败自动降级。
 - `append_batch` 同会话原子提交；batch_id 和事件封套在重试中保持原样。同 batch 不同内容应冲突，不换 ID 盲目补发。存储隔离解除前不恢复业务副作用。
 - 存储按会话分配严格递增 position；事件 ID / timestamp / run sequence 都不能替代提交游标。恢复、投影及快照读取固定 committed head 切面。
-- EventStore 的区间读统一为 `read_range`，支持区间、类型、任务关联及字段投影；`read_last_of_type` 读取最近类型事件，`list_session_ids` 枚举日志分区供启动校准。协议没有 append / replay / read_session_events_of_types 兼容入口。构造时的三方法有序提交检查不代表只需实现那三个方法。
+- EventStore 的区间读统一为 `read_range`，支持区间、类型、任务关联、批量事件 ID、run ID、JSON 字符串精确匹配及字段投影；筛选在存储层完成。`read_last_of_type` 读取最近类型事件，`list_session_ids` 枚举日志分区供启动校准。协议没有 append / replay / read_session_events_of_types 兼容入口。构造时的三方法有序提交检查不代表只需实现那三个方法。
 - `EventReadProjection` 返回明确不完整的 ProjectedEvent，筛行在原事件上完成；不能把投影 DTO 当完整事件写回。字段裁剪用于轻量恢复/查询，不能在 Python 先读全正文再假装有界读取。
 - `core/control/reducers.py` 拥有重放语义和快照版本，`snapshot_writer.py` 拥有快照时机和切面；Provider 只执行存储，不复制版本常量或判定策略。
 - RoundCommitted / RoundDiscarded 是瞬态通知；SessionStatusChanged 与 TaskRecapRequested/Started/Done 仅兼容旧日志，不恢复发送。会话展示状态归宿主。

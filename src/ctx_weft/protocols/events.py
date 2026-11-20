@@ -542,6 +542,26 @@ class StoredEvent:
 
 
 @dataclass(frozen=True)
+class EventValueSource:
+    """A string payload path, optionally falling back to a string envelope field."""
+
+    path: tuple[str, ...]
+    fallback_field: str = ""
+
+    def __post_init__(self):
+        if (not isinstance(self.path, tuple) or not self.path
+                or any(not isinstance(key, str) or not key for key in self.path)
+                or self.fallback_field not in {"", "id", "task_id", "agent_id", "run_id"}):
+            raise ValueError("Invalid event value source")
+
+
+@dataclass(frozen=True)
+class StoredEventValue:
+    value: str
+    position: int
+
+
+@dataclass(frozen=True)
 class EventReadProjection:
     """Select payload paths per event type without filtering event envelopes.
 
@@ -640,9 +660,9 @@ class EventStore(Protocol):
 
     ## 全部必须实现，没有可选扩展
 
-    `append` / `append_batch` / `read_range` / `committed_head` / `read_last_of_type` /
-    `read_session_events_of_types`。**有序提交是底线，不是可选项**——理由见下节。后两个是
-    恢复路径无条件要走的（取最新快照 / 按类型收窄折叠），做成可选就又要在 core 里探一次能力。
+    `append_batch` / `read_range` / `read_distinct_values` / `committed_head` /
+    `read_last_of_type` / `list_session_ids`。**有序提交是底线，不是可选项**——理由见下节。
+    去重标量分页同样是存储契约，不在 core 中探测 Provider 或回退到全量正文读取。
 
     「可选扩展（未实现就抛 `NotImplementedError`，调用方降级）」那一档**已经没有了**
     （2026-09-21）。它每多一个成员，core 里就多一处能力探测、两个分支、两种失败形态——这个
@@ -705,6 +725,19 @@ class EventStore(Protocol):
     # ── 有序提交（必须实现；spec: event-log）──────────────────────────────────
 
     @abstractmethod
+    async def read_distinct_values(
+        self, session_id: str, *, sources: Mapping[str, EventValueSource],
+        through_position: int, after: StoredEventValue | None = None, limit: int = 100,
+    ) -> list[StoredEventValue]:
+        """Group nonempty string values at min(position), then apply cursor and limit.
+
+        Sources select payload strings by event type. Session, types and upper
+        cut apply before grouping; the exclusive (position, value) cursor applies
+        after grouping. Only values and positions are returned, never bodies.
+        """
+        ...
+
+    @abstractmethod
     async def append_batch(
         self, session_id: str, batch_id: str, events: "list[Event]",
     ) -> CommitReceipt:
@@ -722,6 +755,9 @@ class EventStore(Protocol):
         exclude_types: "tuple[str, ...]" = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: None = None,
     ) -> list[StoredEvent]: ...
 
@@ -736,6 +772,9 @@ class EventStore(Protocol):
         exclude_types: "tuple[str, ...]" = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: EventReadProjection,
     ) -> list[ProjectedStoredEvent]: ...
 
@@ -750,6 +789,9 @@ class EventStore(Protocol):
         exclude_types: "tuple[str, ...]" = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: EventReadProjection | None = None,
     ) -> list[StoredEvent] | list[ProjectedStoredEvent]:
         """按 position 升序读取 (after_position, through_position] 的已提交事件。
@@ -758,7 +800,7 @@ class EventStore(Protocol):
         projection returns ProjectedStoredEvent records, preserving all envelope
         fields and positions. Row selection is independent of field projection.
 
-        **本协议唯一的区间读**。四个过滤器都是可选的，都作用在同一个 position 区间上：
+        **本协议唯一的区间读**。过滤器都作用在同一个 position 区间上：
 
         - `include_types` 非空 → 只要这些类型。空 = 不限。
         - `exclude_types` 非空 → 跳过这些类型。全量重放用它排掉状态快照事件（那些事件的存在
@@ -770,7 +812,15 @@ class EventStore(Protocol):
           由 `tests/unit/test_read_primitives_conformance.py` 对两者跑同一套用例钉住。
         - `related_task_id` 非空 → 严格匹配任务归属，包括 TaskCreated.task.id，以及
           TaskReviewing 的 successor、replaced_task_ids 和 rewired_dependencies。
+          Observe/旧 TaskRecap 的 payload.task_id 和 HitlOpened.observe_request.task_id
+          也属于任务归属；封套可以属于发起交接的父任务。
           不包含无归属行；用于任务详情读取，不改变上面的宽松 task_id 过滤契约。
+        - `event_ids` 非空 → 匹配这些事件 ID，返回仍按 position 排序且不重复；
+          ID 必须是非空字符串元组。空元组表示不按事件 ID 筛选。
+        - `run_id` 非空 → 精确匹配对应封套字段。
+        - `payload_equals=(path, value)` → 指定 JSON 对象路径上的字符串精确匹配；
+          缺失、null、非字符串不匹配。路径须为非空字符串元组，value 须为字符串。
+          筛选发生在存储层，独立于字段投影，不得先读取全部正文再在调用端筛选。
 
         **通用读原语，不带任何特定类型的语义**——调用方（core）自己填要读/要排除什么。
 

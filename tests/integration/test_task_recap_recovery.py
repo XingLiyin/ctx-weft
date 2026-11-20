@@ -571,7 +571,8 @@ async def test_resume_uses_snapshot_or_bounded_history(tmp_path, snapshot) -> No
             async def counting(session_id, **kwargs):
                 # A narrow query for a known producer is not a projection replay.
                 if (kwargs.get("after_position", 0) == 0
-                        and not kwargs.get("include_types")):
+                        and not kwargs.get("include_types")
+                        and not kwargs.get("event_ids")):
                     full_reads.append(kwargs)
                 return await orig_range(session_id, **kwargs)
 

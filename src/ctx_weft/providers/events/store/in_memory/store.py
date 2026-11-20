@@ -22,6 +22,7 @@ from ctx_weft.protocols.events import (
     EventStore,
     ProjectedStoredEvent,
     StoredEvent,
+    StoredEventValue,
 )
 from ctx_weft.providers.events.store.projection import project_stored_event
 
@@ -33,6 +34,24 @@ class InMemoryEventStore(EventStore):
 
     订阅由 `EventPersister` 负责，见 `providers/events/persister.py`。
     """
+
+    async def read_distinct_values(self, session_id, *, sources, through_position, after=None, limit=100):
+        from ctx_weft.providers.events.store.projection import event_string_value, validate_value_page
+
+        validate_value_page(sources, through_position, after, limit)
+        first = {}
+        for row in self._stored.get(session_id, ()):
+            if row.position > through_position:
+                break
+            source = sources.get(row.event.type)
+            if source is not None:
+                value = event_string_value(row.event, source)
+                if value is not None:
+                    first.setdefault(value, row.position)
+        cursor = (after.position, after.value) if after is not None else (0, "")
+        values = sorted((position, value) for value, position in first.items()
+                        if (position, value) > cursor)
+        return [StoredEventValue(value, position) for position, value in values[:limit]]
 
     def __init__(self) -> None:
         self._stored: dict[str, list[StoredEvent]] = {}   # session → 按提交序
@@ -131,6 +150,9 @@ class InMemoryEventStore(EventStore):
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: None = None,
     ) -> list[StoredEvent]: ...
 
@@ -145,6 +167,9 @@ class InMemoryEventStore(EventStore):
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: EventReadProjection,
     ) -> list[ProjectedStoredEvent]: ...
 
@@ -158,13 +183,29 @@ class InMemoryEventStore(EventStore):
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: EventReadProjection | None = None,
     ) -> list[StoredEvent] | list[ProjectedStoredEvent]:
-        """四个过滤器的语义见协议；`task_id` 的 OR-NULL 安全阀与 SQL 侧逐字同口径。"""
+        """过滤器的语义见协议；`task_id` 的 OR-NULL 安全阀与 SQL 侧逐字同口径。"""
+        from ctx_weft.providers.events.store.projection import payload_matches, validate_read_selection
+
+        validate_read_selection(payload_equals, event_ids)
         want = {str(t) for t in include_types}
         skip = {str(t) for t in exclude_types}
         out = []
-        for se in self._stored.get(session_id, []):
+        if event_ids:
+            wanted_ids = set(event_ids)
+            # Reuse commit identity bookkeeping; inspect only involved batches,
+            # rather than traversing the session for every requested identity.
+            batches = {self._event_batch[key] for key in wanted_ids if key in self._event_batch}
+            candidates = sorted((row for batch in batches for row in self._batches[batch].records
+                                 if row.event.id in wanted_ids and row.event.session_id == session_id),
+                                key=lambda row: row.position)
+        else:
+            candidates = self._stored.get(session_id, [])
+        for se in candidates:
             if se.position <= after_position:
                 continue
             if through_position is not None and se.position > through_position:
@@ -173,6 +214,10 @@ class InMemoryEventStore(EventStore):
                 continue
             if skip and se.event.type in skip:
                 continue
+            if run_id and se.event.run_id != run_id:
+                continue
+            if not payload_matches(se.event.payload, payload_equals):
+                continue
             # 只排除**明确属于别的 task** 的：无归属（None / 空串）的照样取回。
             if task_id and se.event.task_id and se.event.task_id != task_id:
                 continue
@@ -180,6 +225,11 @@ class InMemoryEventStore(EventStore):
                 ev, tid = se.event, related_task_id
                 p = ev.payload or {}
                 related = ev.task_id == tid
+                if ev.type in {"ObserveRequested", "ObserveStarted", "ObserveCompleted", "ObserveApplied",
+                               "TaskRecapRequested", "TaskRecapStarted", "TaskRecapDone"}:
+                    related |= p.get("task_id") == tid
+                elif ev.type == "HitlOpened":
+                    related |= (p.get("observe_request") or {}).get("task_id") == tid
                 if ev.type == "TaskCreated":
                     related |= (p.get("task") or {}).get("id") == tid
                 elif ev.type == "TaskReviewing":

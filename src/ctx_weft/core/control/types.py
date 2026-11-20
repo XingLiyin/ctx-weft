@@ -197,3 +197,35 @@ class RunStateView:
     sessions: dict[str, SessionView] = field(default_factory=dict)
     tasks: dict[str, TaskView] = field(default_factory=dict)
     agents: dict[str, AgentView] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ObserveWaitBaseline:
+    """Complete committed Observe metadata, independent of recovery scheduling."""
+
+    position: int
+    pending_observe: dict[str, dict]
+
+
+@dataclass(frozen=True)
+class TaskSettlementProgress:
+    """A complete task-scoped prefix; reducer state stays inside control readers."""
+
+    position: int
+    _view: RunStateView = field(repr=False)
+
+    @property
+    def task_status(self) -> str | None:
+        task = self._view.tasks.get(self._view.task_id)
+        return task.status if task is not None else None
+
+    @property
+    def pending_observe(self) -> dict[str, dict]:
+        return self._view.pending_observe
+
+
+@dataclass
+class TaskSettlementWait:
+    """One wait invocation owns either no prefix yet, or a fully initialized one."""
+
+    progress: TaskSettlementProgress | None = None

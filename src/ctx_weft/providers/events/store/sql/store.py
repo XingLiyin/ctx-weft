@@ -1,6 +1,6 @@
 """SqlEventStore：SQLAlchemy async 的 EventStore 实现（默认 SQLite，postgres 同源）。
 
-协议面六个方法齐备。与 `providers/events/store/in_memory` 是同一套契约的两个实现，
+协议读写方法齐备。与 `providers/events/store/in_memory` 是同一套契约的两个实现，
 `tests/unit/test_event_store_conformance.py` 对两者跑同一套用例。
 
 设计要点：
@@ -21,7 +21,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import overload
 
-from sqlalchemy import and_, cast, exists, func, or_, select, text
+from sqlalchemy import and_, case, cast, exists, func, or_, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,6 +34,7 @@ from ctx_weft.protocols.events import (
     EventStore,
     ProjectedStoredEvent,
     StoredEvent,
+    StoredEventValue,
     TransientPersistenceError,
 )
 from ctx_weft.providers._sqlalchemy import make_session_factory
@@ -53,6 +54,45 @@ __all__ = ["SqlEventStore", "open_sqlite_event_store"]
 
 class SqlEventStore(EventStore):
     """SQLAlchemy-backed event store（含有序提交扩展，spec: event-log）。"""
+
+    async def read_distinct_values(self, session_id, *, sources, through_position, after=None, limit=100):
+        from ctx_weft.providers.events.store.projection import validate_value_page
+
+        validate_value_page(sources, through_position, after, limit)
+        async with self._factory() as db:
+            choices = []
+            for kind, source in sources.items():
+                if db.get_bind().dialect.name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import JSONB
+
+                    value = cast(EventModel.payload_json, JSONB)
+                    for key in source.path:
+                        value = value[key]
+                    scalar = case((func.jsonb_typeof(value) == "string", value.astext))
+                else:
+                    scalar = EventModel.payload_json
+                    for index, key in enumerate(source.path):
+                        items = func.json_each(scalar).table_valued("key", "value", "type").alias()
+                        final = index == len(source.path) - 1
+                        scalar = select(items.c.value).where(
+                            items.c.key == key, items.c.type == ("text" if final else "object")
+                        ).scalar_subquery()
+                scalar = func.nullif(scalar, "")
+                if source.fallback_field:
+                    scalar = func.coalesce(scalar, func.nullif(getattr(EventModel, source.fallback_field), ""))
+                choices.append((EventModel.type == kind, scalar))
+            values = select(case(*choices).label("value"), EventModel.position).where(
+                EventModel.session_id == session_id, EventModel.type.in_(tuple(sources)),
+                EventModel.position.isnot(None), EventModel.position <= through_position,
+            ).subquery()
+            first = select(values.c.value, func.min(values.c.position).label("position")).where(
+                values.c.value.isnot(None)).group_by(values.c.value).subquery()
+            query = select(first.c.value, first.c.position)
+            if after is not None:
+                query = query.where(or_(first.c.position > after.position,
+                    and_(first.c.position == after.position, first.c.value > after.value)))
+            rows = await db.execute(query.order_by(first.c.position, first.c.value).limit(limit))
+            return [StoredEventValue(row.value, row.position) for row in rows]
 
     def __init__(
         self, session_factory: "async_sessionmaker[AsyncSession]",
@@ -236,6 +276,9 @@ class SqlEventStore(EventStore):
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: None = None,
     ) -> list[StoredEvent]: ...
 
@@ -250,6 +293,9 @@ class SqlEventStore(EventStore):
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: EventReadProjection,
     ) -> list[ProjectedStoredEvent]: ...
 
@@ -263,13 +309,19 @@ class SqlEventStore(EventStore):
         exclude_types: tuple[str, ...] = (),
         task_id: str = "",
         related_task_id: str = "",
+        event_ids: tuple[str, ...] = (),
+        run_id: str = "",
+        payload_equals: tuple[tuple[str, ...], str] | None = None,
         projection: EventReadProjection | None = None,
     ) -> list[StoredEvent] | list[ProjectedStoredEvent]:
         """按 position 升序读 (after, through]；只含已提交（position 非空）的事件。
 
-        四个过滤器的语义见协议。`task_id` 那条的 OR-NULL 安全阀是**故意**的，改动前先看那边
+        过滤器的语义见协议。`task_id` 那条的 OR-NULL 安全阀是**故意**的，改动前先看那边
         的说明与 `test_read_primitives_conformance.py`。
         """
+        from ctx_weft.providers.events.store.projection import validate_read_selection
+
+        validate_read_selection(payload_equals, event_ids)
         conds = [
             EventModel.session_id == session_id,
             EventModel.position.isnot(None),
@@ -287,7 +339,31 @@ class SqlEventStore(EventStore):
                 EventModel.task_id.is_(None),
                 EventModel.task_id == "",
             ))
+        if event_ids:
+            conds.append(EventModel.id.in_(event_ids))
+        if run_id:
+            conds.append(EventModel.run_id == run_id)
         async with self._factory() as db:
+            if payload_equals is not None:
+                path, expected = payload_equals
+                if db.get_bind().dialect.name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import JSONB
+
+                    value = cast(EventModel.payload_json, JSONB)
+                    for key in path:
+                        value = value[key]
+                    conds.append(value == cast(expected, JSONB))
+                else:
+                    # Object keys are bound values, not JSONPath fragments:
+                    # SQLite JSONPath cannot reliably escape quotes in keys.
+                    def matches(source, keys):
+                        items = func.json_each(source).table_valued("key", "value", "type").alias()
+                        child = (matches(case((items.c.type == "object", items.c.value), else_="{}"), keys[1:])
+                                 if len(keys) > 1 else
+                                 and_(items.c.type == "text", items.c.value == expected))
+                        return exists(select(1).select_from(items).where(items.c.key == keys[0], child))
+
+                    conds.append(matches(EventModel.payload_json, path))
             if related_task_id:
                 tid = related_task_id
                 if db.get_bind().dialect.name == "postgresql":
@@ -295,11 +371,15 @@ class SqlEventStore(EventStore):
 
                     payload = cast(EventModel.payload_json, JSONB)
                     created_id = payload["task"]["id"].astext
+                    observe_task = payload["task_id"].astext
+                    parked_task = payload["observe_request"]["task_id"].astext
                     successor_id = payload["successor"]["task"]["id"].astext
                     replaced = payload["replaced_task_ids"].contains([tid])
                     rewired = payload["rewired_dependencies"].has_key(tid)
                 else:
                     created_id = func.json_extract(EventModel.payload_json, "$.task.id")
+                    observe_task = func.json_extract(EventModel.payload_json, "$.task_id")
+                    parked_task = func.json_extract(EventModel.payload_json, "$.observe_request.task_id")
                     successor_id = func.json_extract(EventModel.payload_json, "$.successor.task.id")
                     members = func.json_each(
                         EventModel.payload_json, "$.replaced_task_ids").table_valued("value")
@@ -309,13 +389,16 @@ class SqlEventStore(EventStore):
                         '$.rewired_dependencies.' + json.dumps(tid)).isnot(None)
                 conds.append(or_(
                     EventModel.task_id == tid,
+                    and_(EventModel.type.in_(("ObserveRequested", "ObserveStarted", "ObserveCompleted",
+                        "ObserveApplied", "TaskRecapRequested", "TaskRecapStarted", "TaskRecapDone")),
+                         observe_task == tid),
+                    and_(EventModel.type == "HitlOpened", parked_task == tid),
                     and_(EventModel.type == "TaskCreated", created_id == tid),
                     and_(EventModel.type == "TaskReviewing",
                          or_(successor_id == tid, replaced, rewired)),
                 ))
             columns = projected_columns(projection) if projection is not None else [EventModel]
-            result = await db.execute(
-                select(*columns).where(*conds).order_by(EventModel.position))
+            result = await db.execute(select(*columns).where(*conds).order_by(EventModel.position))
             if projection is not None:
                 return [row_to_projected(row) for row in result.mappings()]
             return [StoredEvent(event=_row_to_event(r), position=r.position)

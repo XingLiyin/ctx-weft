@@ -946,9 +946,16 @@ async def restore_legacy_canceled_tasks(event_store, session_id, view, head, *, 
 
 
 async def read_task_view(event_store, session_id: str, task_id: str, *, through_position: int,
-                         use_snapshot: bool = True):
+                         use_snapshot: bool = True, include_observe_count: bool = True):
     """Read one complete task without hydrating owners or replaying other tasks' history."""
-    stored = (await event_store.read_last_of_type(session_id, EventType.STATE_SNAPSHOT)
+    snapshot_projection = EventReadProjection({EventType.STATE_SNAPSHOT: (
+        (_SNAP_CUT,), (_SNAP_VERSION,), (_SNAP_DEPTH,), (_SNAP_REASON,),
+        (_SNAP_BLOB, "tasks", task_id),
+        *tuple((_SNAP_BLOB, "pending_observe", "*", key) for key in (
+            "task_id", "observe_id", "judge_task", "observe_index") if include_observe_count),
+    )})
+    stored = (await event_store.read_last_of_type(session_id, EventType.STATE_SNAPSHOT,
+                                                  projection=snapshot_projection)
               if use_snapshot else None)
     snapshot = snapshot_facts_from_event(stored.event if stored else None)
     view = RunStateView(run_id=session_id, session_id=session_id, task_id=task_id, agent_id="")
@@ -963,7 +970,9 @@ async def read_task_view(event_store, session_id: str, task_id: str, *, through_
     task_types = {EventType.TASK_CREATED, EventType.TASK_FINALIZED,
                   EventType.RECOGNIZE_INTENT_TOOL_CALL, *TASK_STATUS_BY_EVENT}
     count_fields = tuple((name,) for name in ("task_id", "observe_id", "judge_task", "observe_index"))
-    count_types = (EventType.OBSERVE_REQUESTED, EventType.OBSERVE_STARTED, EventType.OBSERVE_APPLIED)
+    count_types = ((EventType.OBSERVE_REQUESTED, EventType.OBSERVE_STARTED, EventType.OBSERVE_APPLIED)
+                   if include_observe_count else ())
+    parked_types = (EventType.HITL_OPENED,) if include_observe_count else ()
     # Count old parked requests without loading historical HITL forms/answers or
     # observation context bodies. Existing task-detail events still need full data.
     projection = EventReadProjection({
@@ -973,14 +982,39 @@ async def read_task_view(event_store, session_id: str, task_id: str, *, through_
     })
     rows = await event_store.read_range(
         session_id, after_position=after, through_position=through_position,
-        include_types=tuple({*task_types, *count_types, EventType.HITL_OPENED}),
+        include_types=tuple({*task_types, *count_types, *parked_types}),
         related_task_id=task_id, projection=projection,
     )
-    # This scoped reader selects complete task bodies plus only the observation
-    # metadata consumed by _apply. Do not pass partial DTOs to the full replayer.
     for row in rows:
         _apply(view, row.event)
     return view.tasks.get(task_id)
+
+
+async def read_observe_request(event_store, session_id, task_id, observe_id, *,
+                               through_position, request_event_id=""):
+    """Locate one original request, including old requests embedded in HITL."""
+    if request_event_id:
+        rows = await event_store.read_range(session_id, through_position=through_position,
+                                            event_ids=(request_event_id,))
+    else:
+        rows = []
+        for kinds, path in (
+            (tuple(t for t in OBSERVE_REQUEST_EVENT_TYPES if t != EventType.HITL_OPENED),
+             ("observe_id",)),
+            ((EventType.HITL_OPENED,), ("observe_request", "observe_id")),
+        ):
+            rows.extend(await event_store.read_range(
+                session_id, through_position=through_position, include_types=kinds,
+                related_task_id=task_id, payload_equals=(path, observe_id)))
+    if not rows:
+        raise RuntimeError(f"Missing observe scheduling intent: {observe_id}")
+    row = min(rows, key=lambda item: item.position)
+    event = row.event
+    payload = event.payload.get("observe_request", {}) if event.type == EventType.HITL_OPENED else event.payload
+    if (event.type not in OBSERVE_REQUEST_EVENT_TYPES
+            or payload.get("observe_id") != observe_id or payload.get("task_id") != task_id):
+        raise ValueError("Observe request does not match its recovery owner")
+    return row, payload
 
 
 def reduce_events(events: list[Event], run_id: str) -> RunStateView:
@@ -1463,6 +1497,9 @@ def _apply(view: RunStateView, ev: Event) -> None:
                                 and pending["fork_checkpoint"] != checkpoint)):
                         raise MemorySeedConflictError("Fork checkpoint does not match its Observe binding")
                 info = view.pending_observe.setdefault(key, {})
+                if t == EventType.OBSERVE_REQUESTED:
+                    info.setdefault("request_event_id", ev.id)
+                    info.setdefault("actor_run_id", p.get("actor_run_id") or ev.run_id)
                 if p.get("reply_anchor") is not None:
                     from ctx_weft.core.fork_checkpoint import validate_reply_anchor
                     anchor = validate_reply_anchor(p["reply_anchor"])

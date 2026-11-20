@@ -1,5 +1,5 @@
 
-from tests._recovery import recover_fixture_session
+from tests._recovery import recover_fixture_session, query_committed_fixture_tasks
 """Recover real non-close folds and failed HITL commits without losing application work."""
 
 import asyncio
@@ -57,7 +57,7 @@ async def test_non_close_completed_recovers_real_fold(tmp_path, snapshot, cut):
             assert pending["completion"]["result"]["act_recap"] == "reviewed"
             assert not pending["completion"]["short_segment"]
             rt, root = await recover_and_drain(store, memory, mode, snapshot)
-            task, = await rt.list_tasks("crash-session")
+            task, = await query_committed_fixture_tasks(rt, "crash-session")
             assert task.data.status == "AWAITING_HUMAN"
             summaries = await load_records(memory,
                 MemoryAddress(session_id="crash-session", agent_id=root, task_id=task.data.task_id),
@@ -128,7 +128,7 @@ async def test_failed_hitl_commit_keeps_completed_until_cold_recovery(tmp_path, 
     async with open_sqlite_event_store(tmp_path / "events.db") as store:
         async with open_sqlite_memory(tmp_path / "memory.db") as memory:
             rt, root = await recover_and_drain(store, memory, mode, snapshot)
-            task, = await rt.list_tasks("crash-session")
+            task, = await query_committed_fixture_tasks(rt, "crash-session")
             assert task.data.status == "FINISHED"
             assert not rt.hitl.registry.list_pending("crash-session")
             assert rt._llm.judgements == rt._llm.actor_count == 0

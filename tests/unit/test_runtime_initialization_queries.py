@@ -26,7 +26,7 @@ from tests.integration.test_minimal_loop import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("query", ["get_session", "get_task", "list_tasks", "get_agent"])
+@pytest.mark.parametrize("query", ["get_session", "get_task", "list_loaded_tasks", "get_agent"])
 async def test_dispatch_callback_can_query_same_session(query):
     rt = runtime()
     h = await container(rt)
@@ -37,8 +37,8 @@ async def test_dispatch_callback_can_query_same_session(query):
             result = await rt.get_session(h.session_id)
         elif query == "get_task":
             result = await rt.get_task(h.session_id, event.task_id)
-        elif query == "list_tasks":
-            result = await rt.list_tasks(h.session_id)
+        elif query == "list_loaded_tasks":
+            result = await rt.list_loaded_tasks(h.session_id)
         else:
             result = await rt.get_agent(h.root_agent_id)
         results.append(result)
@@ -53,7 +53,7 @@ async def test_dispatch_callback_can_query_same_session(query):
             assert results[0].data.session_id == h.session_id
         elif query == "get_task":
             assert results[0].data.task_id == handle.task_id
-        elif query == "list_tasks":
+        elif query == "list_loaded_tasks":
             assert handle.task_id in {row.data.task_id for row in results[0]}
         else:
             assert results[0].data.agent_id == h.root_agent_id
@@ -76,9 +76,8 @@ async def test_successor_task_query_uses_cross_task_history_without_loading():
     )
     assert rt.forget_session(h.session_id)
     head = await rt.event_store.committed_head(h.session_id)
-    rows = {r.data.task_id: r for r in await rt.list_tasks(h.session_id)}
+    assert await rt.list_loaded_tasks(h.session_id) == []
     result = await rt.get_task(h.session_id, "successor")
-    assert result.data == rows["successor"].data
     assert result.data.title == "new goal" and result.data.status == "PENDING"
     assert result.source == "events" and not result.loaded
     assert result.committed_position == head
@@ -246,9 +245,10 @@ async def test_slim_dependency_queries_keep_details_after_loading():
     slim = rt._task_managers[h.session_id].get_task("dep")
     assert not slim.details_complete and slim.outputs is None
     result = await rt.get_task(h.session_id, "dep")
-    rows = {r.data.task_id: r for r in await rt.list_tasks(h.session_id)}
-    assert result.data == before == rows["dep"].data
-    assert result.source == rows["dep"].source == "events"
+    rows = {r.data.task_id: r for r in await rt.list_loaded_tasks(h.session_id)}
+    assert result.data == before
+    assert "dep" not in rows
+    assert result.source == "events"
     assert not slim.details_complete  # Queries do not hydrate runtime owners.
 
 
@@ -449,7 +449,7 @@ async def test_cold_existing_id_cannot_be_created_twice():
 
 
 @pytest.mark.asyncio
-async def test_task_queries_merge_live_state_and_history():
+async def test_task_queries_keep_cold_details_out_of_hot_lists():
     rt = runtime()
     h = await container(rt)
     await append(rt.event_store, h.session_id,
@@ -462,8 +462,9 @@ async def test_task_queries_merge_live_state_and_history():
     assert old.source == "events" and old.data.outputs == {"answer": 42}
     live = await rt.get_task(h.session_id, handle.task_id)
     assert live.source == "memory"
-    rows = await rt.list_tasks(h.session_id)
-    assert {r.data.task_id for r in rows} == {"old", handle.task_id}
+    rows = await rt.list_loaded_tasks(h.session_id)
+    assert {r.data.task_id for r in rows} == {handle.task_id}
+    assert all(r.source == "memory" and r.loaded for r in rows)
     old.data.outputs["answer"] = 0
     assert (await rt.get_task(h.session_id, "old")).data.outputs == {"answer": 42}
 
@@ -494,7 +495,7 @@ async def test_historical_task_survives_pruned_recovery_snapshot():
                         cut=await rt.event_store.committed_head(h.session_id))
     assert rt.forget_session(h.session_id)
     assert (await rt.get_task(h.session_id, "old")).data.outputs == "kept in history"
-    assert [row.data.task_id for row in await rt.list_tasks(h.session_id)] == ["old"]
+    assert await rt.list_loaded_tasks(h.session_id) == []
     assert not rt._task_managers
 
 

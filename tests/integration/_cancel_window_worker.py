@@ -36,8 +36,10 @@ async def worker(path, stage, fault, recovering=False):
                 rows = await original_read(*args, **kwargs)
                 if (stage == "observe" and not fault.startswith("run_") and not recovering
                         and set(kwargs.get("include_types") or ()) ==
-                        {"ObserveRequested", *TASK_STATUS_BY_EVENT} and not report_waiting.is_set()
-                        and any(r.event.type == "ObserveRequested" and r.event.task_id == grand for r in rows)):
+                        set(TASK_STATUS_BY_EVENT) and not report_waiting.is_set()
+                        and kwargs.get("related_task_id") == grand):
+                    assert kwargs["after_position"] > 0
+                    assert kwargs["through_position"] >= kwargs["after_position"]
                     assert not any(r.event.type == "TaskCanceled" and r.event.task_id == grand for r in rows)
                     report_waiting.set()
                 return rows

@@ -1120,7 +1120,8 @@ async def request(state, ctx, boundary, judging):
     mode = options.get("execution_mode", execution.mode.value)
     if not options.get("observe_id"):
         options.update(observe_id=generate_id("obs"), segment_end_at=now_utc().isoformat(),
-                       execution_mode=mode, boundary=boundary, judge_task=judging)
+                       execution_mode=mode, boundary=boundary, judge_task=judging,
+                       actor_run_id=_actor_run_id(state))
         if boundary == "max_turns":
             options["act_turns"] = act_turns(state)
         await capture_context(state, ctx, options)
@@ -1319,11 +1320,19 @@ def act_turns(state):
     return state.extra.get(ACT_TURNS_USED_KEY, getattr(state.agent.loop_config, "max_turns_per_act", 0))
 
 
+def _actor_run_id(state):
+    """A recovered observer may run under a new ID; keep its original actor identity."""
+    extra = getattr(state, "extra", {})
+    return (extra.get("actor_run_id") or extra.get("observe_recovery", {}).get("actor_run_id")
+            or state.run_id)
+
+
 def make_observe_request(state, boundary, judging, *, mode="background", reply_anchor=None,
                          replaces_observe_id=""):
     """Build an intent, also embedded atomically in HitlOpened for park."""
     return {"observe_id": generate_id("obs"), "task_id": state.task.id,
             "agent_id": state.agent.id, "boundary": boundary,
+            "actor_run_id": _actor_run_id(state),
             "segment_end_at": now_utc().isoformat(), "execution_mode": mode,
             "judge_task": judging,
             **({"reply_anchor": dict(reply_anchor)} if reply_anchor else {}),
@@ -1368,22 +1377,30 @@ async def wait_disposition(state, ctx, ready):
     options = _execution(ctx).options
     if not options.get("verdict") or options.get("settled"):
         return
-    from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT
+    from ctx_weft.core.control.reducers import TASK_STATUS_BY_EVENT, read_observe_request
+    from ctx_weft.protocols.events import EventReadProjection
+    cursor = state.extra.get("observe_disposition_position")
+    if cursor is None:
+        request, _ = await read_observe_request(
+            ctx.event_store, state.session.id, state.task.id, state.extra["observe_id"],
+            through_position=await ctx.event_store.committed_head(state.session.id),
+            request_event_id=options.get("request_event_id", ""))
+        cursor = request.position
+    projection = EventReadProjection(dict.fromkeys(TASK_STATUS_BY_EVENT, (("reason",),)))
     while True:
         ready.clear()
-        # Subscribe before reading: a disposition committed before subscription is
-        # visible here; one committed during/after this read wakes the subscriber.
-        rows = await ctx.event_store.read_range(state.session.id, include_types=(
-            EventType.OBSERVE_REQUESTED, *TASK_STATUS_BY_EVENT))
-        requested = False
+        head = await ctx.event_store.committed_head(state.session.id)
+        rows = await ctx.event_store.read_range(
+            state.session.id, after_position=cursor, through_position=head,
+            include_types=tuple(TASK_STATUS_BY_EVENT), related_task_id=state.task.id,
+            projection=projection)
         for row in rows:
             event = row.event
-            if event.type == EventType.OBSERVE_REQUESTED and event.payload.get("observe_id") == state.extra["observe_id"]:
-                requested = True
-            elif (requested and event.task_id == state.task.id and event.type in TASK_STATUS_BY_EVENT
-                  and event.payload.get("reason") != "crash_recovery"):
+            if event.task_id == state.task.id and event.payload.get("reason") != "crash_recovery":
                 options["settled"] = True
                 return
+        cursor = head
+        state.extra["observe_disposition_position"] = cursor
         await ready.wait()
 
 

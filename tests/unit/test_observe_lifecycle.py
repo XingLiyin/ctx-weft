@@ -1,4 +1,6 @@
 """Observation stages stay durable across errors, retries and old event names."""
+from dataclasses import replace
+
 import pytest
 
 from ctx_weft.core.control.reducers import reduce_events, deserialize_view, serialize_view
@@ -138,6 +140,7 @@ async def test_parked_intent_is_reused_without_separate_request(fake_state_ctx, 
     intent = make_observe_request(state, "finish_park", True)
     parked = make_event(state, EventType.HITL_OPENED,
                         {"task_id": state.task.id, "observe_request": intent})
+    parked = replace(parked, run_id=None)  # HitlService writes a task-scoped envelope.
     seen = {}
     def capture_start(name, state, ctx, *, options):
         seen.update(options)
@@ -147,6 +150,35 @@ async def test_parked_intent_is_reused_without_separate_request(fake_state_ctx, 
     assert seen == intent
     info = reduce_events([parked], state.run_id).pending_observe[intent["observe_id"]]
     assert info["boundary"] == "finish_park"
+    assert info["actor_run_id"] == state.run_id
+    assert deserialize_view(serialize_view(reduce_events([parked], state.run_id))).pending_observe == {
+        intent["observe_id"]: info}
+    from ctx_weft.core.control.startup_view import (
+        STARTUP_PROJECTION, StartupRecoveryView, apply_startup_events, startup_snapshot_blob,
+    )
+    from ctx_weft.protocols.events import StoredEvent
+    from ctx_weft.providers.events.store.projection import project_stored_event
+
+    projected = project_stored_event(StoredEvent(parked, 1), STARTUP_PROJECTION)
+    startup = apply_startup_events([projected.event], StartupRecoveryView(
+        run_id=state.session.id, session_id=state.session.id, task_id="", agent_id=""))
+    assert startup.pending_observe[intent["observe_id"]]["actor_run_id"] == state.run_id
+    compact = startup_snapshot_blob(serialize_view(reduce_events([parked], state.run_id)))
+    assert compact["pending_observe"][intent["observe_id"]]["actor_run_id"] == state.run_id
+
+
+@pytest.mark.parametrize("boundary", ["plain_text", "interrupt"])
+@pytest.mark.parametrize("recovery", [False, True])
+def test_new_parked_request_keeps_original_actor_identity(fake_state_ctx, boundary, recovery):
+    from ctx_weft.core.loop.steps.observe import make_observe_request
+
+    state, _ = fake_state_ctx
+    original_run = state.run_id
+    if recovery:
+        state.extra["actor_run_id"] = original_run
+        state.run_id = "restarted-observer"
+    intent = make_observe_request(state, boundary, boundary == "plain_text")
+    assert intent["actor_run_id"] == original_run
 
 
 async def test_failed_foreground_wakes_close_report_without_applying(fake_state_ctx, monkeypatch):

@@ -15,7 +15,8 @@ async def public_task_detail(store, session_id, task_id, task, head):
     if not task_id:
         return None
     if task is None or not task.details_complete:
-        task = await read_task_view(store, session_id, task_id, through_position=head)
+        task = await read_task_view(store, session_id, task_id, through_position=head,
+                                   include_observe_count=False)
     # Legacy logs can retain an agent's task reference without its TaskCreated.
     # A missing body remains absent; explicit get_task still reports TaskNotFound.
     return task_detail(task) if task is not None else None

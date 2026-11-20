@@ -1,5 +1,5 @@
 
-from tests._recovery import recover_fixture_session
+from tests._recovery import recover_fixture_session, query_committed_fixture_tasks
 """All four observe stages on actual foreground and recap execution paths."""
 
 import asyncio
@@ -70,7 +70,7 @@ async def test_foreground_and_recap_real_crash(tmp_path, mode, snapshot, cut):
             tm = rt._task_managers.get("crash-session")
             while tm and tm._background_asyncio_tasks:
                 await asyncio.gather(*list(tm._background_asyncio_tasks))
-            tasks = await rt.list_tasks("crash-session")
+            tasks = await query_committed_fixture_tasks(rt, "crash-session")
             assert [(t.data.status, t.data.outputs) for t in tasks] == [("FINISHED", "done")]
             view = await rebuild_view(store, "crash-session")
             assert not view.pending_observe and not view.open_runs
@@ -128,7 +128,7 @@ async def test_crash_again_while_applying_foreground_result(tmp_path, mode, snap
             tm = rt._task_managers.get("crash-session")
             while tm and tm._background_asyncio_tasks:
                 await asyncio.gather(*list(tm._background_asyncio_tasks))
-            tasks = await rt.list_tasks("crash-session")
+            tasks = await query_committed_fixture_tasks(rt, "crash-session")
             assert [(t.data.status, t.data.outputs) for t in tasks] == [("FINISHED", "done")]
             rows = await store.read_range("crash-session")
             assert_lifecycles(rows)
@@ -159,7 +159,7 @@ async def test_requeued_foreground_decision_enqueues_after_crash(tmp_path, snaps
                         await asyncio.gather(*list(tm._background_asyncio_tasks))
                     else:
                         await asyncio.sleep(0.01)
-            tasks = await rt.list_tasks("crash-session")
+            tasks = await query_committed_fixture_tasks(rt, "crash-session")
             assert [t.data.status for t in tasks] == ["FINISHED"]
             rows = await store.read_range("crash-session")
             assert sum(r.event.type == EventType.TASK_REQUEUED for r in rows) == 1

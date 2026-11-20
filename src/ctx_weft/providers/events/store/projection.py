@@ -11,7 +11,53 @@ from ctx_weft.protocols.events import (
     ProjectedEvent,
     ProjectedStoredEvent,
     StoredEvent,
+    EventValueSource,
+    StoredEventValue,
 )
+
+
+def validate_value_page(sources, through_position, after, limit):
+    if (not sources or any(not isinstance(kind, str) or not kind
+                          or not isinstance(source, EventValueSource) for kind, source in sources.items())
+            or type(through_position) is not int or through_position < 0
+            or type(limit) is not int or limit <= 0
+            or after is not None and (not isinstance(after, StoredEventValue)
+                or type(after.position) is not int or not 0 < after.position <= through_position
+                or not isinstance(after.value, str) or not after.value)):
+        raise ValueError("Invalid distinct value page")
+
+
+def event_string_value(event, source):
+    value = event.payload
+    for key in source.path:
+        value = value.get(key) if isinstance(value, dict) else None
+    if not isinstance(value, str) or not value:
+        value = getattr(event, source.fallback_field, None) if source.fallback_field else None
+    return value if isinstance(value, str) and value else None
+
+
+def validate_read_selection(payload_equals, event_ids=()):
+    """Validate generic read predicates equally for all storage backends."""
+    if not isinstance(event_ids, tuple) or not all(isinstance(key, str) and key for key in event_ids):
+        raise ValueError("event_ids requires a tuple of nonempty strings")
+    if payload_equals is not None:
+        path, expected = payload_equals
+        if (not isinstance(path, tuple) or not path
+                or not all(isinstance(key, str) and key for key in path)
+                or not isinstance(expected, str)):
+            raise ValueError("payload_equals requires a nonempty string path and a string value")
+
+
+def payload_matches(payload, predicate):
+    if predicate is None:
+        return True
+    path, expected = predicate
+    value = payload
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return False
+        value = value[key]
+    return isinstance(value, str) and value == expected
 
 
 def projection_tree(paths: tuple[tuple[str, ...], ...]) -> dict | None:

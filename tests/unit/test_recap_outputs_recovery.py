@@ -1,12 +1,30 @@
 """Recover final output from actor response facts at the original intent."""
+from datetime import UTC, datetime
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
 
 import pytest
 
 from ctx_weft.core.capabilities.control_tools import FINISH_TASK_NAME
 from ctx_weft.core.runtime import CtxWeftRuntime
-from ctx_weft.protocols.events import EventOrigin, EventType
+from ctx_weft.protocols.events import Event, EventOrigin, EventType
+from ctx_weft.providers.events import InMemoryEventStore
+
+
+async def stored_runtime(rows):
+    store = InMemoryEventStore()
+    events = []
+    for i, row in enumerate(rows):
+        ev = row.event
+        payload = dict(ev.payload)
+        if ev.type == EventType.OBSERVE_REQUESTED:
+            payload["task_id"] = "task"
+        elif ev.type == EventType.HITL_OPENED:
+            payload["observe_request"] = {**payload["observe_request"], "task_id": "task"}
+        events.append(Event(id=f"e{i}", run_id=ev.run_id, session_id="session", sequence=i,
+            type=ev.type, task_id=getattr(ev, "task_id", "task"),
+            origin=getattr(ev, "origin", ""), payload=payload, timestamp=datetime.now(UTC)))
+    await store.append_batch("session", "history", events)
+    return NS(event_store=store)
 
 
 def response(text, *, run="actor", task="task", origin=EventOrigin.LOOP_ACT, summary=None):
@@ -33,8 +51,7 @@ async def test_restore_output_uses_original_actor_run_and_shared_composition(nes
                            run_id=None if nested else "actor",
                            payload={"observe_request": intent} if nested else intent)))
     rows.append(response("later reply"))
-    runtime = NS(event_store=NS(read_range=AsyncMock(return_value=rows)),
-                 _historical_task_view=AsyncMock(return_value=NS(tasks={})))
+    runtime = await stored_runtime(rows)
     task = NS(id="task", outputs=None, suspend_requested=False)
     first = await CtxWeftRuntime._restore_observe_outputs(runtime, "session", task, intent)
     assert task.outputs == expected
@@ -45,7 +62,7 @@ async def test_restore_output_uses_original_actor_run_and_shared_composition(nes
 
 
 async def test_missing_intent_does_not_use_unrelated_response():
-    runtime = NS(event_store=NS(read_range=AsyncMock(return_value=[response("unrelated")])))
+    runtime = await stored_runtime([response("unrelated")])
     task = NS(id="task", outputs=None)
     with pytest.raises(RuntimeError, match="Missing observe scheduling intent"):
         await CtxWeftRuntime._restore_observe_outputs(runtime, "session", task, {"observe_id": "missing"})
@@ -59,8 +76,7 @@ async def test_usage_only_completion_is_not_restored_as_actor_output(reason):
     aborted.event.payload.update(finish_reason=reason, usage={"prompt_tokens": 5})
     rows = [response("actual answer"), aborted, NS(position=42, event=NS(
         type=EventType.OBSERVE_REQUESTED, run_id="actor", payload=intent))]
-    runtime = NS(event_store=NS(read_range=AsyncMock(return_value=rows)),
-                 _historical_task_view=AsyncMock(return_value=NS(tasks={})))
+    runtime = await stored_runtime(rows)
     task = NS(id="task", outputs=None)
     extra = await CtxWeftRuntime._restore_observe_outputs(runtime, "session", task, intent)
     assert task.outputs == "actual answer"

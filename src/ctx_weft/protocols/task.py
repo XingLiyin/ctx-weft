@@ -3,6 +3,16 @@
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from ctx_weft.protocols.content import ContentPart
+
+
+@dataclass(frozen=True)
+class TaskIdPage:
+    """Committed task identities in creation order; details are queried separately."""
+
+    ids: tuple[str, ...]
+    next_cursor: str | None
+    committed_position: int
 
 
 @dataclass(frozen=True)
@@ -24,3 +34,5 @@ class TaskDetail:
     failure_retry_count: int | None = None
     blocked_by_task_id: str | None = None
     finalized: bool = False
+    user_prompt: str | list[ContentPart] | None = None
+    settings_type: str = ""

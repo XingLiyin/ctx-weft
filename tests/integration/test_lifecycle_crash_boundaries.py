@@ -1,5 +1,5 @@
 
-from tests._recovery import recover_fixture_session
+from tests._recovery import recover_fixture_session, query_committed_fixture_tasks
 """Crash real scheduling and trip paths; assert durable ordering after restart."""
 
 import asyncio
@@ -62,6 +62,7 @@ async def test_observe_real_process_crash(tmp_path, snapshot, mode, cut):
                 assert len(before.pending_observe) == 1
                 intent = next(iter(before.pending_observe.values()))
                 assert intent["observe_id"] and intent["segment_end_at"]
+                assert intent["actor_run_id"]
             rt = await restart(store, memory, mode, snapshot)
             view = await rebuild_view(store, "crash-session")
             root = view.sessions["crash-session"].root_agent_id
@@ -71,13 +72,18 @@ async def test_observe_real_process_crash(tmp_path, snapshot, mode, cut):
                 await asyncio.gather(*list(tm._background_asyncio_tasks))
             final = await rebuild_view(store, "crash-session")
             assert not final.pending_observe
-            tasks = await rt.list_tasks("crash-session")
+            tasks = await query_committed_fixture_tasks(rt, "crash-session")
             rows = await store.read_range("crash-session")
+            actor_runs = {r.event.run_id for r in rows
+                          if r.event.type == EventType.RUN_STARTED and r.event.origin == "runtime"}
             for row in rows:
                 if row.event.type == EventType.OBSERVE_REQUESTED:
                     assert "outputs" not in row.event.payload
+                    assert row.event.payload["actor_run_id"] in actor_runs
                 if row.event.type == EventType.HITL_OPENED and row.event.payload.get("observe_request"):
                     assert "outputs" not in row.event.payload["observe_request"]
+                    assert row.event.run_id is None
+                    assert row.event.payload["observe_request"]["actor_run_id"] in actor_runs
             expected = "AWAITING_HUMAN" if mode == "interrupt" else "FINISHED"
             assert tasks and all(row.data.status == expected for row in tasks), {
                 "tasks": [(row.data.status, row.data.outputs) for row in tasks],
@@ -132,7 +138,7 @@ async def test_crash_again_during_observe_recovery(tmp_path, snapshot, cut):
                 await asyncio.gather(*list(tm._background_asyncio_tasks))
             view = await rebuild_view(store, "crash-session")
             assert not view.pending_observe
-            tasks = await rt.list_tasks("crash-session")
+            tasks = await query_committed_fixture_tasks(rt, "crash-session")
             assert tasks and all(t.data.status == "FINISHED" and t.data.outputs == "done" for t in tasks)
             rows = await store.read_range("crash-session")
             assert sum(r.event.type == EventType.TASK_FINISHED for r in rows) == 1
@@ -161,7 +167,7 @@ async def test_finalized_success_survives_changed_observer_on_restart(tmp_path, 
             tm = rt._task_managers["crash-session"]
             if tm._background_asyncio_tasks:
                 await asyncio.gather(*list(tm._background_asyncio_tasks))
-            tasks = await rt.list_tasks("crash-session")
+            tasks = await query_committed_fixture_tasks(rt, "crash-session")
             assert [t.data.status for t in tasks] == ["FINISHED"]
 
 

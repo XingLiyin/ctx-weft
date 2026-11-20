@@ -119,8 +119,6 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
         "新 task 的 run 仍在等上一轮折叠 —— 两道屏障没拆干净，人回复还在为后台往返买单"
     )
 
-    release.set()
-    await pending
     handle2 = await asyncio.wait_for(send, timeout=30)
     await handle2.wait_for_finish(timeout=30)
 
@@ -131,3 +129,7 @@ async def test_new_task_run_does_not_wait_for_previous_tasks_pending_fold():
         "新一轮有 LLM 调用发生在折叠落地之后 —— 屏障可能被重新引入，"
         f"逐次观测到的 fold_done={llm_saw_fold_done}"
     )
+    # Keep the old fold blocked until this task finishes. Releasing it after
+    # only the first new LLM call would race with later calls in the same run.
+    release.set()
+    await pending

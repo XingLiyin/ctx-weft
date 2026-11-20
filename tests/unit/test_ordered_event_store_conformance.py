@@ -241,7 +241,7 @@ def test_ordered_commit_methods_are_mandatory():
     store 就多一份必须写对的东西，而本仓的记录是——每一个"顺手加上"的方法后来都成了要清的
     形状，或者生出一道能力探测的门。
     """
-    assert EventStore.__abstractmethods__ == {
+    assert EventStore.__abstractmethods__ == {"read_distinct_values",
         "append_batch", "read_range", "committed_head",
         # 它后来也升为必需：恢复第一步无条件要取最新快照，做成可选就又要在 core 里探一次
         # 能力——那个坏设计在这个仓生出过三次「两分支 + 两失败形态」。

@@ -49,6 +49,7 @@ _AGENT_FIELDS = _fields("id", "status", "status_reason", "current_task_id", "tem
 _HITL_FIELDS = _fields("id", "hitl_id", "form", "session_id", "task_id", "agent_id", "tenant_id",
                        "delivery", "tool_call_id", "stage", "outcome")
 _OBSERVE_FIELDS = _fields("task_id", "agent_id", "observe_id", "judge_task", "observe_index", "started",
+                         "request_event_id", "actor_run_id",
                          "reply_anchor", "replaces_observe_id", "fork_base_record_ids", "fork_checkpoint")
 
 _PAYLOAD_FIELDS = {

@@ -23,6 +23,9 @@ def task_detail(task) -> TaskDetail:
         task.status, task.title, task.description, deepcopy(task.outputs),
         task.error, task.error_code, task.created_at, task.finished_at,
         task.failure_retry_count, task.blocked_by_task_id, task.finalized,
+        deepcopy(task.user_prompt),
+        (task.settings_raw.get("_type", "NormalTaskSettings") if isinstance(task, TaskView)
+         else type(task.settings).__name__),
     )
 
 

@@ -29,7 +29,7 @@ result = await runtime.initialize(session_id)
 首次调用仍返回摘要。报告是初始化时的固定切面，当前状态应通过查询接口获取。
 Host 应在执行前同步恢复报告到自己的投影；投影失败后的重试由 Host 保留待完成的写入。
 
-`get_session`、`get_task`、`list_tasks`、`get_agent`、`list_agents`、`list_pending_hitl`
+`get_session`、`get_task`、`list_loaded_tasks`、`get_agent`、`list_agents`、`list_pending_hitl`
 均为异步查询。单条返回 `QueryResult`，列表返回 `list[QueryResult]`：
 
 ```python
@@ -40,9 +40,19 @@ agents = await runtime.list_agents(session_id=session_id)
 ```
 
 已装填对象从内存读取；未装填或未保留的历史对象从事件流推断，查询不触发装填。
+`list_loaded_tasks(session_id)` 仅列出该会话 TaskManager 中详情完整的热任务，不读取事件或快照；
+会话未装填时返回空列表，快照中的精简依赖记录不作为完整任务返回。历史任务详情使用
+`get_task(session_id, task_id)` 按目标任务补读，不通过任务列表枚举历史。
+完整任务目录使用 `list_task_ids(session_id, cursor=None, limit=100)`，返回 `TaskIdPage`
+的 `ids`、`next_cursor` 和 `committed_position`。冷、热会话使用相同的已提交创建事实；
+按首次创建 position 升序去重分页，每页最多 500 个。后续页原样传回游标，最后一页
+`next_cursor=None`。一轮遍历固定提交上界，新任务留待下次遍历；详情仍由 `get_task`
+按需查询最新事实。未提交任务不进入目录；不装填、不执行，也不读取任务正文。
+自定义 EventStore 需实现协议的 `read_distinct_values`：按指定字符串字段首次出现位置
+去重后再分页；core 不依赖具体 Provider，也不回退成全量事件正文查询。
 `source` 为 `memory` / `events`，事件结果带 `committed_position`。
 不指定 Session 的列表只枚举已装填对象；冷 Agent 查询需要 `session_id` 定址。
-恢复快照可能裁掉终态任务，历史任务查询会补读原始任务事件。
+恢复快照可能裁掉终态任务，历史任务详情会补读该任务的原始事件。
 `get_session().data.state` 是完整会话查询快照：`root_agent` 和按 Agent ID 排序的 `agents` 复用 `AgentDetail`，`root_task` 和 `AgentState.current_task` 复用 `TaskDetail`，`pending_hitl` 复用完整 `HitlRequestView`；同时包含 `goal`、失败计数和熔断标记。任务包含正文、输出、错误码、错误正文、失败时重试次数、阻塞任务和收尾标记，无需再补查根任务。保留全部 Agent 的中断原因，宿主选择展示方式；原因未知为空字符串，旧日志没有任务记录时任务对象为 `None`。
 
 `get_agent().data.state` 使用同一 `AgentState`；模型选择仍在详情的 `llm_account`、`llm_model`、`llm_config` 中。`initialize()` 返回同一完整 state，冷恢复与实时查询共用公开对象构造逻辑。`TaskDetail` 定义在 `ctx_weft.protocols.task`，也可从顶层包导入。旧的扁平根任务字段和 HITL 计数没有兼容别名。会话级聊天路由和状态到界面的映射由宿主实现。RoundCommitted/RoundDiscarded 仍是瞬态通知，不参与恢复重放。

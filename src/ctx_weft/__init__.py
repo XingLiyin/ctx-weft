@@ -31,7 +31,7 @@ from ctx_weft.protocols.agent import AgentDetail, AgentState, AgentSummary, Comp
 from ctx_weft.protocols.events import EventStore
 from ctx_weft.protocols.hitl import HitlReply, HitlRequestView
 from ctx_weft.protocols.runtime import InitializationReport, PromptDiagnostic, QueryResult, RuntimeClosedError, RuntimeShutdownError, ShutdownReport, SessionDetail, SessionInitializationResult, SessionStateSummary
-from ctx_weft.protocols.task import TaskDetail
+from ctx_weft.protocols.task import TaskDetail, TaskIdPage
 from ctx_weft.protocols.runtime import SessionForkResult, MemorySeedConflictError, ForkCheckpointUnavailableError
 from ctx_weft.providers.events import InMemoryEventStore
 
@@ -55,6 +55,7 @@ __all__ = [
     "QueryResult",
     "SessionDetail",
     "TaskDetail",
+    "TaskIdPage",
     # 运行时配置：`CtxWeftRuntime(config=...)` 要求宿主传它，故它必须在受支持的
     # 导出面上——否则「只从顶层与 protocols 取名字」这条纪律对它无解，宿主只能深挖
     # `core.models.config`（迁移期实测踩到）。

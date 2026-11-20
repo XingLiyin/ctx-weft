@@ -199,7 +199,7 @@ async def test_copies_saved_candidates_superseded_and_inline_without_running(mon
     assert all(r.id != "source-user" for r in records)
     state = (await core.get_session(result.session_id)).data.state
     assert state.root_agent.state.status == "idle" and state.root_task is None
-    assert not (await core.list_tasks(result.session_id))
+    assert not (await core.list_loaded_tasks(result.session_id))
     detail = (await core.get_agent(result.root_agent_id, session_id=result.session_id)).data
     assert detail.llm_model == "historic-model" and detail.llm_config.reasoning_effort == "high"
     rows = await core.event_store.read_range(result.session_id)
@@ -225,7 +225,7 @@ async def test_tool_pair_remains_history_with_new_link_identity():
     assert len(calls) == len(results) == 1
     assert calls[0].metadata["tool_calls"][0]["id"] == results[0].metadata["tool_call_id"]
     assert results[0].metadata["tool_call_id"] != "call-source"
-    assert not await core.list_tasks("branch")
+    assert not await core.list_loaded_tasks("branch")
     await core.close()
 
 
