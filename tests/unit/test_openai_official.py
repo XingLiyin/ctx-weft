@@ -84,6 +84,7 @@ async def test_sdk_request_and_trailing_usage(base):
     assert "".join(chunk.text for chunk in chunks if chunk.kind == "token") == "hello"
     usage = next(chunk.usage for chunk in chunks if chunk.kind == "usage")
     assert (usage.prompt_tokens, usage.input_tokens, usage.cache_read_tokens) == (100, 60, 40)
+    assert usage.cache_write_tokens == 0
     assert (usage.completion_tokens, usage.reasoning_tokens, usage.total_tokens) == (30, 10, 130)
     assert [chunk.kind for chunk in chunks][-2:] == ["usage", "done"]
     assert client._sdk.is_closed()
@@ -137,6 +138,9 @@ async def test_nonstreaming_uses_sdk_completion():
     assert seen[0]["stream"] is False and "stream_options" not in seen[0]
     assert "max_completion_tokens" not in seen[0]
     assert chunks[0].text == "answer"
+    usage = next(chunk.usage for chunk in chunks if chunk.kind == "usage")
+    assert (usage.prompt_tokens, usage.input_tokens, usage.cache_read_tokens) == (100, 60, 40)
+    assert usage.cache_write_tokens == 0
     assert chunks[-1].kind == "done"
 
 

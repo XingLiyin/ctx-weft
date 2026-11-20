@@ -278,5 +278,7 @@ def _map_usage(usage: Any) -> LLMUsage:
         completion_tokens=usage.completion_tokens,
         total_tokens=usage.total_tokens,
         cache_read_tokens=getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0,
+        # Chat Completions has no separately accounted cache-write input.
+        cache_write_tokens=0,
         reasoning_tokens=getattr(usage.completion_tokens_details, "reasoning_tokens", 0) or 0,
     )
